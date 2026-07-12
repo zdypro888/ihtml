@@ -1,0 +1,12 @@
+# 运行时数据
+uidata/
+*.log
+
+# 系统与编辑器
+.DS_Store
+.idea/
+.vscode/
+
+# 构建产物
+dist/
+*.test

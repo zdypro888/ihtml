@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="zh" class="ihtml-standalone">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{TITLE}}</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='0.9em' font-size='90'%3E%E2%9C%A6%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="ihtml.css">
+<script>
+/* 首帧防闪烁: 在内核加载前按本地缓存的主题偏好先置暗色类(仅独立页面)。 */
+(function () {
+  try {
+    var t = JSON.parse(localStorage.getItem('ihtml.theme') || '{}');
+    var mode = t.mode || 'auto';
+    var dark = mode === 'dark' || (mode === 'auto' && matchMedia('(prefers-color-scheme: dark)').matches);
+    if (dark) document.documentElement.classList.add('ihtml-dark');
+    if (t.primary) document.documentElement.style.setProperty('--ui-primary', t.primary);
+  } catch (e) { /* 忽略 */ }
+})();
+</script>
+</head>
+<body>
+<div id="app" data-ihtml-standalone></div>
+<script src="ihtml.js"></script>
+</body>
+</html>
