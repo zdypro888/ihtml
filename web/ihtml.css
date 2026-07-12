@@ -310,6 +310,55 @@ html.ihtml-standalone.ihtml-embed .ihtml-root { min-height: 0; }
 .ihtml-app { min-height: inherit; }
 .ihtml-app [data-ihtml-id] { position: relative; }
 
+/* ---------- 拖拽排版网格 ---------- */
+.ihtml-grid {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: var(--ui-gap);
+  align-items: start;
+  padding: var(--ui-gap);
+}
+.ihtml-grid > .ihtml-widget { min-width: 0; position: relative; }
+.ihtml-grid > :not(.ihtml-widget) { grid-column: 1 / -1; }
+.ihtml-mobile .ihtml-grid > .ihtml-widget {
+  grid-column: 1 / -1 !important; /* 手机强制单列自然高度 */
+  height: auto !important;
+  overflow: visible !important;
+}
+
+/* 布局编辑态 */
+.ihtml-layout-editing .ihtml-widget {
+  outline: 1.5px dashed var(--ui-primary-border);
+  outline-offset: 3px;
+  border-radius: var(--ui-radius);
+}
+.ihtml-w-move {
+  position: absolute; top: 0; left: 0; z-index: 6;
+  padding: 3px 12px; max-width: 72%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 11.5px; font-weight: 600;
+  border-radius: var(--ui-radius) 0 10px 0;
+  background: var(--ui-primary); color: var(--ui-primary-contrast);
+  cursor: grab; user-select: none; touch-action: none;
+  opacity: 0.92;
+}
+.ihtml-w-move:active { cursor: grabbing; }
+.ihtml-w-size {
+  position: absolute; right: 0; bottom: 0; z-index: 6;
+  width: 24px; height: 24px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 13px; color: var(--ui-primary);
+  background: var(--ui-primary-soft);
+  border-radius: 10px 0 var(--ui-radius) 0;
+  cursor: nwse-resize; user-select: none; touch-action: none;
+}
+.ihtml-w-dragging { opacity: 0.6; }
+.ihtml-layout-done {
+  position: fixed; left: 50%; transform: translateX(-50%);
+  bottom: calc(20px + env(safe-area-inset-bottom)); z-index: 9350;
+  box-shadow: var(--ui-shadow);
+}
+
 /* Item 入场过渡 */
 .ihtml-enter { animation: ihtml-item-in 0.18s ease; }
 @keyframes ihtml-item-in { from { opacity: 0; transform: translateY(4px); } }

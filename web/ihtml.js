@@ -718,6 +718,7 @@
         if (out) {
           for (const it of sortedItems(out.items || [])) await applyItem(it);
         }
+        await grid.load();
         progress.done();
         if (!registry.size) emptyState.show(); else emptyState.hide();
         shell.sidebar(false);
@@ -730,6 +731,204 @@
         nav.activate(page, params);
       });
     }
+
+    /* ---------- 拖拽排版(grid): 用户直接拖块换序/拉宽高, 布局存 KV(独立于 Item 内容) ----------
+     * 数据: kv "layout.<页面名|root>" = { order: [itemId...], items: { id: {w(1-12列), h(px, 可选)} } }
+     * 只作用于主区域的 html Item 容器; 移动端强制单列且不可编辑。 */
+    const grid = {
+      cfgs: {},
+      editing: false,
+      saveTimer: 0,
+      doneBtn: null,
+
+      key() { return 'layout.' + (nav.currentPage || 'root'); },
+      cfg() {
+        const k = this.key();
+        if (!this.cfgs[k]) this.cfgs[k] = { order: [], items: {} };
+        return this.cfgs[k];
+      },
+      active() {
+        const c = this.cfg();
+        return this.editing || c.order.length > 0 || Object.keys(c.items).length > 0;
+      },
+      container() { return shell.parentFor(''); },
+      widgets() {
+        return Array.from(this.container().children)
+          .filter((n) => n.tagName === 'SECTION' && n.dataset && n.dataset.ihtmlId !== undefined);
+      },
+
+      async load() {
+        const k = this.key();
+        try {
+          const v = await kv.get(k);
+          this.cfgs[k] = v && typeof v === 'object' ? { order: v.order || [], items: v.items || {} } : { order: [], items: {} };
+        } catch { this.cfgs[k] = { order: [], items: {} }; }
+        this.apply();
+      },
+      saveSoon() {
+        clearTimeout(this.saveTimer);
+        this.saveTimer = setTimeout(() => {
+          if (destroyed) return;
+          kv.set(this.key(), this.cfg()).catch((e) => ui.toast(String(e.message || e), 'error'));
+        }, 600);
+      },
+
+      apply() {
+        if (destroyed) return;
+        const box = this.container();
+        const isOn = this.active() && env.mode !== 'mobile';
+        box.classList.toggle('ihtml-grid', this.active());
+        const c = this.cfg();
+        const pos = {};
+        c.order.forEach((id, i) => { pos[id] = i; });
+        const ws = this.widgets().sort((a, b) => {
+          const ia = pos[a.dataset.ihtmlId] !== undefined ? pos[a.dataset.ihtmlId] : 1000 + Number(a.dataset.ihtmlOrder || 0);
+          const ib = pos[b.dataset.ihtmlId] !== undefined ? pos[b.dataset.ihtmlId] : 1000 + Number(b.dataset.ihtmlOrder || 0);
+          return ia - ib;
+        });
+        for (const w of ws) {
+          box.appendChild(w); // 按布局顺序重排 DOM
+          const s = c.items[w.dataset.ihtmlId] || {};
+          if (this.active()) {
+            w.classList.add('ihtml-widget');
+            w.style.gridColumn = 'span ' + Math.min(12, Math.max(1, s.w || 12));
+            if (s.h && isOn) { w.style.height = s.h + 'px'; w.style.overflow = 'auto'; }
+            else { w.style.height = ''; w.style.overflow = ''; }
+          } else {
+            w.classList.remove('ihtml-widget');
+            w.style.gridColumn = '';
+            w.style.height = '';
+            w.style.overflow = '';
+          }
+        }
+        if (this.editing) this.decorate(); else this.undecorate();
+      },
+
+      edit(on) {
+        on = on !== false;
+        if (on && env.mode === 'mobile') { ui.toast(T('layout_mobile'), 'warn'); return; }
+        this.editing = on;
+        rootEl.classList.toggle('ihtml-layout-editing', on);
+        if (on && !this.doneBtn) {
+          const btn = el('button', 'ihtml-layout-done ui-btn primary', T('layout_done'));
+          btn.onclick = () => this.edit(false);
+          rootEl.appendChild(btn);
+          this.doneBtn = btn;
+        } else if (!on && this.doneBtn) {
+          this.doneBtn.remove();
+          this.doneBtn = null;
+        }
+        this.apply();
+        if (!on) ui.toast(T('layout_saved'), 'success');
+      },
+      async reset() {
+        const k = this.key();
+        this.cfgs[k] = { order: [], items: {} };
+        try { await kv.del(k); } catch { /* 忽略 */ }
+        this.apply();
+      },
+      setSize(id, size) {
+        const c = this.cfg();
+        c.items[id] = Object.assign({}, c.items[id], size || {});
+        if (c.items[id].h == null) delete c.items[id].h;
+        this.apply();
+        this.saveSoon();
+      },
+      captureOrder() {
+        this.cfg().order = this.widgets().map((w) => w.dataset.ihtmlId);
+        this.saveSoon();
+      },
+
+      decorate() {
+        for (const w of this.widgets()) {
+          if (w.querySelector(':scope > .ihtml-w-move')) continue;
+          const move = el('div', 'ihtml-w-move', '⠿ ' + (registry.get(w.dataset.ihtmlId)?.item.title || w.dataset.ihtmlId));
+          const size = el('div', 'ihtml-w-size', '↘');
+          w.append(move, size);
+          this.bindMove(w, move);
+          this.bindSize(w, size);
+        }
+      },
+      undecorate() {
+        for (const w of this.widgets()) {
+          w.querySelectorAll(':scope > .ihtml-w-move, :scope > .ihtml-w-size').forEach((n) => n.remove());
+        }
+      },
+
+      bindMove(w, handle) {
+        handle.addEventListener('pointerdown', (e) => {
+          e.preventDefault();
+          try { handle.setPointerCapture(e.pointerId); } catch { /* 合成事件无捕获 */ }
+          w.classList.add('ihtml-w-dragging');
+          const onMove = (ev) => {
+            const siblings = this.widgets().filter((s) => s !== w);
+            let target = null;
+            for (const s of siblings) {
+              const r = s.getBoundingClientRect();
+              if (ev.clientY < r.top + r.height / 2 || (ev.clientY < r.bottom && ev.clientX < r.left + r.width / 2)) {
+                target = s;
+                break;
+              }
+            }
+            if (target) this.container().insertBefore(w, target);
+            else this.container().appendChild(w);
+          };
+          const onUp = () => {
+            handle.removeEventListener('pointermove', onMove);
+            handle.removeEventListener('pointerup', onUp);
+            handle.removeEventListener('pointercancel', onUp);
+            w.classList.remove('ihtml-w-dragging');
+            this.captureOrder();
+          };
+          handle.addEventListener('pointermove', onMove);
+          handle.addEventListener('pointerup', onUp);
+          handle.addEventListener('pointercancel', onUp);
+        });
+      },
+      bindSize(w, handle) {
+        handle.addEventListener('dblclick', () => {
+          const c = this.cfg();
+          if (c.items[w.dataset.ihtmlId]) { delete c.items[w.dataset.ihtmlId].h; this.apply(); this.saveSoon(); }
+        });
+        handle.addEventListener('pointerdown', (e) => {
+          e.preventDefault();
+          try { handle.setPointerCapture(e.pointerId); } catch { /* 合成事件无捕获 */ }
+          const startX = e.clientX;
+          const startY = e.clientY;
+          const rect = w.getBoundingClientRect();
+          const colW = this.container().clientWidth / 12;
+          const startSize = this.cfg().items[w.dataset.ihtmlId] || {};
+          let lastW = startSize.w || Math.round(rect.width / colW) || 12;
+          let heightTouched = false;
+          const onMove = (ev) => {
+            const wCols = Math.min(12, Math.max(1, Math.round((rect.width + ev.clientX - startX) / colW)));
+            if (wCols !== lastW) {
+              lastW = wCols;
+              w.style.gridColumn = 'span ' + wCols;
+            }
+            const dy = ev.clientY - startY;
+            if (Math.abs(dy) > 12 || heightTouched) {
+              heightTouched = true;
+              const hPx = Math.max(64, Math.round(rect.height + dy));
+              w.style.height = hPx + 'px';
+              w.style.overflow = 'auto';
+            }
+          };
+          const onUp = (ev) => {
+            handle.removeEventListener('pointermove', onMove);
+            handle.removeEventListener('pointerup', onUp);
+            handle.removeEventListener('pointercancel', onUp);
+            const size = { w: lastW };
+            if (heightTouched) size.h = Math.max(64, Math.round(rect.height + ev.clientY - startY));
+            else if (startSize.h) size.h = startSize.h;
+            this.setSize(w.dataset.ihtmlId, size);
+          };
+          handle.addEventListener('pointermove', onMove);
+          handle.addEventListener('pointerup', onUp);
+          handle.addEventListener('pointercancel', onUp);
+        });
+      },
+    };
 
     /* ---------- 宿主菜单槽 ---------- */
     if (opts.menu) {
@@ -856,8 +1055,19 @@
         d.tabs.forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
         d.body.textContent = '';
         if (tab === 'theme') this.renderTheme(d.body);
+        else if (tab === 'layout') this.renderLayout(d.body);
         else if (tab === 'history') renderHistoryList(d.body, () => { this.close(); });
         else this.renderErrors(d.body);
+      },
+      renderLayout(body) {
+        body.appendChild(el('p', 'ui-muted', T('layout_hint')));
+        const row = el('div', 'prow');
+        const btn = el('button', 'ui-btn primary', grid.editing ? T('layout_done') : T('layout_edit'));
+        btn.onclick = () => { this.close(); grid.edit(!grid.editing); };
+        const reset = el('button', 'ui-btn', T('layout_reset'));
+        reset.onclick = async () => { await grid.reset(); ui.toast(T('layout_saved'), 'success'); };
+        row.append(btn, reset);
+        body.appendChild(row);
       },
       build() {
         const mask = el('div', 'ihtml-chat-mask');
@@ -870,9 +1080,9 @@
         head.appendChild(closeBtn);
         const tabBar = el('div', 'tabs');
         const tabs = [];
-        const defs = [['theme', T('panel_theme')], ['history', T('panel_history')], ['errors', T('panel_errors')]];
+        const defs = [['theme', T('panel_theme')], ['layout', T('panel_layout')], ['history', T('panel_history')], ['errors', T('panel_errors')]];
         for (const [key, label] of defs) {
-          if (readOnly && key === 'history') continue;
+          if (readOnly && (key === 'history' || key === 'layout')) continue;
           const b = el('button', '', label);
           b.dataset.tab = key;
           b.onclick = () => this.switch(key);
@@ -987,11 +1197,13 @@
           } else {
             await refreshItems();
           }
+          grid.apply();
           bus.emit('ihtml:items-changed', data);
         } else if (data.type === 'pages') {
           nav.loadPages();
         } else if (data.type === 'kv') {
           if (data.key === 'theme' && !hostTheme) themePullRemote();
+          if (data.key && data.key.indexOf('layout.') === 0 && data.key === grid.key() && !grid.editing) grid.load();
           bus.emit('ihtml:kv-changed', data);
         }
       };
@@ -1636,6 +1848,7 @@
           rootEl.appendChild(gear);
         }
         if (!hostTheme) themePullRemote();
+        env.onChange(() => grid.apply()); // 移动/PC 切换时重算网格
         if (SAFE_MODE) {
           skeleton.hide();
           renderSafeMode();
@@ -1658,6 +1871,7 @@
             const out = await http.get('api/items?page=' + encodeURIComponent(page));
             skeleton.hide();
             await applyAll(out.items || []);
+            await grid.load();
             nav.emitChange();
           } catch (e) {
             skeleton.hide();
@@ -1712,6 +1926,13 @@
       layout: {
         sidebar: (open) => shell.sidebar(open),
         get shell() { return shell.active; },
+        // 拖拽排版
+        edit: (on) => grid.edit(on),
+        reset: () => grid.reset(),
+        setSize: (id, size) => grid.setSize(id, size),
+        setOrder: (ids) => { grid.cfg().order = ids.slice(); grid.apply(); grid.saveSoon(); },
+        config: () => JSON.parse(JSON.stringify(grid.cfg())),
+        get editing() { return grid.editing; },
       },
       panel: {
         open: (tab) => panel.open(tab),

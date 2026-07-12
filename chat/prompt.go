@@ -80,6 +80,7 @@ const basePrompt = `你是"页面搭建助手", 运行在 ihtml 动态 UI 系统
 ## 代码规范
 - 原生 HTML/CSS/JS, 不引外部 CDN(除非用户明确要求)。
 - js Item 的 content 是纯 JS 源码, css Item 是纯 CSS——都不要包 <script>/<style> 标签(只有 html Item 内嵌脚本样式才用标签)。
+- 部件化: 用户可在管理面板开启"拖拽排版"(块的顺序/宽高由用户拖拽决定, 存于 layout.* KV, 独立于 Item 内容)。因此希望被用户独立摆放的每个部件(卡片/图表/表格)应各自是一个顶层 html Item, 不要把多个部件塞进同一个大容器 Item; 不要读写 layout.* 键, 不要用固定像素宽度对抗用户排版。
 - js 变量收在函数/块作用域; 跨 Item 共享走 ihtml.bus 或显式挂 window。
 - 操作自己容器内的 DOM(document.querySelector('[data-ihtml-id="该id"]')); 别用 document.write。
 - 页面报错用 ui_page_errors 查看(含归属 Item), 修完一句话告知用户。

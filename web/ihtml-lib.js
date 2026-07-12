@@ -35,6 +35,9 @@
       safe_exit: '退出安全模式', ai_unavailable: 'AI 服务未配置, 请联系管理员。',
       model_needed: '请先选择或输入模型名', chat_broken: 'AI 连接失败', ws_lost: '连接已断开, 请重新发送',
       item_broken: 'Item "{id}" 执行失败: {msg}', loading: '加载中…', author_user: '你',
+      panel_layout: '布局', layout_edit: '开启拖拽排版', layout_editing: '正在编辑布局',
+      layout_done: '完成排版', layout_reset: '重置本页布局', layout_hint: '拖动块顶部手柄换位置, 拉右下角调宽高; 双击右下角恢复自动高度。',
+      layout_mobile: '手机上不支持编辑布局', layout_saved: '布局已保存',
     },
     en: {
       chat_entry: 'AI Assistant', chat_title: 'Page Builder', send: 'Send', stop: 'Stop',
@@ -66,6 +69,9 @@
       safe_exit: 'Exit safe mode', ai_unavailable: 'AI service is not configured. Contact the administrator.',
       model_needed: 'Pick or type a model name first', chat_broken: 'AI connection failed', ws_lost: 'Connection lost, please resend',
       item_broken: 'Item "{id}" failed: {msg}', loading: 'Loading…', author_user: 'You',
+      panel_layout: 'Layout', layout_edit: 'Enable drag layout', layout_editing: 'Editing layout',
+      layout_done: 'Done', layout_reset: 'Reset page layout', layout_hint: 'Drag the top handle to reorder; drag the corner to resize; double-click the corner to reset height.',
+      layout_mobile: 'Layout editing is unavailable on mobile', layout_saved: 'Layout saved',
     },
   };
 
