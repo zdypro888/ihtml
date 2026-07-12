@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Check formatting
+        run: test -z "$(gofmt -l .)"
+      - name: Check embedded JavaScript syntax
+        run: |
+          node --check web/ihtml.js
+          node --check web/ihtml-lib.js
+      - name: Test embedded JavaScript helpers
+        run: node --test web/ihtml-lib.test.js
+      - name: Vet
+        run: go vet ./...
+      - name: Test with race detector
+        run: go test -race ./...
+      - name: Build
+        run: go build ./...

@@ -13,7 +13,10 @@ var ErrNotFound = errors.New("ihtml: not found")
 // Store 是持久化接口。实现只需要保证单个方法的原子性;
 // "读-改-写"的并发合并由上层(Handler)按用户加锁串行化。
 //
-// user 是 UserResolver 解析出的用户标识, 实现应按它隔离数据。
+// user 是 UserResolver 解析出的用户标识, 实现应按它隔离数据。所有返回的
+// slice/map/RawMessage 必须是调用方可修改的值快照；实现不得在返回后继续修改
+// 它们。所有传入的 slice/map/RawMessage 也必须在方法返回前复制或持久化，不能
+// 保留并随后修改调用方内存。
 type Store interface {
 	// Items 返回该用户的全部 Item(顺序不限, 上层会按 Order 排序)。
 	// 用户不存在时返回空切片而不是错误。
@@ -41,6 +44,30 @@ type Store interface {
 	EraseUser(ctx context.Context, user string) error
 }
 
+// UserState 是 Store 中一个用户的完整持久化状态。它主要供需要跨 Items、KV、
+// Revisions 原子更新的操作使用（例如导入、页面删除和带页面注册表的回滚）。
+// 调用方和实现都必须把它当作值快照，不能保留或修改传入切片/RawMessage。
+type UserState struct {
+	Items     []Item
+	KV        map[string]json.RawMessage
+	Revisions []Revision // 新的在前
+}
+
+// UserStateStore 是 Store 的可选增强接口。内置 Store 均实现它；第三方旧 Store
+// 无需立即修改，Service 会使用备份+补偿恢复，但不能提供与该接口同等的强原子性。
+//
+// ReplaceUserState 必须在单个原子操作中用 state 整体替换指定用户的数据。
+type UserStateStore interface {
+	UserState(ctx context.Context, user string) (UserState, error)
+	ReplaceUserState(ctx context.Context, user string, state UserState) error
+}
+
+// RevisionStore 是 Store 的可选增强接口，用于读取完整快照（包括较新契约中的
+// 页面注册表）。旧 Store 只有 RevisionItems 时仍可读取旧版仅含 Item 的快照。
+type RevisionStore interface {
+	Revision(ctx context.Context, user, id string) (Revision, error)
+}
+
 func cloneItems(items []Item) []Item {
 	out := make([]Item, len(items))
 	copy(out, items)
@@ -50,6 +77,31 @@ func cloneItems(items []Item) []Item {
 			maps.Copy(meta, items[i].Meta)
 			out[i].Meta = meta
 		}
+	}
+	return out
+}
+
+func cloneRevisions(revisions []Revision) []Revision {
+	out := make([]Revision, len(revisions))
+	copy(out, revisions)
+	for i := range out {
+		out[i].Items = cloneItems(revisions[i].Items)
+		if revisions[i].Pages != nil {
+			out[i].Pages = append([]Page{}, revisions[i].Pages...)
+		}
+		out[i].Templates = cloneTemplates(revisions[i].Templates)
+	}
+	return out
+}
+
+func cloneUserState(state UserState) UserState {
+	out := UserState{
+		Items:     cloneItems(state.Items),
+		KV:        make(map[string]json.RawMessage, len(state.KV)),
+		Revisions: cloneRevisions(state.Revisions),
+	}
+	for key, value := range state.KV {
+		out.KV[key] = append(json.RawMessage(nil), value...)
 	}
 	return out
 }

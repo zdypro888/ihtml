@@ -1,7 +1,6 @@
 package chat
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,8 +15,14 @@ import (
 	"github.com/cloudwego/eino-ext/components/model/claude"
 	"github.com/cloudwego/eino-ext/components/model/openai"
 	einoModel "github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/schema"
 
 	"github.com/zdypro888/ihtml"
+)
+
+const (
+	defaultClaudeMaxTokens      = 4096
+	defaultClaudeThinkingBudget = 1024
 )
 
 func newChatModel(ctx context.Context, cfg Config) (einoModel.ToolCallingChatModel, error) {
@@ -44,77 +49,95 @@ func newOpenAIChatModel(ctx context.Context, cfg Config) (einoModel.ToolCallingC
 		maxTokens := cfg.MaxTokens
 		chatCfg.MaxTokens = &maxTokens
 	}
-	if cfg.Temperature > 0 {
-		temp := cfg.Temperature
+	temperature, temperatureSet := effectiveTemperature(cfg)
+	if temperatureSet {
+		temp := temperature
 		chatCfg.Temperature = &temp
 	}
 	return openai.NewChatModel(ctx, chatCfg)
 }
 
 func newClaudeChatModel(ctx context.Context, cfg Config) (einoModel.ToolCallingChatModel, error) {
-	baseURL := strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/")
+	// anthropic-sdk-go otherwise consults ambient ANTHROPIC_* variables. A
+	// reusable SDK must never attach an unrelated process credential to a BaseURL
+	// chosen by this Config, so credentials are always explicit here.
+	if strings.TrimSpace(cfg.APIKey) == "" && strings.TrimSpace(cfg.AuthToken) == "" {
+		return nil, errors.New("claude provider requires an explicit API key or auth token")
+	}
+	baseURL := normalizeClaudeBaseURL(cfg.BaseURL)
+	maxTokens := cfg.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = defaultClaudeMaxTokens
+	}
+	thinkingBudget := cfg.ThinkingBudgetTokens
+	if thinkingBudget <= 0 {
+		thinkingBudget = defaultClaudeThinkingBudget
+	}
+	if cfg.Thinking && maxTokens <= thinkingBudget {
+		return nil, fmt.Errorf("claude max tokens (%d) must be greater than thinking budget (%d)", maxTokens, thinkingBudget)
+	}
+	temperature, temperatureSet := effectiveTemperature(cfg)
+	if cfg.Thinking && temperatureSet && temperature != 1 {
+		return nil, errors.New("claude thinking only supports temperature 1")
+	}
 	chatCfg := &claude.Config{
-		APIKey: cfg.APIKey,
-		Model:  cfg.Model,
+		APIKey:    cfg.APIKey,
+		AuthToken: cfg.AuthToken,
+		Model:     cfg.Model,
+		MaxTokens: maxTokens,
 	}
 	if baseURL != "" {
 		chatCfg.BaseURL = &baseURL
 	}
-	if cfg.MaxTokens > 0 {
-		chatCfg.MaxTokens = cfg.MaxTokens
-	} else {
-		// claude 适配器把 max_tokens 编码为必填, 0 会被网关拒; 从请求体里删掉。
-		chatCfg.HTTPClient = claudeOmitZeroMaxTokensHTTPClient(nil)
-	}
-	if cfg.Temperature > 0 {
-		temp := cfg.Temperature
+	if temperatureSet {
+		temp := temperature
 		chatCfg.Temperature = &temp
 	}
-	return claude.NewChatModel(ctx, chatCfg)
-}
-
-func claudeOmitZeroMaxTokensHTTPClient(base *http.Client) *http.Client {
-	if base == nil {
-		base = http.DefaultClient
-	}
-	out := *base
-	transport := out.Transport
-	if transport == nil {
-		transport = http.DefaultTransport
-	}
-	out.Transport = omitZeroMaxTokensTransport{base: transport}
-	return &out
-}
-
-type omitZeroMaxTokensTransport struct {
-	base http.RoundTripper
-}
-
-func (t omitZeroMaxTokensTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if req == nil || req.Body == nil {
-		return t.base.RoundTrip(req)
-	}
-	body, err := io.ReadAll(req.Body)
-	_ = req.Body.Close()
+	base, err := claude.NewChatModel(ctx, chatCfg)
 	if err != nil {
 		return nil, err
 	}
-	nextBody := body
-	var obj map[string]any
-	if err := json.Unmarshal(body, &obj); err == nil {
-		if n, ok := obj["max_tokens"].(float64); ok && n == 0 {
-			delete(obj, "max_tokens")
-			if encoded, err := json.Marshal(obj); err == nil {
-				nextBody = encoded
-			}
-		}
+	if !cfg.Thinking {
+		return base, nil
 	}
-	req.Body = io.NopCloser(bytes.NewReader(nextBody))
-	req.ContentLength = int64(len(nextBody))
-	req.GetBody = func() (io.ReadCloser, error) {
-		return io.NopCloser(bytes.NewReader(nextBody)), nil
+	return &claudeThinkingChatModel{base: base, budgetTokens: thinkingBudget}, nil
+}
+
+// Anthropic SDK 会自行追加 v1/messages。兼容用户沿用 OpenAI 风格把 /v1
+// 写进 BaseURL 的常见配置，避免最终请求成 /v1/v1/messages。
+func normalizeClaudeBaseURL(raw string) string {
+	base := strings.TrimRight(strings.TrimSpace(raw), "/")
+	if strings.HasSuffix(base, "/v1") {
+		base = strings.TrimSuffix(base, "/v1")
 	}
-	return t.base.RoundTrip(req)
+	return base
+}
+
+// claudeThinkingChatModel 把显式 Thinking 配置注入 Generate/Stream，并在
+// WithTools 派生后继续保留；否则 eino agent 绑定工具时会悄悄丢失该能力。
+type claudeThinkingChatModel struct {
+	base         einoModel.ToolCallingChatModel
+	budgetTokens int
+}
+
+func (m *claudeThinkingChatModel) WithTools(tools []*schema.ToolInfo) (einoModel.ToolCallingChatModel, error) {
+	next, err := m.base.WithTools(tools)
+	if err != nil {
+		return nil, err
+	}
+	return &claudeThinkingChatModel{base: next, budgetTokens: m.budgetTokens}, nil
+}
+
+func (m *claudeThinkingChatModel) thinkingOption() einoModel.Option {
+	return claude.WithThinking(&claude.Thinking{Enable: true, BudgetTokens: m.budgetTokens})
+}
+
+func (m *claudeThinkingChatModel) Generate(ctx context.Context, input []*schema.Message, opts ...einoModel.Option) (*schema.Message, error) {
+	return m.base.Generate(ctx, input, append(opts, m.thinkingOption())...)
+}
+
+func (m *claudeThinkingChatModel) Stream(ctx context.Context, input []*schema.Message, opts ...einoModel.Option) (*schema.StreamReader[*schema.Message], error) {
+	return m.base.Stream(ctx, input, append(opts, m.thinkingOption())...)
 }
 
 // Models 实现 ihtml.ModelLister。发现顺序与 casino 一致:
@@ -123,11 +146,18 @@ func (t omitZeroMaxTokensTransport) RoundTrip(req *http.Request) (*http.Response
 // claude 不提供模型发现, 返回空列表让前端手填。
 func (b *Backend) Models(ctx context.Context) (ihtml.ChatModels, error) {
 	out := ihtml.ChatModels{
+		ProtocolVersion:  ihtml.ChatProtocolVersion,
+		Provider:         b.cfg.Provider,
 		ModelReady:       b.cfg.ready(),
 		CurrentModel:     b.cfg.Model,
 		Models:           []string{},
+		AgentModes:       []string{AgentModeFast},
 		RequestTimeoutMS: b.cfg.RequestTimeout.Milliseconds(),
 		ModelSelect:      b.cfg.AllowModelSelect,
+	}
+	if b.cfg.EnableDeepAgent {
+		out.AgentModes = append(out.AgentModes, AgentModeDeep)
+		out.DeepApprovalResume = "manual_tool_only"
 	}
 	if !out.ModelReady || strings.TrimSpace(b.cfg.Provider) != ProviderOpenAI {
 		return out, nil
@@ -140,8 +170,9 @@ func (b *Backend) Models(ctx context.Context) (ihtml.ChatModels, error) {
 		}
 	}
 	out.Models = models
-	// 配置的默认模型没在可用列表里时, 指向第一个可用的, 避免前端默认选中打不通的模型。
-	if len(models) > 0 && !slices.Contains(models, out.CurrentModel) {
+	// 只有显式允许终端选模型时才让前端回退到目录首项。选择器关闭时，
+	// CurrentModel 始终保持服务端配置，客户端不能借模型发现结果覆盖它。
+	if b.cfg.AllowModelSelect && len(models) > 0 && !slices.Contains(models, out.CurrentModel) {
 		out.CurrentModel = models[0]
 	}
 	return out, nil

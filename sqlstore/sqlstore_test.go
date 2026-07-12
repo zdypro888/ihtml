@@ -15,6 +15,12 @@ import (
 	"github.com/zdypro888/ihtml"
 )
 
+func TestNewRejectsNilDB(t *testing.T) {
+	if _, err := New(nil, Postgres); !errors.Is(err, ErrNilDB) {
+		t.Fatalf("New(nil) error = %v", err)
+	}
+}
+
 // TestPostgres 需要真实 postgres: 设置 IHTML_TEST_PG_DSN 才会运行。
 //
 //	IHTML_TEST_PG_DSN='postgres://user:pass@localhost:5432/ihtml_test?sslmode=disable' go test ./sqlstore
@@ -81,6 +87,29 @@ func TestPostgres(t *testing.T) {
 		t.Fatalf("deleted kv: %v", err)
 	}
 
+	// Template catalog + published runtime document use the same SQL transaction
+	// boundary as Items/Pages/Revisions.
+	handler := ihtml.New(store)
+	template, err := handler.PutCurrentTemplate(ctx, user, "", ihtml.Template{
+		ID: "tpl-root", Name: "Root",
+		Draft: ihtml.TemplateVersion{
+			RootID: "root", Nodes: []ihtml.TemplateNode{{ID: "root", Kind: ihtml.NodeCanvas}},
+			Slots: []ihtml.Slot{}, Placements: []ihtml.Placement{}, Breakpoints: []ihtml.Breakpoint{},
+		},
+	}, 0, "api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	template, err = handler.PublishTemplate(ctx, user, template.ID, template.Revision, "api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := ihtml.New(store).GetCurrentTemplate(ctx, user, "")
+	if err != nil || !reloaded.Persisted || reloaded.Template.Published == nil ||
+		reloaded.Template.Published.RootID != "root" || reloaded.Template.Revision != template.Revision {
+		t.Fatalf("published template SQL roundtrip: %+v %v", reloaded, err)
+	}
+
 	// Revisions + 裁剪
 	for i := range 5 {
 		rev := ihtml.Revision{
@@ -107,5 +136,54 @@ func TestPostgres(t *testing.T) {
 	}
 	if _, err := store.RevisionItems(ctx, user, "nope"); !errors.Is(err, ihtml.ErrNotFound) {
 		t.Fatalf("missing revision: %v", err)
+	}
+}
+
+func TestRevisionPayloadBackwardCompatibility(t *testing.T) {
+	legacyItems := []ihtml.Item{{ID: "old", Type: ihtml.ItemHTML, Content: "legacy"}}
+	legacyRaw, err := json.Marshal(legacyItems)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := decodeRevisionPayload(string(legacyRaw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy.Version != 0 || len(legacy.Items) != 1 || legacy.Items[0].ID != "old" || legacy.Pages != nil {
+		t.Fatalf("legacy payload: %+v", legacy)
+	}
+
+	version := ihtml.TemplateVersion{
+		Version: 1, RootID: "root",
+		Nodes:       []ihtml.TemplateNode{{ID: "root", Kind: ihtml.NodeCanvas}},
+		Slots:       []ihtml.Slot{{ID: "main", NodeID: "root", Accepts: []ihtml.ItemType{ihtml.ItemHTML}}},
+		Placements:  []ihtml.Placement{{ItemID: "new", SlotID: "main", Mode: ihtml.LayoutFlow, ColumnSpan: 12}},
+		Breakpoints: []ihtml.Breakpoint{{ID: "desktop", Columns: 12, Gap: 16}},
+	}
+	rev := ihtml.Revision{
+		Version: ihtml.CurrentDataVersion,
+		ID:      "r2",
+		Items:   []ihtml.Item{{ID: "new", Type: ihtml.ItemCSS, Content: ".x{}"}},
+		Pages:   []ihtml.Page{{Name: "dash", Title: "Dashboard"}},
+		Templates: []ihtml.Template{{
+			ID: "tpl-root", Name: "Root", Revision: 1,
+			Draft: version, Published: &version,
+		}},
+		RootTemplateID:        "tpl-root",
+		TemplateRevisionClock: 1,
+	}
+	raw, err := encodeRevision(rev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := decodeRevisionPayload(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Version != ihtml.CurrentDataVersion || len(decoded.Items) != 1 || len(decoded.Pages) != 1 || decoded.Pages[0].Name != "dash" ||
+		len(decoded.Templates) != 1 || decoded.Templates[0].Published == nil ||
+		len(decoded.Templates[0].Published.Placements) != 1 || decoded.Templates[0].Published.Placements[0].SlotID != "main" ||
+		decoded.RootTemplateID != "tpl-root" || decoded.TemplateRevisionClock != 1 {
+		t.Fatalf("v3 payload: %+v", decoded)
 	}
 }

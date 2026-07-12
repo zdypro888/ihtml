@@ -1,13 +1,18 @@
 // 演示程序: 起一个带演示数据的多页 ihtml 服务。
 //
-//	go run ./example -addr :8899           # 内存存储
+//	go run ./example                       # 内存存储，仅监听本机
 //	go run ./example -data ./uidata        # 文件存储
+//	go run ./example -config ./example/ihtml.example.json
 //
 // 配置真实 AI(可选, 不配置则挂内置"演示助手"):
 //
 //	export IHTML_AI_BASE_URL=https://ai.im.app/v1        # 任意 OpenAI 兼容网关
 //	export IHTML_AI_API_KEY=sk-...
 //	export IHTML_AI_THINKING=1
+//	export IHTML_AI_ENABLE_DEEP=1                        # 可选；默认仅开放 fast
+//
+// Anthropic 原生协议也可直接复用 ANTHROPIC_BASE_URL、ANTHROPIC_API_KEY /
+// ANTHROPIC_AUTH_TOKEN 与 ANTHROPIC_MODEL 环境变量。
 //
 // 绑定 casino 真实数据(可选): 服务端持有 casino admin 会话,
 // 把 /capi/* 只读转发到 casino, 并把 API 目录告知 AI:
@@ -18,13 +23,18 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"html"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -34,9 +44,35 @@ import (
 )
 
 func main() {
-	addr := flag.String("addr", ":8899", "监听地址")
+	configPath := flag.String("config", "", "服务端 JSON 配置文件（也可用 IHTML_CONFIG 指定）")
+	addr := flag.String("addr", "127.0.0.1:8899", "监听地址")
 	data := flag.String("data", "", "数据目录, 留空用内存存储")
 	flag.Parse()
+	explicitFlags := make(map[string]bool)
+	flag.Visit(func(f *flag.Flag) { explicitFlags[f.Name] = true })
+
+	selectedConfigPath := strings.TrimSpace(*configPath)
+	if selectedConfigPath == "" {
+		selectedConfigPath = strings.TrimSpace(os.Getenv("IHTML_CONFIG"))
+	}
+	var fileConfig *exampleFileConfig
+	if selectedConfigPath != "" {
+		var err error
+		fileConfig, err = loadExampleFileConfig(selectedConfigPath)
+		if err != nil {
+			log.Fatalf("加载服务端配置失败: %v", err)
+		}
+		configuredAddr, configuredData, err := fileConfig.serverValues()
+		if err != nil {
+			log.Fatalf("服务端配置无效: %v", err)
+		}
+		if !explicitFlags["addr"] && configuredAddr != "" {
+			*addr = configuredAddr
+		}
+		if !explicitFlags["data"] && configuredData != "" {
+			*data = configuredData
+		}
+	}
 
 	var store ihtml.Store
 	if *data != "" {
@@ -51,6 +87,8 @@ func main() {
 
 	opts := []ihtml.Option{
 		ihtml.WithPageTitle("ihtml demo"),
+		// 仅演示环境允许 ?uid=；生产必须换成验证过会话/令牌的 UserResolver。
+		ihtml.WithUserResolver(ihtml.DevelopmentUserResolver),
 		// 宿主动态参数注入演示: Item 里可用 ihtml.config.nickname
 		ihtml.WithPageConfig(func(_ *http.Request, user string) map[string]any {
 			return map[string]any{"nickname": user + " 同学", "env": "demo"}
@@ -68,29 +106,53 @@ func main() {
 		}),
 	}
 
-	if base := os.Getenv("IHTML_AI_BASE_URL"); base != "" {
-		backend := chat.New(chat.Config{
-			Provider:         envOr("IHTML_AI_PROVIDER", "openai"),
-			BaseURL:          base,
-			APIKey:           os.Getenv("IHTML_AI_API_KEY"),
-			Model:            os.Getenv("IHTML_AI_MODEL"),
-			Stream:           true,
-			Thinking:         os.Getenv("IHTML_AI_THINKING") == "1",
-			RequestTimeout:   180 * time.Second,
-			AllowModelSelect: true,                         // 演示环境放开模型选择器(生产默认隐藏)
-			ConfirmSecret:    []byte("ihtml-demo-confirm"), // 固定确认卡密钥: 重启不失效
-		})
+	probeBase := ""
+	var probeQuery []string
+	if os.Getenv("IHTML_CASINO_BASE") != "" {
+		// api_probe 只回连本演示服务；显式转发 demo 的 uid，模型不能覆盖。
+		probeBase = loopbackOrigin(*addr)
+		probeQuery = []string{"uid"}
+	}
+	var configuredChat *chat.Config
+	if !envBool("IHTML_AI_DISABLED") {
+		if fileConfig != nil {
+			cfg, enabled, err := fileConfig.chatConfig(probeBase, probeQuery)
+			if err != nil {
+				log.Fatalf("AI 配置无效: %v", err)
+			}
+			if enabled {
+				configuredChat = &cfg
+			}
+		} else if base := envFirst("IHTML_AI_BASE_URL", "ANTHROPIC_BASE_URL"); base != "" {
+			cfg := exampleChatConfig(base, probeBase, probeQuery)
+			configuredChat = &cfg
+			log.Printf("未指定 -config，使用兼容环境变量加载 AI；建议迁移到版本化服务端配置文件")
+		}
+	}
+	if configuredChat != nil {
+		cfg := *configuredChat
+		backend, err := chat.NewChecked(cfg)
+		if err != nil {
+			log.Fatalf("AI 配置无法启动: %v", err)
+		}
 		opts = append(opts, ihtml.WithChatBackend(backend))
-		log.Printf("AI 对话已启用(真实模型): %s", base)
+		modes := chat.AgentModeFast
+		if cfg.EnableDeepAgent {
+			modes += "," + chat.AgentModeDeep
+		}
+		log.Printf("AI 对话已启用(真实模型): provider=%s model=%s endpoint=%s agent_modes=%s", cfg.Provider, cfg.Model, safeEndpointLabel(cfg.BaseURL), modes)
 	} else {
 		opts = append(opts, ihtml.WithChatBackend(&demoBackend{}))
-		log.Printf("未配置 IHTML_AI_BASE_URL, 已挂载内置演示助手(不调用真实模型)")
+		log.Printf("未启用真实 AI，已挂载内置演示助手(不调用真实模型)")
 	}
 
 	mux := http.NewServeMux()
 
 	// casino 数据绑定: 只读代理 + API 目录
 	if casinoBase := os.Getenv("IHTML_CASINO_BASE"); casinoBase != "" {
+		if !isLoopbackBind(*addr) {
+			log.Fatal("启用 IHTML_CASINO_BASE 时 -addr 必须绑定 loopback，避免暴露管理端代理")
+		}
 		proxy := newCasinoProxy(casinoBase, envOr("IHTML_CASINO_USER", "admin"), envOr("IHTML_CASINO_PASS", "admin"))
 		mux.Handle("/capi/", proxy)
 		opts = append(opts, ihtml.WithAPIs(
@@ -114,20 +176,95 @@ func main() {
 		log.Printf("casino 数据代理已启用: /capi/* → %s/admin/api/* (只读)", casinoBase)
 	}
 
-	// 演示跨域嵌入: 生产按需收紧 origin 列表
-	opts = append(opts, ihtml.WithCORS("*"))
+	// 跨域演示必须显式指定精确 Origin；默认仅同源。
+	if raw := strings.TrimSpace(os.Getenv("IHTML_DEMO_CORS_ORIGINS")); raw != "" {
+		origins := strings.Split(raw, ",")
+		for i := range origins {
+			origins[i] = strings.TrimSpace(origins[i])
+		}
+		opts = append(opts, ihtml.WithCORS(origins...), ihtml.WithMessageOrigins(origins...))
+	}
 
-	handler := ihtml.New(store, opts...)
+	handler, err := ihtml.NewHandler(store, opts...)
+	if err != nil {
+		log.Fatalf("ihtml Handler 配置无效: %v", err)
+	}
+	defer handler.Close()
 	seedDemo(handler)
 	seedHostDemo(handler)
 	mux.Handle("/", handler)
 	mux.HandleFunc("GET /host-demo", hostDemoPage)
 
-	log.Printf("演示页面: http://localhost%s/?uid=demo (空白用户: ?uid=blank)", *addr)
-	log.Printf("宿主嵌入演示: http://localhost%s/host-demo (mount 进宿主自己的布局)", *addr)
+	log.Printf("演示页面: %s/?uid=demo (空白用户: ?uid=blank)", loopbackOrigin(*addr))
+	log.Printf("宿主嵌入演示: %s/host-demo (mount 进宿主自己的布局)", loopbackOrigin(*addr))
 	if err := http.ListenAndServe(*addr, mux); err != nil {
-		log.Fatal(err)
+		log.Printf("HTTP 服务已停止: %v", err)
 	}
+}
+
+func safeEndpointLabel(raw string) string {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Host == "" {
+		return "invalid"
+	}
+	return parsed.Scheme + "://" + parsed.Host + parsed.EscapedPath()
+}
+
+func loopbackOrigin(addr string) string {
+	addr = strings.TrimSpace(addr)
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "http://" + addr
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(host, port)
+}
+
+func isLoopbackBind(addr string) bool {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(addr))
+	if err != nil {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func isLoopbackRequestHost(hostport string) bool {
+	host := strings.TrimSpace(hostport)
+	if parsed, _, err := net.SplitHostPort(host); err == nil {
+		host = parsed
+	} else {
+		host = strings.Trim(host, "[]")
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func isLocalSameOriginRequest(r *http.Request) bool {
+	if !isLoopbackRequestHost(r.Host) || strings.EqualFold(r.Header.Get("Sec-Fetch-Site"), "cross-site") {
+		return false
+	}
+	rawOrigin := strings.TrimSpace(r.Header.Get("Origin"))
+	if rawOrigin == "" {
+		return true // 服务端 api_probe/curl；浏览器跨站请求会带 Fetch Metadata。
+	}
+	origin, err := url.Parse(rawOrigin)
+	if err != nil || origin.Host == "" || !strings.EqualFold(origin.Host, r.Host) {
+		return false
+	}
+	wantScheme := "http"
+	if r.TLS != nil {
+		wantScheme = "https"
+	}
+	return strings.EqualFold(origin.Scheme, wantScheme)
 }
 
 // hostDemoPage 模拟"别人的产品"嵌入 ihtml 内核: 宿主只写一个
@@ -154,6 +291,13 @@ func hostDemoPage(w http.ResponseWriter, _ *http.Request) {
   .host-side .host-group { padding:0 8px 8px; font-size:12px; color:#647694; }
   .host-main { padding:18px; min-width:0; }
   .host-note { font-size:12.5px; color:#647694; margin:0 0 12px; }
+  @media (max-width:720px) {
+    .host-top { align-items:flex-start; padding:12px 14px; }
+    .host-top nav { overflow-x:auto; white-space:nowrap; }
+    .host-wrap { display:block; min-height:0; }
+    .host-side { border-right:0; border-bottom:1px solid #22304d; padding:10px; }
+    .host-main { padding:12px; }
+  }
 </style>
 </head>
 <body>
@@ -176,10 +320,112 @@ func hostDemoPage(w http.ResponseWriter, _ *http.Request) {
 }
 
 func envOr(key, def string) string {
-	if v := os.Getenv(key); v != "" {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
 		return v
 	}
 	return def
+}
+
+func envFirst(keys ...string) string {
+	for _, key := range keys {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+const (
+	defaultClaudeMaxTokensForExample      = 4096
+	defaultClaudeThinkingBudgetForExample = 1024
+)
+
+func envBool(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func envPositiveInt(key string, def int) int {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return def
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value <= 0 {
+		log.Printf("忽略无效 %s=%q（必须是正整数），使用默认值 %d", key, raw, def)
+		return def
+	}
+	return value
+}
+
+func envDurationMS(def time.Duration, keys ...string) time.Duration {
+	for _, key := range keys {
+		raw := strings.TrimSpace(os.Getenv(key))
+		if raw == "" {
+			continue
+		}
+		value, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || value <= 0 {
+			log.Printf("忽略无效 %s=%q（必须是正整数毫秒），使用默认值 %s", key, raw, def)
+			return def
+		}
+		return time.Duration(value) * time.Millisecond
+	}
+	return def
+}
+
+// exampleChatConfig 集中声明演示程序的 AI 安全边界。Deep 必须通过环境变量
+// 显式开放；即使开放，未携带 agent_mode=deep 的对话仍然走 fast。
+func exampleChatConfig(base, probeBase string, probeQuery []string) chat.Config {
+	defaultProvider := chat.ProviderOpenAI
+	if strings.TrimSpace(os.Getenv("IHTML_AI_BASE_URL")) == "" && strings.TrimSpace(os.Getenv("ANTHROPIC_BASE_URL")) != "" {
+		defaultProvider = chat.ProviderClaude
+	}
+	provider := envOr("IHTML_AI_PROVIDER", defaultProvider)
+	model := strings.TrimSpace(os.Getenv("IHTML_AI_MODEL"))
+	apiKey := strings.TrimSpace(os.Getenv("IHTML_AI_API_KEY"))
+	authToken := strings.TrimSpace(os.Getenv("IHTML_AI_AUTH_TOKEN"))
+	hasIHTMLCredential := apiKey != "" || authToken != ""
+	maxTokens := 0
+	thinkingBudget := 0
+	if provider == chat.ProviderClaude {
+		// Do not combine credentials from two independently configured gateways.
+		// Presence of either IHTML credential makes that source authoritative.
+		if !hasIHTMLCredential {
+			apiKey = strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY"))
+			authToken = strings.TrimSpace(os.Getenv("ANTHROPIC_AUTH_TOKEN"))
+		}
+		if model == "" {
+			// Fast 是默认执行模式，因此 Claude Code 风格配置优先采用 Haiku
+			// 映射；需要其他模型时用 IHTML_AI_MODEL 明确覆盖。
+			model = envFirst("ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL")
+		}
+		maxTokens = envPositiveInt("IHTML_AI_MAX_TOKENS", defaultClaudeMaxTokensForExample)
+		thinkingBudget = envPositiveInt("IHTML_AI_THINKING_BUDGET_TOKENS", defaultClaudeThinkingBudgetForExample)
+	}
+	return chat.Config{
+		Provider:             provider,
+		BaseURL:              strings.TrimSpace(base),
+		APIKey:               apiKey,
+		AuthToken:            authToken,
+		Model:                model,
+		Stream:               true,
+		Thinking:             envBool("IHTML_AI_THINKING"),
+		ThinkingBudgetTokens: thinkingBudget,
+		RequestTimeout:       envDurationMS(180*time.Second, "IHTML_AI_REQUEST_TIMEOUT_MS", "API_TIMEOUT_MS"),
+		MaxTokens:            maxTokens,
+		EnableDeepAgent:      envBool("IHTML_AI_ENABLE_DEEP"),
+		MaxModelCallsPerTurn: envPositiveInt("IHTML_AI_MAX_MODEL_CALLS", 24),
+		MaxSubtasksPerTurn:   envPositiveInt("IHTML_AI_MAX_SUBTASKS", 3),
+		MaxTurnDuration:      time.Duration(envPositiveInt("IHTML_AI_MAX_TURN_SECONDS", 120)) * time.Second,
+		AllowModelSelect:     true, // 演示环境放开模型选择器(生产默认隐藏)
+		ProbeBaseURL:         probeBase,
+		ProbeForwardQuery:    append([]string(nil), probeQuery...),
+	}
 }
 
 /* ---------- casino 只读代理 ----------
@@ -240,29 +486,82 @@ func (p *casinoProxy) login(ctx context.Context) error {
 	return nil
 }
 
-// extractJSONField 从平铺 JSON 里取字符串字段(避免为演示引入结构体)。
+// extractJSONField 从 JSON 对象读取字符串字段。
 func extractJSONField(raw, field string) string {
-	marker := `"` + field + `":"`
-	i := strings.Index(raw, marker)
-	if i < 0 {
+	var object map[string]any
+	if json.Unmarshal([]byte(raw), &object) != nil {
 		return ""
 	}
-	rest := raw[i+len(marker):]
-	j := strings.IndexByte(rest, '"')
-	if j < 0 {
-		return ""
+	value, _ := object[field].(string)
+	return value
+}
+
+func casinoTarget(path string, query url.Values) (string, url.Values, error) {
+	allowedQuery := map[string]bool{}
+	upstream := ""
+	switch {
+	case path == "/capi/players":
+		upstream = "players"
+		allowedQuery["q"], allowedQuery["limit"] = true, true
+	case path == "/capi/reports/dashboard":
+		upstream = "reports/dashboard"
+	case path == "/capi/nodes":
+		upstream = "nodes"
+	case strings.HasPrefix(path, "/capi/players/") && strings.HasSuffix(path, "/bets"):
+		id := strings.TrimSuffix(strings.TrimPrefix(path, "/capi/players/"), "/bets")
+		if id == "" || strings.Contains(id, "/") {
+			return "", nil, fmt.Errorf("未声明的 casino API 路径")
+		}
+		if _, err := strconv.ParseUint(id, 10, 64); err != nil {
+			return "", nil, fmt.Errorf("玩家 id 无效")
+		}
+		upstream = "players/" + id + "/bets"
+		allowedQuery["limit"] = true
+	default:
+		return "", nil, fmt.Errorf("未声明的 casino API 路径")
 	}
-	return rest[:j]
+	forward := make(url.Values)
+	for key, values := range query {
+		if key == "uid" || key == "auth" {
+			continue // ihtml 演示身份只用于本地路由，不转发给 casino
+		}
+		if !allowedQuery[key] || len(values) != 1 {
+			return "", nil, fmt.Errorf("不允许的查询参数 %q", key)
+		}
+		value := values[0]
+		if key == "limit" {
+			limit, err := strconv.Atoi(value)
+			if err != nil || limit < 1 || limit > 200 {
+				return "", nil, fmt.Errorf("limit 必须在 1..200")
+			}
+		}
+		if key == "q" && len(value) > 100 {
+			return "", nil, fmt.Errorf("q 过长")
+		}
+		forward[key] = append([]string(nil), values...)
+	}
+	return upstream, forward, nil
 }
 
 func (p *casinoProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if !isLocalSameOriginRequest(r) {
+		http.Error(w, `{"error":"casino 代理仅接受本机同源请求"}`, http.StatusForbidden)
+		return
+	}
 	if r.Method != http.MethodGet {
 		http.Error(w, `{"error":"casino 代理只读, 仅支持 GET"}`, http.StatusMethodNotAllowed)
 		return
 	}
-	target := p.base + "/admin/api/" + strings.TrimPrefix(r.URL.Path, "/capi/")
-	if r.URL.RawQuery != "" {
-		target += "?" + r.URL.RawQuery
+	upstream, query, err := casinoTarget(r.URL.Path, r.URL.Query())
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+		return
+	}
+	target := p.base + "/admin/api/" + upstream
+	if rawQuery := query.Encode(); rawQuery != "" {
+		target += "?" + rawQuery
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -306,22 +605,50 @@ func (b *demoBackend) NewSession(_ context.Context, sctx *ihtml.ChatSessionConte
 
 // Models 实现 ihtml.ModelLister。
 func (b *demoBackend) Models(_ context.Context) (ihtml.ChatModels, error) {
-	return ihtml.ChatModels{ModelReady: true, CurrentModel: "demo(演示模式)", Models: []string{"demo(演示模式)"}}, nil
+	return ihtml.ChatModels{
+		ProtocolVersion: ihtml.ChatProtocolVersion,
+		Provider:        "demo",
+		ModelReady:      true,
+		CurrentModel:    "demo(演示模式)",
+		Models:          []string{"demo(演示模式)"},
+		AgentModes:      []string{chat.AgentModeFast},
+	}, nil
 }
 
 type demoSession struct {
 	sctx *ihtml.ChatSessionContext
+
+	mu         sync.Mutex
+	cancel     context.CancelFunc
+	generation uint64
+	closed     bool
+	wg         sync.WaitGroup
 }
 
-func (s *demoSession) Close() {}
-
-func demoDelay() { time.Sleep(300 * time.Millisecond) }
+func (s *demoSession) Close() {
+	s.mu.Lock()
+	s.closed = true
+	s.generation++
+	cancel := s.cancel
+	s.cancel = nil
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	s.wg.Wait()
+}
 
 func (s *demoSession) HandleEvent(ctx context.Context, ev *ihtml.ChatClientEvent) {
+	if ev == nil {
+		return
+	}
+	if ev.Type == "cancel" {
+		s.stopRun()
+		return
+	}
 	if ev.Type != "user_message" {
 		return
 	}
-	emit := s.sctx.Emit
 	text := ""
 	for i := len(ev.Messages) - 1; i >= 0; i-- {
 		if ev.Messages[i].Role == "user" {
@@ -329,41 +656,119 @@ func (s *demoSession) HandleEvent(ctx context.Context, ev *ihtml.ChatClientEvent
 			break
 		}
 	}
-	_ = emit(ihtml.ChatStreamEvent{Type: "turn_start", ModelReady: true})
-	_ = emit(ihtml.ChatStreamEvent{Type: "assistant_status", Status: "正在理解需求。", ModelReady: true})
-	demoDelay()
-	_ = emit(ihtml.ChatStreamEvent{Type: "assistant_thinking", Thinking: "演示模式: 把用户的话写成一张卡片放到当前页面。", ModelReady: true})
+	s.startRun(ctx, text)
+}
+
+func (s *demoSession) stopRun() {
+	s.mu.Lock()
+	s.generation++
+	cancel := s.cancel
+	s.cancel = nil
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (s *demoSession) startRun(parent context.Context, text string) {
+	runCtx, cancel := context.WithCancel(parent)
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		cancel()
+		return
+	}
+	previous := s.cancel
+	s.generation++
+	generation := s.generation
+	s.cancel = cancel
+	s.wg.Add(1)
+	s.mu.Unlock()
+	if previous != nil {
+		previous()
+	}
+	go func() {
+		defer s.wg.Done()
+		defer cancel()
+		defer func() {
+			s.mu.Lock()
+			if s.generation == generation {
+				s.cancel = nil
+			}
+			s.mu.Unlock()
+		}()
+		s.runDemo(runCtx, generation, text)
+	}()
+}
+
+func (s *demoSession) currentRun(ctx context.Context, generation uint64) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.closed && s.generation == generation
+}
+
+func (s *demoSession) emitRun(ctx context.Context, generation uint64, event ihtml.ChatStreamEvent) bool {
+	return s.currentRun(ctx, generation) && s.sctx.Emit(event) == nil
+}
+
+func demoWait(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func (s *demoSession) runDemo(ctx context.Context, generation uint64, text string) {
+	if !s.emitRun(ctx, generation, ihtml.ChatStreamEvent{Type: "turn_start", ModelReady: true}) ||
+		!s.emitRun(ctx, generation, ihtml.ChatStreamEvent{Type: "assistant_status", Status: "正在理解需求。", ModelReady: true}) ||
+		!demoWait(ctx, 300*time.Millisecond) ||
+		!s.emitRun(ctx, generation, ihtml.ChatStreamEvent{Type: "assistant_thinking", Thinking: "演示模式: 把用户的话写成一张卡片放到当前页面。", ModelReady: true}) {
+		return
+	}
 	call := &ihtml.ProposedToolCall{
 		ID: fmt.Sprintf("demo_%d", time.Now().UnixNano()), Name: "ui_item_put", Title: "写入/更新 Item",
 		Method: "TOOL", Path: "ui://ui_item_put", Risk: "medium",
 	}
-	_ = emit(ihtml.ChatStreamEvent{Type: "tool_start", ToolCall: call, ToolName: call.Name, ToolTitle: call.Title, ToolStatus: "running", ToolInput: `{"items":[{"id":"ai-note",…}]}`, ModelReady: true})
-	demoDelay()
+	if !s.emitRun(ctx, generation, ihtml.ChatStreamEvent{Type: "tool_start", ToolCall: call, ToolName: call.Name, ToolTitle: call.Title, ToolStatus: "running", ToolInput: `{"items":[{"id":"ai-note",…}]}`, ModelReady: true}) ||
+		!demoWait(ctx, 300*time.Millisecond) {
+		return
+	}
 	note := text
 	if note == "" {
 		note = "(空消息)"
 	}
-	err := s.sctx.Service.PutItems(ctx, s.sctx.User, []ihtml.Item{{
-		ID: "ai-note", Type: ihtml.ItemHTML, Order: 26, Title: "AI 回应卡片",
-		Content: `<div></div><script>(function(){var g=document.getElementById('demo-grid');var c=document.createElement('div');c.className='ui-card';c.innerHTML='<div class="ui-stat"><span class="label">AI 刚写入的卡片</span><span class="value" style="font-size:17px">🤖 ' + ` + jsString("你说: "+note) + ` + '</span></div>';(g||document.body).appendChild(c);ihtml.items.onTeardown('ai-note',function(){c.remove()});})();</script>`,
-	}}, "chat", "演示助手写入回应卡片")
-	if err != nil {
-		_ = emit(ihtml.ChatStreamEvent{Type: "tool_result", ToolCall: call, ToolName: call.Name, ToolTitle: call.Title, ToolStatus: "error", ToolSummary: err.Error(), ModelReady: true})
-		_ = emit(ihtml.ChatStreamEvent{Type: "turn_error", Error: err.Error(), ModelReady: true})
+	// 与 cancel/new-turn 在线性化点互斥；取消若先到达，这里不会写入。
+	s.mu.Lock()
+	if s.closed || s.generation != generation || ctx.Err() != nil {
+		s.mu.Unlock()
 		return
 	}
-	_ = emit(ihtml.ChatStreamEvent{Type: "tool_result", ToolCall: call, ToolName: call.Name, ToolTitle: call.Title, ToolStatus: "success", ToolSummary: "已写入 1 个 Item: ai-note(dash 页)", ModelReady: true})
-	for _, chunk := range []string{"<p>已把你的话写成一张卡片放进页面。", "接真实模型后我能真正理解需求、取业务数据、改主题、修报错。</p>"} {
-		_ = emit(ihtml.ChatStreamEvent{Type: "assistant_delta", Delta: chunk, ModelReady: true})
-		time.Sleep(120 * time.Millisecond)
+	err := s.sctx.Service.PutItems(ctx, s.sctx.User, []ihtml.Item{{
+		ID: "ai-note", Type: ihtml.ItemHTML, Order: 26, Title: "AI 回应卡片",
+		Content: `<div class="ui-page" style="padding-top:0;padding-bottom:0"><div class="ui-card"><div class="ui-stat"><span class="label">AI 刚写入的卡片</span><span class="value" style="font-size:17px">` + html.EscapeString("你说: "+note) + `</span></div></div></div>`,
+	}}, "chat", "演示助手写入回应卡片")
+	s.mu.Unlock()
+	if err != nil {
+		_ = s.emitRun(ctx, generation, ihtml.ChatStreamEvent{Type: "tool_result", ToolCall: call, ToolName: call.Name, ToolTitle: call.Title, ToolStatus: "error", ToolSummary: err.Error(), ModelReady: true})
+		_ = s.emitRun(ctx, generation, ihtml.ChatStreamEvent{Type: "turn_error", Error: err.Error(), ModelReady: true})
+		return
 	}
-	_ = emit(ihtml.ChatStreamEvent{Type: "assistant_done", ModelReady: true})
-}
-
-// jsString 把文本安全地嵌进单引号 JS 字符串字面量。
-func jsString(s string) string {
-	r := strings.NewReplacer(`\`, `\\`, `'`, `\'`, "\n", `\n`, "\r", ``, "<", `\x3c`)
-	return "'" + r.Replace(s) + "'"
+	if !s.emitRun(ctx, generation, ihtml.ChatStreamEvent{Type: "tool_result", ToolCall: call, ToolName: call.Name, ToolTitle: call.Title, ToolStatus: "success", ToolSummary: "已写入 1 个 Item: ai-note(当前页)", ModelReady: true}) {
+		return
+	}
+	for _, chunk := range []string{"<p>已把你的话写成一张卡片放进页面。", "接真实模型后我能真正理解需求、取业务数据、改主题、修报错。</p>"} {
+		if !s.emitRun(ctx, generation, ihtml.ChatStreamEvent{Type: "assistant_delta", Delta: chunk, ModelReady: true}) || !demoWait(ctx, 120*time.Millisecond) {
+			return
+		}
+	}
+	_ = s.emitRun(ctx, generation, ihtml.ChatStreamEvent{Type: "assistant_done", ModelReady: true})
 }
 
 /* ---------- 预置演示数据: 单页默认形态(不建页面/菜单, 用内核组件类) ---------- */
@@ -377,22 +782,32 @@ func seedDemo(h *ihtml.Handler) {
 		{
 			ID: "demo-head", Type: ihtml.ItemHTML, Title: "页头(标题+主题切换)", Order: 10,
 			Content: `<div class="ui-page" style="padding-bottom:0">
-  <div class="ui-toolbar">
-    <div style="flex:1;min-width:220px">
-      <span class="ui-badge">ihtml · 动态页面</span>
-      <h1 class="ui-title" style="font-size:20px;margin:8px 0 2px" id="demo-hello">工作台</h1>
-      <div class="ui-muted" style="font-size:13px">默认单页形态 · 每个区块都是一个 Item · AI 可增删改并持久化</div>
-    </div>
-    <button class="ui-btn" onclick="ihtml.theme.set({mode:'light'})">☀️ 亮色</button>
-    <button class="ui-btn" onclick="ihtml.theme.set({mode:'dark'})">🌙 暗色</button>
-  </div>
-</div>
-<script>
-(function(){
-  var t = document.getElementById('demo-hello');
-  if (ihtml.config.nickname) t.textContent = ihtml.config.nickname + ' 的工作台';
-})();
-</script>`,
+	  <div class="ui-toolbar demo-header">
+	    <div style="flex:1;min-width:220px">
+	      <span class="ui-badge">ihtml · 动态页面</span>
+	      <h1 class="ui-title" style="font-size:20px;margin:8px 0 2px" id="demo-hello">工作台</h1>
+	      <div class="ui-muted" style="font-size:13px">默认单页形态 · 每个区块都是一个 Item · AI 可增删改并持久化</div>
+	    </div>
+	    <div class="ui-segment" role="group" aria-label="主题模式" style="margin-left:auto">
+	      <button class="ui-btn" type="button" data-demo-theme="light">亮色</button>
+	      <button class="ui-btn" type="button" data-demo-theme="dark">暗色</button>
+	    </div>
+	  </div>
+	</div>
+	<script>
+	(function(){
+	  var t = document.getElementById('demo-hello');
+	  if (ihtml.config.nickname) t.textContent = ihtml.config.nickname + ' 的工作台';
+	  var buttons = Array.from(document.querySelectorAll('[data-demo-theme]'));
+	  function renderTheme(theme){
+	    buttons.forEach(function(btn){ btn.setAttribute('aria-pressed', String(theme.mode === btn.dataset.demoTheme)); });
+	  }
+	  buttons.forEach(function(btn){ btn.onclick = function(){ ihtml.theme.set({mode:btn.dataset.demoTheme}); }; });
+	  renderTheme(ihtml.theme.get());
+	  var offTheme = ihtml.theme.onChange(renderTheme);
+	  ihtml.items.onTeardown('demo-head', offTheme);
+	})();
+	</script>`,
 		},
 		{
 			ID: "demo-stats", Type: ihtml.ItemHTML, Title: "统计卡片区", Order: 20,
@@ -429,7 +844,7 @@ func seedDemo(h *ihtml.Handler) {
     ihtml.kv.set('demo.counter', count).catch(function(e){ ihtml.ui.toast('保存失败: ' + e.message, 'error'); });
   };
   var envEl = document.getElementById('demo-env');
-  function renderEnv(){ envEl.textContent = ihtml.env.mode === 'mobile' ? '📱 Mobile' : '🖥 PC'; }
+	  function renderEnv(){ envEl.textContent = ihtml.env.mode === 'mobile' ? 'Mobile' : 'Desktop'; }
   renderEnv();
   var offEnv = ihtml.env.onChange(renderEnv);
   ihtml.items.onTeardown('demo-stats', function(){ clearInterval(timer); offEnv(); });

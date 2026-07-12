@@ -8,6 +8,67 @@ import (
 	"time"
 )
 
+type aliasingReadStore struct {
+	Store
+	items     []Item
+	value     json.RawMessage
+	revisions []RevisionInfo
+}
+
+func (s *aliasingReadStore) Items(context.Context, string) ([]Item, error) {
+	return s.items, nil
+}
+
+func (s *aliasingReadStore) KVGet(context.Context, string, string) (json.RawMessage, error) {
+	return s.value, nil
+}
+
+func (s *aliasingReadStore) Revisions(context.Context, string) ([]RevisionInfo, error) {
+	return s.revisions, nil
+}
+
+func TestHandlerDefensivelyCopiesThirdPartyStoreReads(t *testing.T) {
+	store := &aliasingReadStore{
+		Store: NewMemoryStore(),
+		items: []Item{
+			{ID: "later", Type: ItemHTML, Order: 2, Content: "<div/>", Meta: map[string]string{"owner": "store"}},
+			{ID: "first", Type: ItemHTML, Order: 1, Content: "<div/>"},
+		},
+		value:     json.RawMessage(`{"owned":true}`),
+		revisions: []RevisionInfo{{ID: "revision-owned-by-store"}},
+	}
+	h := New(store)
+	defer h.Close()
+
+	items, err := h.ListItems(context.Background(), "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	items[1].Meta["owner"] = "caller"
+	items[0].ID = "caller"
+	if store.items[0].ID != "later" || store.items[0].Meta["owner"] != "store" {
+		t.Fatalf("store item memory was mutated: %#v", store.items)
+	}
+
+	value, err := h.KVGet(context.Background(), "user", "key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	value[2] = 'X'
+	if string(store.value) != `{"owned":true}` {
+		t.Fatalf("store raw message was mutated: %s", store.value)
+	}
+
+	revisions, err := h.ListRevisions(context.Background(), "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	revisions[0].ID = "caller"
+	if store.revisions[0].ID != "revision-owned-by-store" {
+		t.Fatal("store revision slice was mutated")
+	}
+}
+
 // 两个内置 Store 跑同一套一致性用例。
 func TestStores(t *testing.T) {
 	t.Run("memory", func(t *testing.T) { storeConformance(t, NewMemoryStore()) })
@@ -64,7 +125,10 @@ func storeConformance(t *testing.T, s Store) {
 
 	// 快照与裁剪
 	for i := range 5 {
-		rev := Revision{ID: newRevisionID() + string(rune('a'+i)), CreatedAt: time.Now(), Items: set, Note: "n"}
+		rev := Revision{
+			Version: CurrentDataVersion, ID: newRevisionID() + string(rune('a'+i)), CreatedAt: time.Now(),
+			Items: set, Pages: []Page{{Name: "dash", Title: "Dashboard"}}, Note: "n",
+		}
 		if err := s.AddRevision(ctx, user, rev, 3); err != nil {
 			t.Fatal(err)
 		}
@@ -82,6 +146,33 @@ func storeConformance(t *testing.T, s Store) {
 	}
 	if _, err := s.RevisionItems(ctx, user, "nope"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing revision should be ErrNotFound, got %v", err)
+	}
+	fullStore, ok := s.(RevisionStore)
+	if !ok {
+		t.Fatal("built-in store should implement RevisionStore")
+	}
+	full, err := fullStore.Revision(ctx, user, revs[0].ID)
+	if err != nil || full.Version != CurrentDataVersion || len(full.Pages) != 1 {
+		t.Fatalf("full revision roundtrip: %+v %v", full, err)
+	}
+
+	stateStore, ok := s.(UserStateStore)
+	if !ok {
+		t.Fatal("built-in store should implement UserStateStore")
+	}
+	state, err := stateStore.UserState(ctx, user)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.Items = []Item{{ID: "state", Type: ItemCSS, Content: ".state{}"}}
+	state.KV["state"] = json.RawMessage(`true`)
+	if err := stateStore.ReplaceUserState(ctx, user, state); err != nil {
+		t.Fatal(err)
+	}
+	items, _ = s.Items(ctx, user)
+	value, valueErr := s.KVGet(ctx, user, "state")
+	if len(items) != 1 || items[0].ID != "state" || valueErr != nil || string(value) != "true" {
+		t.Fatalf("atomic state replace: items=%+v value=%s err=%v", items, value, valueErr)
 	}
 
 	// 用户隔离

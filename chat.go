@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -16,6 +17,39 @@ import (
 
 // 对话走 WebSocket, 线格式与 casino admin AI 助手保持一致,
 // 便于既有的 eino/ADK 后端与前端经验直接平移。
+
+const (
+	// ChatProtocolVersion identifies the additive WebSocket/capabilities contract.
+	ChatProtocolVersion = 1
+
+	ChatClientUserMessage = "user_message"
+	ChatClientConfirmTool = "confirm_tool"
+	ChatClientCancel      = "cancel"
+
+	ChatStreamTurnStart            = "turn_start"
+	ChatStreamAssistantStatus      = "assistant_status"
+	ChatStreamAssistantThinking    = "assistant_thinking"
+	ChatStreamAssistantDelta       = "assistant_delta"
+	ChatStreamAssistantPlan        = "assistant_plan"
+	ChatStreamAssistantAgent       = "assistant_agent"
+	ChatStreamAssistantBudget      = "assistant_budget"
+	ChatStreamToolStart            = "tool_start"
+	ChatStreamConfirmationRequired = "confirmation_required"
+	ChatStreamToolResult           = "tool_result"
+	ChatStreamAssistantDone        = "assistant_done"
+	ChatStreamTurnError            = "turn_error"
+
+	ChatToolPending   = "pending"
+	ChatToolRunning   = "running"
+	ChatToolSuccess   = "success"
+	ChatToolError     = "error"
+	ChatToolCancelled = "cancelled"
+
+	ChatRiskLow     = "low"
+	ChatRiskMedium  = "medium"
+	ChatRiskHigh    = "high"
+	ChatRiskBlocked = "blocked"
+)
 
 // ChatMessage 是一条对话消息。
 type ChatMessage struct {
@@ -50,37 +84,80 @@ type ChatClientContext struct {
 // ChatClientEvent 是客户端发来的 WS 事件:
 // type = user_message | confirm_tool | cancel。
 type ChatClientEvent struct {
-	Type          string            `json:"type"`
-	Messages      []ChatMessage     `json:"messages,omitempty"`
-	Model         string            `json:"model,omitempty"`
+	Type     string        `json:"type"`
+	Messages []ChatMessage `json:"messages,omitempty"`
+	Model    string        `json:"model,omitempty"`
+	// AgentMode 为空或 fast 时走低延迟单 Agent；deep 仅在服务端显式开启后可用。
+	AgentMode     string            `json:"agent_mode,omitempty"`
 	ToolsEnabled  *bool             `json:"tools_enabled,omitempty"`
 	ClientContext ChatClientContext `json:"client_context"`
 	ToolCall      *ProposedToolCall `json:"tool_call,omitempty"`
 }
 
+// ChatPlanItem 是 Deep 模式向前端投影的一条结构化任务。
+type ChatPlanItem struct {
+	ID      string `json:"id"`
+	Content string `json:"content"`
+	Status  string `json:"status"` // pending / in_progress / completed
+}
+
+// ChatAgentStage 描述主 Agent 或只读子 Agent 的阶段状态。它独立于工具卡，
+// 前端可据此渲染层级任务，而无需解析模型文本。
+type ChatAgentStage struct {
+	Mode         string `json:"mode"`  // fast / deep
+	Agent        string `json:"agent"` // root / ui_inspector / ui_reviewer
+	TaskID       string `json:"task_id,omitempty"`
+	ParentTaskID string `json:"parent_task_id,omitempty"`
+	Phase        string `json:"phase,omitempty"` // turn / plan / inspect / review / approval
+	Status       string `json:"status"`          // running / completed / paused / error
+	Summary      string `json:"summary,omitempty"`
+	// ApprovalResume 明示确认后的恢复能力。当前 deep 使用 manual_tool_only：
+	// 只执行确认卡，不会静默恢复或宣称整个计划完成。
+	ApprovalResume string `json:"approval_resume,omitempty"`
+}
+
+// ChatTurnBudget 是一轮共享预算的快照；Deep 根 Agent 与所有子 Agent 共用。
+type ChatTurnBudget struct {
+	ModelCalls     int64 `json:"model_calls"`
+	MaxModelCalls  int64 `json:"max_model_calls,omitempty"`
+	Subtasks       int64 `json:"subtasks"`
+	MaxSubtasks    int64 `json:"max_subtasks,omitempty"`
+	DeadlineUnixMS int64 `json:"deadline_unix_ms,omitempty"`
+}
+
 // ChatStreamEvent 是服务端推给前端的流式事件, type 取值:
 // turn_start / assistant_status / assistant_thinking / assistant_delta /
-// tool_start / confirmation_required / tool_result / assistant_done / turn_error。
+// assistant_plan / assistant_agent / assistant_budget / tool_start /
+// confirmation_required / tool_result / assistant_done / turn_error。
 type ChatStreamEvent struct {
-	Type        string             `json:"type"`
-	RunID       string             `json:"run_id,omitempty"`
-	TurnID      string             `json:"turn_id,omitempty"`
-	Seq         int64              `json:"seq,omitempty"`
-	Delta       string             `json:"delta,omitempty"`
-	Thinking    string             `json:"thinking,omitempty"`
-	Status      string             `json:"status,omitempty"`
-	Message     string             `json:"message,omitempty"`
-	ModelReady  bool               `json:"model_ready,omitempty"`
-	ToolCalls   []ProposedToolCall `json:"tool_calls,omitempty"`
-	ToolCall    *ProposedToolCall  `json:"tool_call,omitempty"`
-	ToolResult  json.RawMessage    `json:"tool_result,omitempty"`
-	ToolName    string             `json:"tool_name,omitempty"`
-	ToolTitle   string             `json:"tool_title,omitempty"`
-	ToolStatus  string             `json:"tool_status,omitempty"`
-	ToolInput   string             `json:"tool_input,omitempty"`
-	ToolSummary string             `json:"tool_summary,omitempty"`
-	ToolDebug   json.RawMessage    `json:"tool_debug,omitempty"`
-	Error       string             `json:"error,omitempty"`
+	Type     string `json:"type"`
+	RunID    string `json:"run_id,omitempty"`
+	TurnID   string `json:"turn_id,omitempty"`
+	Seq      int64  `json:"seq,omitempty"`
+	Delta    string `json:"delta,omitempty"`
+	Thinking string `json:"thinking,omitempty"`
+	// ThinkingID groups the incremental reasoning events produced by one model
+	// output. Legacy servers and clients may omit or ignore it.
+	ThinkingID string `json:"thinking_id,omitempty"`
+	// ThinkingDone marks the last event in a reasoning segment. A non-streamed
+	// reasoning response can carry both Thinking and ThinkingDone in one event.
+	ThinkingDone bool               `json:"thinking_done,omitempty"`
+	Status       string             `json:"status,omitempty"`
+	Message      string             `json:"message,omitempty"`
+	ModelReady   bool               `json:"model_ready,omitempty"`
+	ToolCalls    []ProposedToolCall `json:"tool_calls,omitempty"`
+	ToolCall     *ProposedToolCall  `json:"tool_call,omitempty"`
+	ToolResult   json.RawMessage    `json:"tool_result,omitempty"`
+	ToolName     string             `json:"tool_name,omitempty"`
+	ToolTitle    string             `json:"tool_title,omitempty"`
+	ToolStatus   string             `json:"tool_status,omitempty"`
+	ToolInput    string             `json:"tool_input,omitempty"`
+	ToolSummary  string             `json:"tool_summary,omitempty"`
+	ToolDebug    json.RawMessage    `json:"tool_debug,omitempty"`
+	Plan         []ChatPlanItem     `json:"plan,omitempty"`
+	Agent        *ChatAgentStage    `json:"agent,omitempty"`
+	Budget       *ChatTurnBudget    `json:"budget,omitempty"`
+	Error        string             `json:"error,omitempty"`
 }
 
 // ProposedToolCall 是一次工具调用的描述; 需人工确认的调用带 HMAC 签名的
@@ -96,6 +173,8 @@ type ProposedToolCall struct {
 	Risk                 string         `json:"risk"` // low / medium / high / blocked
 	RequiresConfirmation bool           `json:"requires_confirmation"`
 	Reason               string         `json:"reason"`
+	AgentMode            string         `json:"agent_mode,omitempty"`
+	ApprovalResume       string         `json:"approval_resume,omitempty"`
 	ConfirmationToken    string         `json:"confirmation_token,omitempty"`
 	ConfirmationNonce    string         `json:"confirmation_nonce,omitempty"`
 	ConfirmationExpires  int64          `json:"confirmation_expires,omitempty"`
@@ -103,10 +182,16 @@ type ProposedToolCall struct {
 
 // ChatModels 是 GET /api/chat/models 的响应。
 type ChatModels struct {
-	ModelReady       bool     `json:"model_ready"`
-	CurrentModel     string   `json:"current_model"`
-	Models           []string `json:"models"`
-	RequestTimeoutMS int64    `json:"request_timeout_ms"`
+	ProtocolVersion int      `json:"protocol_version"`
+	Provider        string   `json:"provider,omitempty"`
+	ModelReady      bool     `json:"model_ready"`
+	CurrentModel    string   `json:"current_model"`
+	Models          []string `json:"models"`
+	AgentModes      []string `json:"agent_modes,omitempty"`
+	// DeepApprovalResume 当前为 manual_tool_only；未来安全接入 ADK checkpoint
+	// 后可升级为 checkpoint，而无需客户端猜测。
+	DeepApprovalResume string `json:"deep_approval_resume,omitempty"`
+	RequestTimeoutMS   int64  `json:"request_timeout_ms"`
 	// ModelSelect 为 true 时前端展示模型选择器(默认隐藏——
 	// 模型是运维概念, 不该暴露给终端用户)。
 	ModelSelect bool `json:"model_select,omitempty"`
@@ -125,15 +210,19 @@ type APISpec struct {
 type ChatSessionContext struct {
 	// User 是 UserResolver 解析出的用户。
 	User string
-	// Service 用于读改该用户的 UI 数据(Item/页面/主题/KV/快照/页面错误)。
+	// Service 用于读改 UI 数据。为兼容已有 ChatBackend 保留；新实现应优先
+	// 使用 ScopedService，避免意外传入其他用户标识。
 	Service Service
+	// ScopedService 已绑定并持续校验当前用户，不暴露跨租户 user 参数。
+	ScopedService ScopedService
 	// Emit 向前端推流式事件, 并发安全; 连接断开后返回错误。
 	Emit func(ChatStreamEvent) error
 	// Request 是发起 WS 的原始请求, 供后端取额外参数/推导同源地址。
 	Request *http.Request
 	// APIs 是 WithAPIs 声明的业务 API 目录。
 	APIs []APISpec
-	// Access 是该用户的访问策略(只读时后端应拒绝写工具)。
+	// Access 是建立会话时的访问策略快照(只读时后端应隐藏/
+	// 拒绝写工具)。Service 还会在每次调用时动态重验，防止撤权空窗。
 	Access Access
 }
 
@@ -160,24 +249,37 @@ const (
 	chatWSPingEvery = 25 * time.Second
 )
 
-func (h *Handler) handleChatModels(w http.ResponseWriter, r *http.Request, _ string) {
+func (h *Handler) handleChatModels(w http.ResponseWriter, r *http.Request, user string) {
+	if h.accessFor(r, user).ChatDisabled {
+		h.writeError(w, http.StatusForbidden, fmt.Errorf("chat disabled for this user"))
+		return
+	}
 	if h.opts.chat == nil {
-		writeJSON(w, http.StatusOK, ChatModels{Models: []string{}})
+		writeJSON(w, http.StatusOK, ChatModels{ProtocolVersion: ChatProtocolVersion, Models: []string{}})
 		return
 	}
 	if lister, ok := h.opts.chat.(ModelLister); ok {
 		out, err := lister.Models(r.Context())
 		if err != nil {
-			h.writeError(w, http.StatusBadGateway, err)
+			h.opts.logger.Warn("ihtml: chat model discovery failed", "user", user, "err", err)
+			writeJSON(w, http.StatusBadGateway, map[string]any{"error": "model discovery unavailable"})
 			return
 		}
 		if out.Models == nil {
 			out.Models = []string{}
 		}
+		out.ProtocolVersion = ChatProtocolVersion
+		// ModelSelect=false 时模型是纯服务端运维配置。隐藏工具栏
+		// 不等于隐藏 API，因此响应本身也不得泄露名称/目录。
+		if !out.ModelSelect {
+			out.Provider = ""
+			out.CurrentModel = ""
+			out.Models = []string{}
+		}
 		writeJSON(w, http.StatusOK, out)
 		return
 	}
-	writeJSON(w, http.StatusOK, ChatModels{ModelReady: true, Models: []string{}})
+	writeJSON(w, http.StatusOK, ChatModels{ProtocolVersion: ChatProtocolVersion, ModelReady: true, Models: []string{}})
 }
 
 func (h *Handler) sameOrigin(r *http.Request) bool {
@@ -189,10 +291,31 @@ func (h *Handler) sameOrigin(r *http.Request) bool {
 		return true
 	}
 	u, err := url.Parse(origin)
-	if err != nil {
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil ||
+		u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
 		return false
 	}
-	return strings.EqualFold(u.Host, r.Host)
+	requestScheme := "http"
+	if r.TLS != nil {
+		requestScheme = "https"
+	}
+	return u.Scheme == requestScheme && strings.EqualFold(u.Host, r.Host)
+}
+
+func (h *Handler) chatConnectionAllowed(r *http.Request, user string) bool {
+	if !h.requestUserValid(r, user) {
+		return false
+	}
+	return !h.accessFor(r, user).ChatDisabled
+}
+
+func (h *Handler) clientModelSelectionAllowed(ctx context.Context) bool {
+	lister, ok := h.opts.chat.(ModelLister)
+	if !ok {
+		return false
+	}
+	models, err := lister.Models(ctx)
+	return err == nil && models.ModelSelect
 }
 
 func (h *Handler) handleChatWS(w http.ResponseWriter, r *http.Request, user string) {
@@ -228,6 +351,13 @@ func (h *Handler) handleChatWS(w http.ResponseWriter, r *http.Request, user stri
 	}
 	defer conn.Close()
 	h.wsMu.Lock()
+	if h.closed.Load() {
+		h.wsMu.Unlock()
+		_ = conn.WriteControl(websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseGoingAway, "server shutting down"),
+			time.Now().Add(chatWSWriteWait))
+		return
+	}
 	h.wsConns[conn] = struct{}{}
 	h.wsMu.Unlock()
 	defer func() {
@@ -239,6 +369,7 @@ func (h *Handler) handleChatWS(w http.ResponseWriter, r *http.Request, user stri
 	defer h.metric("ws_sessions", -1)
 
 	ctx := r.Context()
+	allowClientModel := h.clientModelSelectionAllowed(ctx)
 	var writeMu sync.Mutex
 	emit := func(ev ChatStreamEvent) error {
 		writeMu.Lock()
@@ -246,14 +377,23 @@ func (h *Handler) handleChatWS(w http.ResponseWriter, r *http.Request, user stri
 		_ = conn.SetWriteDeadline(time.Now().Add(chatWSWriteWait))
 		return conn.WriteJSON(ev)
 	}
-	session, err := h.opts.chat.NewSession(ctx, &ChatSessionContext{
-		User:    user,
-		Service: h,
-		Emit:    emit,
-		Request: r,
-		APIs:    h.opts.apis,
-		Access:  access,
-	})
+	governed := &governedService{h: h, request: r, user: user, source: "chat", requireChat: true}
+	scoped, scopeErr := ScopeService(governed, user)
+	if scopeErr != nil {
+		h.opts.logger.Warn("ihtml: chat service scope failed", "user", user, "err", scopeErr)
+		_ = emit(ChatStreamEvent{Type: "turn_error", Error: "AI 会话初始化失败", ModelReady: true})
+		return
+	}
+	sessionContext := &ChatSessionContext{
+		User:          user,
+		Service:       governed,
+		ScopedService: scoped,
+		Emit:          emit,
+		Request:       r,
+		APIs:          h.opts.apis,
+		Access:        access,
+	}
+	session, err := h.opts.chat.NewSession(ctx, sessionContext)
 	if err != nil {
 		h.opts.logger.Warn("ihtml: chat session init failed", "user", user, "err", err)
 		_ = emit(ChatStreamEvent{Type: "turn_error", Error: "AI 会话初始化失败", ModelReady: true})
@@ -276,11 +416,24 @@ func (h *Handler) handleChatWS(w http.ResponseWriter, r *http.Request, user stri
 			case <-done:
 				return
 			case <-ticker.C:
+				// 长连接不能永久保留建连时的权限。认证会话
+				// 失效或 ChatDisabled 撤销后，最迟在下一次 ping 关闭。
+				if !h.chatConnectionAllowed(r, user) {
+					writeMu.Lock()
+					_ = conn.SetWriteDeadline(time.Now().Add(chatWSWriteWait))
+					_ = conn.WriteControl(websocket.CloseMessage,
+						websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "access revoked"),
+						time.Now().Add(chatWSWriteWait))
+					writeMu.Unlock()
+					_ = conn.Close()
+					return
+				}
 				writeMu.Lock()
 				_ = conn.SetWriteDeadline(time.Now().Add(chatWSWriteWait))
 				err := conn.WriteMessage(websocket.PingMessage, nil)
 				writeMu.Unlock()
 				if err != nil {
+					_ = conn.Close()
 					return
 				}
 			}
@@ -289,8 +442,17 @@ func (h *Handler) handleChatWS(w http.ResponseWriter, r *http.Request, user stri
 
 	for {
 		ev := &ChatClientEvent{}
-		if err := conn.ReadJSON(ev); err != nil {
+		if err := readChatClientEvent(conn, ev); err != nil {
 			return
+		}
+		if !h.chatConnectionAllowed(r, user) {
+			_ = emit(ChatStreamEvent{Type: "turn_error", Error: "当前会话权限已撤销。", ModelReady: true})
+			return
+		}
+		// 服务端未显式开放模型选择时，忽略客户端伪造的
+		// model 字段，后端继续使用运维配置的默认模型。
+		if !allowClientModel {
+			ev.Model = ""
 		}
 		// 对话轮次限流: 模型调用是真金白银, 频率闸门在库层守住
 		if ev.Type == "user_message" {
@@ -303,6 +465,28 @@ func (h *Handler) handleChatWS(w http.ResponseWriter, r *http.Request, user stri
 		}
 		session.HandleEvent(ctx, ev)
 	}
+}
+
+func readChatClientEvent(conn *websocket.Conn, ev *ChatClientEvent) error {
+	kind, reader, err := conn.NextReader()
+	if err != nil {
+		return err
+	}
+	if kind != websocket.TextMessage {
+		return fmt.Errorf("chat events must be text JSON messages")
+	}
+	dec := json.NewDecoder(reader)
+	if err := dec.Decode(ev); err != nil {
+		return err
+	}
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return fmt.Errorf("chat message must contain exactly one JSON value")
+		}
+		return fmt.Errorf("invalid trailing chat data: %w", err)
+	}
+	return nil
 }
 
 var errChatDisabled = errors.New("chat backend not configured")

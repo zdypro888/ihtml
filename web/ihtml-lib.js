@@ -6,72 +6,228 @@
   /* ---------- i18n: 内核 chrome 文案(zh/en, 宿主可经 mount strings 覆写) ---------- */
   const I18N = {
     zh: {
-      chat_entry: 'AI 助手', chat_title: '页面搭建助手', send: '发送', stop: '停止',
-      new_session: '新会话', refresh_models: '刷新模型', model_placeholder: '选择已加载模型, 或直接输入模型名',
-      composer_placeholder: '告诉我你想要的界面/修改…  (Enter 发送, Shift+Enter 换行)',
-      welcome: '你好, 我是页面搭建助手。直接说你想要的界面或修改, 我会实时改给你看, 改动会永久保留。',
+      chat_entry: 'AI 助手', chat_title: 'AI 页面助手', send: '发送', stop: '停止',
+      new_session: '新对话', close: '关闭', settings: '页面设置', menu: '菜单', dialog: '对话框', page_actions: '页面操作', conversation: '与 AI 助手的对话',
+      refresh_models: '刷新模型', model_placeholder: '选择已加载模型, 或直接输入模型名',
+      agent_mode_label: '执行模式', agent_fast: 'Fast', agent_deep: 'Deep',
+      agent_fast_hint: '低延迟单代理，适合直接问答和明确修改。',
+      agent_deep_hint: '先规划并委派只读检查，适合复杂界面任务。',
+      agent_deep_manual: '需确认的变更会暂停；确认只执行当前卡片，计划不会自动继续。',
+      agent_plan: '计划', agent_plan_paused: '计划已暂停', agent_budget: '预算',
+      agent_model_budget: '模型 {used}/{max}', agent_subtask_budget: '子任务 {used}/{max}',
+      agent_root: '主代理', agent_inspector: '页面检查', agent_reviewer: 'UI 验收',
+      agent_status_pending: '待处理', agent_status_running: '进行中', agent_status_completed: '完成', agent_status_paused: '暂停', agent_status_error: '失败',
+      agent_manual_confirm: '确认只执行此卡，Deep 计划不会自动恢复；完成后发送“继续”进行后续验收。',
+      composer_placeholder: '描述你想创建或修改的界面…', composer_hint: 'Enter 发送 · Shift+Enter 换行',
+      welcome: '告诉我你想创建或修改什么界面。我会先说明处理过程，再把结果直接应用到页面。',
       session_reset: '新会话已开始。之前的对话上下文已清空, 页面 Item 不受影响。',
       chat_reconnected: '连接已重连, 上下文已恢复。', chat_disconnected: '连接已断开, 发送消息时会自动重连。',
-      process: '分析过程', analyzing: '正在分析', thinking: '思考过程', done: '已完成',
+      process: '处理记录', analyzing: '正在处理', thinking: '模型思考', done: '已完成', turn_stopped: '已停止', turn_failed: '处理失败',
       tool_running: '执行中', tool_pending: '待确认', tool_success: '完成', tool_error: '失败', tool_cancelled: '已取消',
       risk_low: '低风险', risk_medium: '中风险', risk_high: '高风险', risk_blocked: '已拦截',
       confirm_run: '确认执行', cancel: '取消', confirmed_running: '已确认, 正在执行。', cancelled_not_run: '已取消, 未执行。',
       confirm_expired: '确认卡已过期, 请重新让 AI 发起。', expires_in: '有效期',
       params_title: '操作参数', debug_title: '调试详情', tools_called: '调用 {n} 个工具',
+      process_steps: '过程', steps_completed: '已完成 {n} 个步骤', tools_running: '正在执行 {n} 项', answering: '正在整理回答',
+      reasoning_step: '分析步骤 {n}', reasoning_streaming: '正在分析', reasoning_complete: '分析完成', technical_details: '技术详情',
+      request_summary: '请求摘要', result_data: '返回结果', diagnostic_data: '诊断信息', tool_reason: '为什么需要确认',
+      confirm_this_action: '确认此操作', dismiss_tool: '暂不执行', answer_complete: '回答已完成',
+      confirmation_announced: '{name} 待确认，{risk}', tool_confirmed_announced: '已确认 {name}，正在执行', tool_dismissed_announced: '已暂不执行 {name}',
+      confirmation_expired_announced: '{name} 的确认已过期', content_chars: '包含 {n} 个字符的内容', content_truncated: '内容过长，已截断。',
+      confirmation_busy: '请先等待当前请求完成，再处理之前的确认卡。',
+      tool_result_announced: '{name}：{status}。{summary}',
+      tool_title_item_list: '查看页面模块', tool_title_item_get: '读取模块源码', tool_title_item_put: '创建或更新模块',
+      tool_title_item_delete: '删除模块', tool_title_items_replace: '整体重建页面', tool_title_theme_get: '查看主题', tool_title_theme_set: '调整主题',
+      tool_title_kv_get: '读取持久数据', tool_title_kv_set: '写入持久数据', tool_title_page_list: '查看页面列表', tool_title_page_set: '创建或更新页面',
+      tool_title_page_delete: '删除页面', tool_title_api_probe: '检查业务接口', tool_title_revision_list: '查看历史快照', tool_title_revision_rollback: '回滚到快照',
+      tool_title_page_errors: '查看页面报错', tool_title_template_get: '读取当前模板结构', tool_title_template_put: '保存当前模板草稿',
+      tool_title_template_publish: '发布模板', tool_title_template_slot_delete: '删除模板区域', tool_title_unknown: '工具操作',
+      tool_action_item_list: '查看当前页面模块', tool_action_item_get: '读取模块 {id}', tool_action_item_put: '创建或更新 {n} 个界面模块',
+      tool_action_item_delete: '删除 {n} 个界面模块', tool_action_items_replace: '用 {n} 个模块整体重建页面', tool_action_theme_get: '读取页面主题',
+      tool_action_theme_set: '更新 {n} 项主题设置', tool_action_kv_get: '读取数据 {key}', tool_action_kv_set: '写入数据 {key}',
+      tool_action_page_list: '查看页面列表', tool_action_page_set: '创建或更新页面 {name}', tool_action_page_delete: '删除页面 {name}',
+      tool_action_api_probe: '检查接口 {path}', tool_action_revision_list: '查看历史快照', tool_action_revision_rollback: '回滚到快照 {id}',
+      tool_action_page_errors: '检查页面运行错误', tool_action_template_get: '读取 {page} 模板结构', tool_action_template_put: '保存 {page} 模板草稿',
+      tool_action_template_publish: '发布模板 {id}', tool_action_template_slot_delete: '删除模板区域 {id}', tool_action_unknown: '执行 {name}',
+      tool_fact_items: '模块数', tool_fact_item_id: '模块 ID', tool_fact_item_ids: '模块 ID', tool_fact_page: '页面', tool_fact_pages: '页面', tool_fact_scope: '作用范围',
+      tool_fact_note: '变更说明', tool_fact_fields: '更改项', tool_fact_key: '数据键', tool_fact_route: '路由', tool_fact_title: '显示名称', tool_fact_path: '接口路径',
+      tool_fact_query: '查询条件', tool_fact_revision: '版本', tool_fact_slot: '区域', tool_fact_limit: '数量上限', tool_fact_type: '类型', tool_fact_operation: '操作',
+      tool_fact_content: '完整内容', tool_fact_value: '数据概要', tool_fact_template: '模板 ID',
+      tool_scope_global: '全局', tool_scope_current: '当前页面', tool_page_root: '根页面', tool_yes: '是', tool_no: '否',
+      tool_omitted_chars: '{n} 个字符，已折叠', tool_omitted_structure: '结构数据（约 {n} 个字符），已折叠', tool_omitted_entries: '{n} 项数据，已折叠',
+      tool_redacted: '[已隐藏]', tool_more_entries: '…还有 {n} 项', tool_technical_truncated: '…（技术详情已截断）',
       tools_failed: '{n} 个工具失败', tools_pending: '{n} 个操作待确认', running_tool: '正在执行 {name}',
       empty_title: '这里还是一张白纸', empty_chat_hint: '告诉 AI 助手你想要什么界面, 它会当场为你搭出来, 并且一直记得。',
       empty_start: '开始对话', empty_api_hint: '还没有任何 UI Item。通过 API 写入第一组片段, 页面会立即呈现:',
       load_failed: '界面加载失败', retry: '重试', page_load_failed: '页面加载失败',
       auth_expired: '登录状态已过期, 请刷新页面或重新登录。', auth_missing: '缺少用户标识',
-      auth_missing_hint: '服务端无法从请求中解析出用户(默认支持 ?uid= 参数 / X-Ihtml-User 头 / ihtml_uid cookie; 嵌入模式经 mount 的 params 传入)。',
-      offline: '实时更新已断开, 重连中…', readonly_note: '当前为只读访问',
-      panel_title: '页面管理', panel_theme: '主题', panel_history: '历史', panel_errors: '错误',
+      auth_missing_hint: '服务端没有配置可信的用户认证。生产环境必须通过 WithUserResolver 对接已验证的会话或令牌。',
+      offline: '实时更新已断开, 重连中…', readonly_note: '当前为只读访问', readonly_short: '只读',
+      readonly_empty: '当前为只读访问，暂无可显示的内容。', previous_page: '上一页', next_page: '下一页',
+      panel_title: '页面设置', panel_theme: '主题', panel_history: '历史', panel_errors: '错误',
       theme_mode: '明暗', theme_auto: '跟随系统', theme_light: '亮色', theme_dark: '暗色',
-      theme_primary: '主色', theme_radius: '圆角',
+      theme_primary: '主色', theme_radius: '圆角', theme_color: '主题色 {color}',
       history_empty: '暂无历史快照。', rollback: '回滚到此', rollback_confirm_title: '回滚确认',
       rollback_confirm: '将恢复到该快照(当前状态也会先存为快照)。', rolled_back: '已回滚',
       errors_empty: '暂无页面错误。', items_label: '{n} 个 Item',
       safe_title: '安全模式', safe_hint: '未执行任何 UI Item。可以回滚到某个历史快照, 或让 AI 助手修复。',
+      safe_readonly_hint: '未执行任何 UI Item。当前账号没有修改权限，请联系有权限的管理员处理。',
       safe_exit: '退出安全模式', ai_unavailable: 'AI 服务未配置, 请联系管理员。',
       model_needed: '请先选择或输入模型名', chat_broken: 'AI 连接失败', ws_lost: '连接已断开, 请重新发送',
       item_broken: 'Item "{id}" 执行失败: {msg}', loading: '加载中…', author_user: '你',
       panel_layout: '布局', layout_edit: '开启拖拽排版', layout_editing: '正在编辑布局',
-      layout_done: '完成排版', layout_reset: '重置本页布局', layout_hint: '拖动块顶部手柄换位置, 拉右下角调宽高; 双击右下角恢复自动高度。',
-      layout_mobile: '手机上不支持编辑布局', layout_saved: '布局已保存',
+      layout_done: '完成排版', layout_reset: '重置本页布局', layout_hint: '拖动顶部手柄换位置，拉右下角调宽高；也可聚焦手柄后用方向键调整，Home 恢复自动高度。',
+      layout_mobile: '手机上不支持编辑布局', layout_saved: '布局已保存', layout_move: '移动 {title}', layout_resize: '调整 {title} 大小', layout_resize_short: '大小',
+      layout_resize_width: '调整 {title} 宽度', layout_resize_width_short: '宽度',
+      item_editor_title: '内容排版', item_editor_layout_mode: '排版模式', item_editor_auto: '自动排版', item_editor_free: '自由定位',
+      item_editor_auto_hint: '拖动内容调整顺序，拉动边角调整大小。', item_editor_free_hint: '自由移动、缩放内容，并调整层级。',
+      item_editor_save: '保存', item_editor_saving: '保存中…', item_editor_saved: '已保存', item_editor_done: '完成',
+      item_editor_unsaved: '有未保存修改', item_editor_clean: '修改已保存', item_editor_conflict: '布局已在其他位置更新，请重新打开编辑器。', item_editor_save_failed: '保存失败',
+      item_editor_current_items: '页面内容', item_editor_canvas: '编辑画布', item_editor_properties: '属性', item_editor_selected: '所选内容',
+      item_editor_select_hint: '选择画布中的内容后编辑属性。', item_editor_no_selection: '请选择内容', item_editor_empty: '当前页面没有可编辑内容',
+      item_editor_move: '拖动', item_editor_layer: '层级', item_editor_layer_up: '上移一层', item_editor_layer_down: '下移一层',
+      item_editor_layout: '大小与位置', item_editor_span: '所占列数', item_editor_grid_span: '所占列数', item_editor_auto_height: '自动高度',
+      item_editor_position: '位置', item_editor_size: '大小', item_editor_x: 'X', item_editor_y: 'Y', item_editor_width: '宽', item_editor_height: '高', item_editor_z: '层级', item_editor_z_index: '层级',
+      item_editor_appearance: '外观', item_editor_background: '背景色', item_editor_background_color: '背景色', item_editor_color: '文字色', item_editor_text_color: '文字色',
+      item_editor_radius: '圆角', item_editor_opacity: '透明度', item_editor_reset_size: '恢复默认大小', item_editor_reset_appearance: '恢复默认外观',
+      item_editor_global: '全局内容', item_editor_page_item: '当前页内容',
+      item_editor_discard: '放弃修改', item_editor_exit_hint: '退出会丢失尚未保存的排版和外观修改。',
+      item_editor_delete_title: '删除内容', item_editor_delete_hint: '删除后无法撤销，确定删除这项内容吗？',
+      item_editor_delete_global: '这是全局内容，删除后所有页面都会移除。确定删除吗？', item_editor_delete: '删除', item_editor_deleted: '已删除', item_editor_delete_failed: '删除失败',
+      item_editor_style: '颜色', item_editor_clear: '清除', item_editor_color_placeholder: '#RRGGBB / rgb() / var()', item_editor_invalid_color: '请输入有效的纯色值',
+      item_editor_columns: '列', item_editor_span_value: '宽 {value} 列', item_editor_main_area: '主内容区', item_editor_mobile_drag: '窄屏下请使用右侧数值精确调整',
+      item_editor_snap: '吸附 {value}px', item_editor_drop_here: '放到这里', item_editor_drop_position: '放置位置 {value}/{total}',
+      item_editor_content_min_span: '内容至少需要 {value} 列',
+      item_editor_panel_hint: '直接调整当前页面已有内容的位置、大小、颜色和层级。', item_editor_edit_items: '编辑当前页面内容',
+      item_editor_advanced_template: '高级：编辑空模板结构', item_editor_template_hint: '模板只定义空的容器和区域，不会预填或绑定页面内容。',
+      template_edit: '编辑模板', template_title: '模板结构工作室', template_layers: '结构', template_properties: '属性',
+      template_studio: '结构工作室', template_compare: '断点对比', template_preview_off: '内容预览已关闭',
+      template_root: 'Root', template_container: 'Container', template_slot: 'Slot', template_add_container: '添加容器', template_add_slot: '添加插槽',
+      template_empty_title: '空模板', template_empty_hint: '从 Container 或 Slot 开始搭建结构。业务内容不会出现在模板编辑器中。',
+      template_mode: '排版', template_flow: '流式', template_grid: '网格', template_free: '自由', template_columns: '列数',
+      template_direction: '方向', template_column: '纵向', template_row: '横向', template_wrap: '允许换行', template_align: '对齐',
+      template_gap: '间距', template_padding: '内边距', template_width: '宽', template_height: '高', template_x: 'X', template_y: 'Y',
+      template_name: '名称', template_delete: '删除', template_duplicate: '复制', template_undo: '撤销', template_redo: '重做',
+      template_save: '保存草稿', template_saving: '保存中…', template_saved: '草稿已保存', template_unsaved: '有未保存修改',
+      template_publish: '发布', template_publishing: '发布中…', template_unpublished: '未发布', template_published: '已发布 v{n}', template_draft_newer: '草稿有新改动', template_publish_failed: '发布失败',
+      template_exit: '退出编辑', template_delete_title: '删除结构', template_delete_hint: '将同时删除其全部子层。此操作可以撤销。', template_exit_hint: '退出后将丢失尚未保存的模板修改。',
+      template_desktop: '桌面', template_tablet: '平板', template_mobile: '手机', template_inherited: '继承',
+      template_canvas: '模板画布', template_drop_here: '拖到这里', template_locked_root: 'Root 不能删除或移动',
+      template_load_failed: '模板加载失败，请重试；远端模板未被覆盖', template_save_failed: '模板保存失败', template_min_height: '最小高度',
+      template_conflict: '模板已在其他位置更新', template_reload: '载入远端版本',
+      template_unassigned: '未放置内容', template_unassigned_empty: '没有未放置内容',
     },
     en: {
-      chat_entry: 'AI Assistant', chat_title: 'Page Builder', send: 'Send', stop: 'Stop',
-      new_session: 'New chat', refresh_models: 'Refresh', model_placeholder: 'Pick a loaded model or type a name',
-      composer_placeholder: 'Describe the UI you want…  (Enter to send, Shift+Enter for newline)',
-      welcome: 'Hi, I build this page for you. Tell me what you want — changes apply live and persist.',
+      chat_entry: 'AI assistant', chat_title: 'AI page assistant', send: 'Send', stop: 'Stop',
+      new_session: 'New chat', close: 'Close', settings: 'Page settings', menu: 'Menu', dialog: 'Dialog', page_actions: 'Page actions', conversation: 'Conversation with the AI assistant',
+      refresh_models: 'Refresh', model_placeholder: 'Pick a loaded model or type a name',
+      agent_mode_label: 'Execution mode', agent_fast: 'Fast', agent_deep: 'Deep',
+      agent_fast_hint: 'Low-latency single agent for direct questions and well-scoped changes.',
+      agent_deep_hint: 'Plans first and delegates read-only checks for complex interface work.',
+      agent_deep_manual: 'Changes requiring confirmation pause the plan. Confirming runs only that card and does not resume the plan.',
+      agent_plan: 'Plan', agent_plan_paused: 'Plan paused', agent_budget: 'Budget',
+      agent_model_budget: 'Model {used}/{max}', agent_subtask_budget: 'Subtasks {used}/{max}',
+      agent_root: 'Main agent', agent_inspector: 'Page inspector', agent_reviewer: 'UI reviewer',
+      agent_status_pending: 'Pending', agent_status_running: 'Running', agent_status_completed: 'Done', agent_status_paused: 'Paused', agent_status_error: 'Failed',
+      agent_manual_confirm: 'Confirming runs only this card; the Deep plan stays paused. Send “continue” afterward for further verification.',
+      composer_placeholder: 'Describe the interface you want to create or change…', composer_hint: 'Enter to send · Shift+Enter for a new line',
+      welcome: 'Describe what you want to create or change. I’ll show the work log, then apply the result to the page.',
       session_reset: 'New session started. Conversation context cleared; page items are unaffected.',
       chat_reconnected: 'Reconnected; context restored.', chat_disconnected: 'Disconnected. Sending will reconnect automatically.',
-      process: 'Working', analyzing: 'Analyzing', thinking: 'Thinking', done: 'Done',
+      process: 'Work log', analyzing: 'Working', thinking: 'Model reasoning', done: 'Done', turn_stopped: 'Stopped', turn_failed: 'Failed',
       tool_running: 'Running', tool_pending: 'Confirm', tool_success: 'Done', tool_error: 'Failed', tool_cancelled: 'Cancelled',
       risk_low: 'low risk', risk_medium: 'medium risk', risk_high: 'high risk', risk_blocked: 'blocked',
       confirm_run: 'Confirm', cancel: 'Cancel', confirmed_running: 'Confirmed, running.', cancelled_not_run: 'Cancelled.',
       confirm_expired: 'Confirmation expired; ask the AI again.', expires_in: 'expires in',
       params_title: 'Parameters', debug_title: 'Debug', tools_called: '{n} tool calls',
+      process_steps: 'Process', steps_completed: '{n} steps completed', tools_running: '{n} running', answering: 'Preparing the answer',
+      reasoning_step: 'Reasoning step {n}', reasoning_streaming: 'Analyzing', reasoning_complete: 'Analysis complete', technical_details: 'Technical details',
+      request_summary: 'Request summary', result_data: 'Result', diagnostic_data: 'Diagnostics', tool_reason: 'Why confirmation is required',
+      confirm_this_action: 'Confirm this action', dismiss_tool: 'Not now', answer_complete: 'Answer complete',
+      confirmation_announced: '{name} awaits confirmation, {risk}', tool_confirmed_announced: 'Confirmed {name}; running now', tool_dismissed_announced: 'Skipped {name}',
+      confirmation_expired_announced: 'Confirmation for {name} expired', content_chars: 'Contains {n} characters of content', content_truncated: 'Long content was truncated.',
+      confirmation_busy: 'Wait for the current request to finish before using an earlier confirmation card.',
+      tool_result_announced: '{name}: {status}. {summary}',
+      tool_title_item_list: 'View page modules', tool_title_item_get: 'Read module source', tool_title_item_put: 'Create or update modules',
+      tool_title_item_delete: 'Delete modules', tool_title_items_replace: 'Rebuild the page', tool_title_theme_get: 'View theme', tool_title_theme_set: 'Adjust theme',
+      tool_title_kv_get: 'Read persistent data', tool_title_kv_set: 'Write persistent data', tool_title_page_list: 'View pages', tool_title_page_set: 'Create or update a page',
+      tool_title_page_delete: 'Delete page', tool_title_api_probe: 'Check business API', tool_title_revision_list: 'View history snapshots', tool_title_revision_rollback: 'Roll back to snapshot',
+      tool_title_page_errors: 'View page errors', tool_title_template_get: 'Read current template structure', tool_title_template_put: 'Save current template draft',
+      tool_title_template_publish: 'Publish template', tool_title_template_slot_delete: 'Delete template region', tool_title_unknown: 'Tool operation',
+      tool_action_item_list: 'View the current page modules', tool_action_item_get: 'Read module {id}', tool_action_item_put: 'Create or update {n} interface modules',
+      tool_action_item_delete: 'Delete {n} interface modules', tool_action_items_replace: 'Rebuild the page with {n} modules', tool_action_theme_get: 'Read the page theme',
+      tool_action_theme_set: 'Update {n} theme settings', tool_action_kv_get: 'Read data {key}', tool_action_kv_set: 'Write data {key}',
+      tool_action_page_list: 'View the page list', tool_action_page_set: 'Create or update page {name}', tool_action_page_delete: 'Delete page {name}',
+      tool_action_api_probe: 'Check API {path}', tool_action_revision_list: 'View history snapshots', tool_action_revision_rollback: 'Roll back to snapshot {id}',
+      tool_action_page_errors: 'Check page runtime errors', tool_action_template_get: 'Read the {page} template structure', tool_action_template_put: 'Save the {page} template draft',
+      tool_action_template_publish: 'Publish template {id}', tool_action_template_slot_delete: 'Delete template region {id}', tool_action_unknown: 'Run {name}',
+      tool_fact_items: 'Modules', tool_fact_item_id: 'Module ID', tool_fact_item_ids: 'Module IDs', tool_fact_page: 'Page', tool_fact_pages: 'Pages', tool_fact_scope: 'Scope',
+      tool_fact_note: 'Change note', tool_fact_fields: 'Changes', tool_fact_key: 'Data key', tool_fact_route: 'Route', tool_fact_title: 'Display name', tool_fact_path: 'API path',
+      tool_fact_query: 'Query', tool_fact_revision: 'Revision', tool_fact_slot: 'Region', tool_fact_limit: 'Limit', tool_fact_type: 'Type', tool_fact_operation: 'Operation',
+      tool_fact_content: 'Full content', tool_fact_value: 'Value summary', tool_fact_template: 'Template ID',
+      tool_scope_global: 'Global', tool_scope_current: 'Current page', tool_page_root: 'root page', tool_yes: 'Yes', tool_no: 'No',
+      tool_omitted_chars: '{n} characters, collapsed', tool_omitted_structure: 'Structure data (about {n} characters), collapsed', tool_omitted_entries: '{n} entries, collapsed',
+      tool_redacted: '[hidden]', tool_more_entries: '…{n} more', tool_technical_truncated: '…(technical details truncated)',
       tools_failed: '{n} tools failed', tools_pending: '{n} pending confirmations', running_tool: 'Running {name}',
       empty_title: 'A blank canvas', empty_chat_hint: 'Tell the AI assistant what you want — it builds it live and remembers.',
       empty_start: 'Start chatting', empty_api_hint: 'No UI items yet. Put the first items via API:',
       load_failed: 'Failed to load', retry: 'Retry', page_load_failed: 'Failed to load page',
       auth_expired: 'Session expired. Refresh the page or sign in again.', auth_missing: 'Missing user identity',
-      auth_missing_hint: 'The server could not resolve a user (defaults: ?uid= query / X-Ihtml-User header / ihtml_uid cookie; pass params in mount for embeds).',
-      offline: 'Live updates disconnected, retrying…', readonly_note: 'Read-only access',
+      auth_missing_hint: 'The server has no trusted user authentication configured. Production hosts must connect WithUserResolver to a verified session or token.',
+      offline: 'Live updates disconnected, retrying…', readonly_note: 'Read-only access', readonly_short: 'Read only',
+      readonly_empty: 'This view is read-only and has no content to display.', previous_page: 'Previous page', next_page: 'Next page',
       panel_title: 'Page settings', panel_theme: 'Theme', panel_history: 'History', panel_errors: 'Errors',
       theme_mode: 'Mode', theme_auto: 'System', theme_light: 'Light', theme_dark: 'Dark',
-      theme_primary: 'Primary', theme_radius: 'Radius',
+      theme_primary: 'Primary', theme_radius: 'Radius', theme_color: 'Theme color {color}',
       history_empty: 'No snapshots yet.', rollback: 'Roll back', rollback_confirm_title: 'Confirm rollback',
       rollback_confirm: 'Restore this snapshot (current state is snapshotted first).', rolled_back: 'Rolled back',
       errors_empty: 'No page errors.', items_label: '{n} items',
       safe_title: 'Safe mode', safe_hint: 'No UI items were executed. Roll back to a snapshot or let the AI fix things.',
+      safe_readonly_hint: 'No UI items were executed. This account cannot make changes; contact an administrator with write access.',
       safe_exit: 'Exit safe mode', ai_unavailable: 'AI service is not configured. Contact the administrator.',
       model_needed: 'Pick or type a model name first', chat_broken: 'AI connection failed', ws_lost: 'Connection lost, please resend',
       item_broken: 'Item "{id}" failed: {msg}', loading: 'Loading…', author_user: 'You',
       panel_layout: 'Layout', layout_edit: 'Enable drag layout', layout_editing: 'Editing layout',
-      layout_done: 'Done', layout_reset: 'Reset page layout', layout_hint: 'Drag the top handle to reorder; drag the corner to resize; double-click the corner to reset height.',
-      layout_mobile: 'Layout editing is unavailable on mobile', layout_saved: 'Layout saved',
+      layout_done: 'Done', layout_reset: 'Reset page layout', layout_hint: 'Drag the top handle to reorder and the corner to resize. You can also focus a handle and use arrow keys; Home restores automatic height.',
+      layout_mobile: 'Layout editing is unavailable on mobile', layout_saved: 'Layout saved', layout_move: 'Move {title}', layout_resize: 'Resize {title}', layout_resize_short: 'Size',
+      layout_resize_width: 'Resize {title} width', layout_resize_width_short: 'Width',
+      item_editor_title: 'Content layout', item_editor_layout_mode: 'Layout mode', item_editor_auto: 'Auto layout', item_editor_free: 'Free position',
+      item_editor_auto_hint: 'Drag content to reorder it, and drag a corner to resize it.', item_editor_free_hint: 'Move, resize, and layer content freely.',
+      item_editor_save: 'Save', item_editor_saving: 'Saving…', item_editor_saved: 'Saved', item_editor_done: 'Done',
+      item_editor_unsaved: 'Unsaved changes', item_editor_clean: 'Changes saved', item_editor_conflict: 'The layout changed elsewhere. Reopen the editor to reload it.', item_editor_save_failed: 'Save failed',
+      item_editor_current_items: 'Page content', item_editor_canvas: 'Editing canvas', item_editor_properties: 'Properties', item_editor_selected: 'Selected content',
+      item_editor_select_hint: 'Select content on the canvas to edit its properties.', item_editor_no_selection: 'Select some content', item_editor_empty: 'This page has no editable content',
+      item_editor_move: 'Drag', item_editor_layer: 'Layer', item_editor_layer_up: 'Bring forward', item_editor_layer_down: 'Send backward',
+      item_editor_layout: 'Size and position', item_editor_span: 'Column span', item_editor_grid_span: 'Column span', item_editor_auto_height: 'Auto height',
+      item_editor_position: 'Position', item_editor_size: 'Size', item_editor_x: 'X', item_editor_y: 'Y', item_editor_width: 'Width', item_editor_height: 'Height', item_editor_z: 'Layer', item_editor_z_index: 'Layer',
+      item_editor_appearance: 'Appearance', item_editor_background: 'Background', item_editor_background_color: 'Background', item_editor_color: 'Text color', item_editor_text_color: 'Text color',
+      item_editor_radius: 'Corner radius', item_editor_opacity: 'Opacity', item_editor_reset_size: 'Reset size', item_editor_reset_appearance: 'Reset appearance',
+      item_editor_global: 'Global content', item_editor_page_item: 'Current-page content',
+      item_editor_discard: 'Discard changes', item_editor_exit_hint: 'Exiting discards unsaved layout and appearance changes.',
+      item_editor_delete_title: 'Delete content', item_editor_delete_hint: 'This cannot be undone. Delete this content?',
+      item_editor_delete_global: 'This is global content. Deleting it removes it from every page. Continue?', item_editor_delete: 'Delete', item_editor_deleted: 'Deleted', item_editor_delete_failed: 'Delete failed',
+      item_editor_style: 'Colors', item_editor_clear: 'Clear', item_editor_color_placeholder: '#RRGGBB / rgb() / var()', item_editor_invalid_color: 'Enter a valid solid color',
+      item_editor_columns: 'cols', item_editor_span_value: '{value} columns wide', item_editor_main_area: 'Main content', item_editor_mobile_drag: 'Use the numeric controls for precise adjustments on narrow screens',
+      item_editor_snap: 'Snap {value}px', item_editor_drop_here: 'Drop here', item_editor_drop_position: 'Drop position {value}/{total}',
+      item_editor_content_min_span: 'Content needs at least {value} columns',
+      item_editor_panel_hint: 'Adjust the position, size, colors, and layering of content already on this page.', item_editor_edit_items: 'Edit current page content',
+      item_editor_advanced_template: 'Advanced: edit empty template', item_editor_template_hint: 'Templates define empty containers and regions; they do not prefill or bind page content.',
+      template_edit: 'Edit template', template_title: 'Template structure studio', template_layers: 'Structure', template_properties: 'Properties',
+      template_studio: 'Structure studio', template_compare: 'Breakpoint comparison', template_preview_off: 'Content preview is off',
+      template_root: 'Root', template_container: 'Container', template_slot: 'Slot', template_add_container: 'Add container', template_add_slot: 'Add slot',
+      template_empty_title: 'Empty template', template_empty_hint: 'Start with a Container or Slot. Business content is never shown in the template editor.',
+      template_mode: 'Layout', template_flow: 'Flow', template_grid: 'Grid', template_free: 'Free', template_columns: 'Columns',
+      template_direction: 'Direction', template_column: 'Column', template_row: 'Row', template_wrap: 'Wrap', template_align: 'Align',
+      template_gap: 'Gap', template_padding: 'Padding', template_width: 'Width', template_height: 'Height', template_x: 'X', template_y: 'Y',
+      template_name: 'Name', template_delete: 'Delete', template_duplicate: 'Duplicate', template_undo: 'Undo', template_redo: 'Redo',
+      template_save: 'Save draft', template_saving: 'Saving…', template_saved: 'Draft saved', template_unsaved: 'Unsaved changes',
+      template_publish: 'Publish', template_publishing: 'Publishing…', template_unpublished: 'Unpublished', template_published: 'Published v{n}', template_draft_newer: 'Draft has newer changes', template_publish_failed: 'Publish failed',
+      template_exit: 'Exit editor', template_delete_title: 'Delete structure', template_delete_hint: 'All nested layers will also be removed. You can undo this action.', template_exit_hint: 'Exiting will discard unsaved template changes.',
+      template_desktop: 'Desktop', template_tablet: 'Tablet', template_mobile: 'Mobile', template_inherited: 'Inherited',
+      template_canvas: 'Template canvas', template_drop_here: 'Drop here', template_locked_root: 'Root cannot be deleted or moved',
+      template_load_failed: 'Template failed to load. Retry; the remote template was not changed', template_save_failed: 'Failed to save template', template_min_height: 'Min height',
+      template_conflict: 'Template changed elsewhere', template_reload: 'Load remote version',
+      template_unassigned: 'Unassigned content', template_unassigned_empty: 'No unassigned content',
     },
   };
 
@@ -85,13 +241,420 @@
     };
   }
 
+  /* ---------- chatAgent: Fast/Deep 能力选择与事件投影纯函数 ---------- */
+  const chatAgent = (() => {
+    const KNOWN_MODES = ['fast', 'deep'];
+    const clone = (value) => JSON.parse(JSON.stringify(value));
+    const count = (value) => {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? Math.max(0, Math.floor(parsed)) : 0;
+    };
+
+    function normalizeModes(value) {
+      const seen = new Set();
+      for (const raw of Array.isArray(value) ? value : []) {
+        const mode = String(raw || '').trim().toLowerCase();
+        if (KNOWN_MODES.includes(mode)) seen.add(mode);
+      }
+      // Fast 是协议的安全基线；旧服务端未下发 agent_modes 时仍可用。
+      seen.add('fast');
+      return KNOWN_MODES.filter((mode) => seen.has(mode));
+    }
+
+    function selectMode(modes, preferred) {
+      const available = normalizeModes(modes);
+      const wanted = String(preferred || '').trim().toLowerCase();
+      return available.includes(wanted) ? wanted : 'fast';
+    }
+
+    function requestSnapshot(modes, preferred, model, modelSelect) {
+      return {
+        agentMode: selectMode(modes, preferred),
+        model: modelSelect ? String(model || '').trim() : '',
+      };
+    }
+
+    function initialState(mode) {
+      return { mode: selectMode(['fast', 'deep'], mode), plan: [], agents: {}, budget: null, manualPaused: false };
+    }
+
+    function agentKey(agent) {
+      if (!agent || typeof agent !== 'object') return '';
+      if (String(agent.agent || '') === 'root') return 'root';
+      return String(agent.task_id || (String(agent.agent || 'agent') + ':' + String(agent.phase || 'turn')));
+    }
+
+    // Deep 事件是完整状态快照而不是日志：Plan 整体替换，Agent 原位更新，
+    // Budget 只保留最新一份。这避免长任务把助手布局不断撑高。
+    function project(state, event) {
+      const previous = state && typeof state === 'object' ? state : initialState('fast');
+      const out = {
+        mode: previous.mode === 'deep' ? 'deep' : 'fast',
+        plan: Array.isArray(previous.plan) ? clone(previous.plan) : [],
+        agents: previous.agents && typeof previous.agents === 'object' ? clone(previous.agents) : {},
+        budget: previous.budget && typeof previous.budget === 'object' ? clone(previous.budget) : null,
+        manualPaused: !!previous.manualPaused,
+      };
+      const ev = event && typeof event === 'object' ? event : {};
+      if (ev.type === 'assistant_plan') {
+        out.plan = (Array.isArray(ev.plan) ? ev.plan : []).slice(0, 12).map((item, index) => ({
+          id: String(item && item.id || 'step-' + (index + 1)),
+          content: String(item && item.content || '').slice(0, 400),
+          status: ['pending', 'in_progress', 'completed'].includes(String(item && item.status)) ? String(item.status) : 'pending',
+        })).filter((item) => item.content);
+        out.mode = 'deep';
+      }
+      const agent = ev.agent && typeof ev.agent === 'object' ? ev.agent : null;
+      if (agent) {
+        if (String(agent.mode || '').toLowerCase() === 'deep') out.mode = 'deep';
+        if (String(agent.phase || '') !== 'budget') {
+          const key = agentKey(agent);
+          if (key) out.agents[key] = {
+            mode: String(agent.mode || out.mode), agent: String(agent.agent || 'root'),
+            task_id: String(agent.task_id || ''), parent_task_id: String(agent.parent_task_id || ''),
+            phase: String(agent.phase || ''), status: String(agent.status || 'running'),
+            summary: String(agent.summary || '').slice(0, 500), approval_resume: String(agent.approval_resume || ''),
+          };
+          const keys = Object.keys(out.agents);
+          while (keys.length > 32) {
+            const oldest = keys.shift();
+            if (oldest === 'root') keys.push(oldest);
+            else delete out.agents[oldest];
+          }
+        }
+        if (String(agent.approval_resume || '') === 'manual_tool_only' && String(agent.phase || '') === 'approval') out.manualPaused = true;
+      }
+      if (ev.budget && typeof ev.budget === 'object') {
+        out.budget = {
+          model_calls: count(ev.budget.model_calls), max_model_calls: count(ev.budget.max_model_calls),
+          subtasks: count(ev.budget.subtasks), max_subtasks: count(ev.budget.max_subtasks),
+          deadline_unix_ms: count(ev.budget.deadline_unix_ms),
+        };
+      }
+      const call = ev.tool_call && typeof ev.tool_call === 'object' ? ev.tool_call : null;
+      if (call && String(call.approval_resume || '') === 'manual_tool_only') {
+        out.mode = 'deep';
+        out.manualPaused = true;
+      }
+      return out;
+    }
+
+    function budgetParts(value) {
+      const budget = value && typeof value === 'object' ? value : {};
+      return {
+        modelCalls: count(budget.model_calls), maxModelCalls: count(budget.max_model_calls),
+        subtasks: count(budget.subtasks), maxSubtasks: count(budget.max_subtasks),
+      };
+    }
+
+    return { normalizeModes, selectMode, requestSnapshot, initialState, project, budgetParts };
+  })();
+
+  /* ---------- chatTrace: 将工具协议事件投影为可读、脱敏的界面数据 ---------- */
+  const chatTrace = (() => {
+    const TITLE_LIMIT = 120;
+    const ACTION_LIMIT = 320;
+    const SUMMARY_LIMIT = 600;
+    const FACT_LIMIT = 220;
+    const TECHNICAL_LIMIT = 5000;
+    const COLLECTION_LIMIT = 24;
+    const SENSITIVE_KEY = /(?:authorization|auth|token|secret|password|passwd|cookie|credential|apikey|session|sessionid|sessionkey|nonce|signature|privatekey)$/;
+    const HEAVY_KEY = /^(?:content|html|css|js|javascript|code|script|template|value)$/i;
+    const TOOL_META = {
+      ui_item_list: ['tool_title_item_list', 'tool_action_item_list'],
+      ui_item_get: ['tool_title_item_get', 'tool_action_item_get'],
+      ui_item_put: ['tool_title_item_put', 'tool_action_item_put'],
+      ui_item_delete: ['tool_title_item_delete', 'tool_action_item_delete'],
+      ui_items_replace: ['tool_title_items_replace', 'tool_action_items_replace'],
+      ui_theme_get: ['tool_title_theme_get', 'tool_action_theme_get'],
+      ui_theme_set: ['tool_title_theme_set', 'tool_action_theme_set'],
+      ui_kv_get: ['tool_title_kv_get', 'tool_action_kv_get'],
+      ui_kv_set: ['tool_title_kv_set', 'tool_action_kv_set'],
+      ui_page_list: ['tool_title_page_list', 'tool_action_page_list'],
+      ui_page_set: ['tool_title_page_set', 'tool_action_page_set'],
+      ui_page_delete: ['tool_title_page_delete', 'tool_action_page_delete'],
+      api_probe: ['tool_title_api_probe', 'tool_action_api_probe'],
+      ui_revision_list: ['tool_title_revision_list', 'tool_action_revision_list'],
+      ui_revision_rollback: ['tool_title_revision_rollback', 'tool_action_revision_rollback'],
+      ui_page_errors: ['tool_title_page_errors', 'tool_action_page_errors'],
+      ui_template_get: ['tool_title_template_get', 'tool_action_template_get'],
+      ui_template_put_current: ['tool_title_template_put', 'tool_action_template_put'],
+      ui_template_publish: ['tool_title_template_publish', 'tool_action_template_publish'],
+      ui_template_slot_delete: ['tool_title_template_slot_delete', 'tool_action_template_slot_delete'],
+    };
+
+    const own = (value, key) => Object.prototype.hasOwnProperty.call(value || {}, key);
+
+    function isSensitiveKey(key) {
+      const normalized = String(key == null ? '' : key).toLowerCase().replace(/[^a-z0-9]/g, '');
+      return !!normalized && SENSITIVE_KEY.test(normalized);
+    }
+
+    function clip(value, limit) {
+      const text = String(value == null ? '' : value);
+      if (text.length <= limit) return text;
+      return text.slice(0, Math.max(0, limit - 1)).trimEnd() + '…';
+    }
+
+    // 技术字符串也可能来自旧协议的 tool_input；即使无法解析 JSON，也不回显凭据。
+    function redactText(value) {
+      return String(value == null ? '' : value)
+        .replace(/\bBearer\s+[^\s,;]+/gi, 'Bearer [redacted]')
+        .replace(/((?:authorization|confirmation[_-]?token|access[_-]?token|refresh[_-]?token|auth[_-]?token|session[_-]?(?:id|key|token)|private[_-]?key|client[_-]?secret|api[_-]?key|password|secret|cookie)\s*["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;&}]+)/gi, '$1[redacted]');
+    }
+
+    function safeText(value, limit) {
+      return clip(redactText(value).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, ''), limit);
+    }
+
+    function parseMaybeJSON(value) {
+      if (typeof value !== 'string') return value;
+      const trimmed = value.trim();
+      if (!trimmed || !['{', '[', '"'].includes(trimmed[0])) return value;
+      try { return JSON.parse(trimmed); } catch (_) { return value; }
+    }
+
+    function measuredLength(value) {
+      try { return JSON.stringify(value).length; } catch (_) { return String(value == null ? '' : value).length; }
+    }
+
+    function heavySummary(value, key, t) {
+      const length = measuredLength(value);
+      if (typeof value === 'string') return t('tool_omitted_chars', { n: value.length });
+      if (/^template$/i.test(key)) return t('tool_omitted_structure', { n: length });
+      const count = Array.isArray(value) ? value.length : (value && typeof value === 'object' ? Object.keys(value).length : 1);
+      return t('tool_omitted_entries', { n: count });
+    }
+
+    function sanitizeValue(value, key, t, depth, seen) {
+      if (isSensitiveKey(key)) return undefined;
+      if (value == null || typeof value === 'boolean') return value;
+      if (typeof value === 'number') return Number.isFinite(value) ? value : String(value);
+      if (typeof value === 'bigint') return String(value);
+      if (typeof value === 'string') {
+        if (HEAVY_KEY.test(String(key || '')) && value.length > 160) return heavySummary(value, key, t);
+        return safeText(value, 800);
+      }
+      if (typeof value !== 'object') return safeText(value, 200);
+      if (HEAVY_KEY.test(String(key || '')) && measuredLength(value) > 240) return heavySummary(value, key, t);
+      if (depth >= 6) return t('tool_omitted_structure', { n: measuredLength(value) });
+      if (seen.has(value)) return '[circular]';
+      seen.add(value);
+      if (Array.isArray(value)) {
+        const output = value.slice(0, COLLECTION_LIMIT).map((entry) => sanitizeValue(entry, '', t, depth + 1, seen));
+        if (value.length > COLLECTION_LIMIT) output.push(t('tool_more_entries', { n: value.length - COLLECTION_LIMIT }));
+        seen.delete(value);
+        return output;
+      }
+      const output = {};
+      const entries = Object.entries(value);
+      let used = 0;
+      for (const [rawKey, entry] of entries) {
+        if (used >= COLLECTION_LIMIT || isSensitiveKey(rawKey)) continue;
+        const cleanKey = safeText(rawKey, 80);
+        const cleanValue = sanitizeValue(entry, rawKey, t, depth + 1, seen);
+        if (cleanKey && cleanValue !== undefined) {
+          output[cleanKey] = cleanValue;
+          used++;
+        }
+      }
+      if (entries.length > used) output['…'] = t('tool_more_entries', { n: entries.length - used });
+      seen.delete(value);
+      return output;
+    }
+
+    function technicalText(value, t) {
+      if (value == null || value === '') return '';
+      const parsed = parseMaybeJSON(value);
+      const sanitized = sanitizeValue(parsed, '', t, 0, new WeakSet());
+      if (sanitized === undefined) return '';
+      let output;
+      if (typeof sanitized === 'string') output = sanitized;
+      else {
+        try { output = JSON.stringify(sanitized, null, 2); } catch (_) { output = safeText(sanitized, TECHNICAL_LIMIT); }
+      }
+      output = safeText(output, TECHNICAL_LIMIT);
+      if (output.length >= TECHNICAL_LIMIT) output = clip(output, TECHNICAL_LIMIT - t('tool_technical_truncated').length - 1) + '\n' + t('tool_technical_truncated');
+      return output;
+    }
+
+    function asObject(value) {
+      const parsed = parseMaybeJSON(value);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    }
+
+    function factValue(value, t) {
+      if (value == null || value === '') return '';
+      if (Array.isArray(value)) {
+        const visible = value.slice(0, 8).map((entry) => safeText(entry, 60)).filter(Boolean);
+        if (value.length > 8) visible.push(t('tool_more_entries', { n: value.length - 8 }));
+        return clip(visible.join(', '), FACT_LIMIT);
+      }
+      if (typeof value === 'object') return clip(technicalText(value, t).replace(/\s+/g, ' '), FACT_LIMIT);
+      return safeText(value, FACT_LIMIT);
+    }
+
+    function pushFact(facts, label, value, t) {
+      const cleanLabel = safeText(label, 80);
+      const cleanValue = factValue(value, t);
+      if (!cleanLabel || !cleanValue) return;
+      if (!facts.some((fact) => fact.label === cleanLabel && fact.value === cleanValue)) facts.push({ label: cleanLabel, value: cleanValue });
+    }
+
+    function pageLabel(page, t) {
+      const value = safeText(page, FACT_LIMIT);
+      return value || t('tool_page_root');
+    }
+
+    function itemFacts(items, facts, t) {
+      const safeItems = Array.isArray(items) ? items.filter((item) => item && typeof item === 'object') : [];
+      pushFact(facts, t('tool_fact_items'), safeItems.length, t);
+      const ids = safeItems.map((item) => item.id).filter(Boolean);
+      if (ids.length) pushFact(facts, t('tool_fact_item_ids'), ids, t);
+      const pages = Array.from(new Set(safeItems.map((item) => item.page ? safeText(item.page, 80) : t('tool_scope_global'))));
+      if (pages.length) pushFact(facts, t('tool_fact_pages'), pages, t);
+      const types = Array.from(new Set(safeItems.map((item) => item.type).filter(Boolean)));
+      if (types.length) pushFact(facts, t('tool_fact_type'), types, t);
+      return safeItems.length;
+    }
+
+    function actionAndFacts(name, body, t) {
+      const facts = [];
+      const meta = TOOL_META[name];
+      let vars = { name: safeText(name, 100) || t('tool_title_unknown'), n: 0, id: '', key: '', path: '', page: t('tool_page_root') };
+      switch (name) {
+        case 'ui_item_list':
+          if (body.include_content === true) pushFact(facts, t('tool_fact_content'), t('tool_yes'), t);
+          break;
+        case 'ui_item_get':
+          vars.id = safeText(body.id, 120);
+          pushFact(facts, t('tool_fact_item_id'), body.id, t);
+          break;
+        case 'ui_item_put':
+        case 'ui_items_replace':
+          vars.n = itemFacts(body.items, facts, t);
+          pushFact(facts, t('tool_fact_note'), body.note, t);
+          break;
+        case 'ui_item_delete': {
+          const ids = Array.isArray(body.ids) ? body.ids : [];
+          vars.n = ids.length;
+          pushFact(facts, t('tool_fact_item_ids'), ids, t);
+          break;
+        }
+        case 'ui_theme_set': {
+          const fields = ['mode', 'primary', 'contrast', 'radius', 'gap', 'font'].filter((key) => own(body, key));
+          vars.n = fields.length;
+          pushFact(facts, t('tool_fact_fields'), fields, t);
+          break;
+        }
+        case 'ui_kv_get':
+        case 'ui_kv_set':
+          vars.key = safeText(body.key, 120);
+          pushFact(facts, t('tool_fact_key'), body.key, t);
+          if (name === 'ui_kv_set' && own(body, 'value')) pushFact(facts, t('tool_fact_value'), heavySummary(body.value, 'value', t), t);
+          break;
+        case 'ui_page_set':
+          vars.name = safeText(body.name, 120);
+          pushFact(facts, t('tool_fact_route'), body.name, t);
+          pushFact(facts, t('tool_fact_title'), body.title, t);
+          break;
+        case 'ui_page_delete':
+          vars.name = safeText(body.name, 120);
+          pushFact(facts, t('tool_fact_route'), body.name, t);
+          break;
+        case 'api_probe':
+          vars.path = safeText(body.path, 180);
+          pushFact(facts, t('tool_fact_path'), body.path, t);
+          if (body.query && typeof body.query === 'object') pushFact(facts, t('tool_fact_query'), body.query, t);
+          break;
+        case 'ui_revision_list':
+        case 'ui_page_errors':
+          if (own(body, 'limit')) pushFact(facts, t('tool_fact_limit'), body.limit, t);
+          break;
+        case 'ui_revision_rollback':
+          vars.id = safeText(body.id, 120);
+          pushFact(facts, t('tool_fact_revision'), body.id, t);
+          break;
+        case 'ui_template_get':
+          vars.page = pageLabel(body.page, t);
+          pushFact(facts, t('tool_fact_page'), vars.page, t);
+          break;
+        case 'ui_template_put_current':
+          vars.page = pageLabel(body.page, t);
+          pushFact(facts, t('tool_fact_page'), vars.page, t);
+          pushFact(facts, t('tool_fact_revision'), body.expected_revision, t);
+          if (own(body, 'template')) pushFact(facts, t('tool_fact_value'), heavySummary(body.template, 'template', t), t);
+          break;
+        case 'ui_template_publish':
+          vars.id = safeText(body.id, 120);
+          pushFact(facts, t('tool_fact_template'), body.id, t);
+          pushFact(facts, t('tool_fact_revision'), body.expected_revision, t);
+          break;
+        case 'ui_template_slot_delete':
+          vars.id = safeText(body.slot_id, 120);
+          pushFact(facts, t('tool_fact_template'), body.id, t);
+          pushFact(facts, t('tool_fact_slot'), body.slot_id, t);
+          pushFact(facts, t('tool_fact_revision'), body.expected_revision, t);
+          break;
+        default:
+          pushFact(facts, t('tool_fact_operation'), name || t('tool_title_unknown'), t);
+          for (const [key, value] of Object.entries(body).slice(0, 12)) {
+            if (facts.length >= 5) break;
+            if (isSensitiveKey(key) || HEAVY_KEY.test(key) || (value && typeof value === 'object')) continue;
+            pushFact(facts, safeText(key, 60), value, t);
+          }
+      }
+      const actionKey = meta ? meta[1] : 'tool_action_unknown';
+      return { action: safeText(t(actionKey, vars), ACTION_LIMIT), facts: facts.slice(0, 8) };
+    }
+
+    function toolView(call, event, translator) {
+      const t = typeof translator === 'function' ? translator : makeT('zh');
+      const ev = event && typeof event === 'object' ? event : {};
+      const embedded = ev.tool_call && typeof ev.tool_call === 'object' ? ev.tool_call : {};
+      const supplied = call && typeof call === 'object' ? call : {};
+      const source = Object.assign({}, embedded, supplied);
+      const name = safeText(source.name || ev.tool_name, 120);
+      const meta = TOOL_META[name];
+      const title = safeText(meta ? t(meta[0]) : (ev.tool_title || source.title || name || t('tool_title_unknown')), TITLE_LIMIT);
+      const body = asObject(source.body);
+      const projected = actionAndFacts(name, body, t);
+      const pending = ev.type === 'confirmation_required' || ev.tool_status === 'pending';
+      const summarySource = pending && source.reason ? source.reason : (ev.tool_summary || source.reason || projected.action);
+      const summary = safeText(summarySource, SUMMARY_LIMIT);
+      const requestPayload = {};
+      if (source.method) requestPayload.method = source.method;
+      if (source.path) requestPayload.path = source.path;
+      if (source.query && typeof source.query === 'object' && Object.keys(source.query).length) requestPayload.query = source.query;
+      if (own(source, 'body') && source.body != null) requestPayload.body = source.body;
+      const request = Object.keys(requestPayload).length ? technicalText(requestPayload, t) : '';
+      const result = own(ev, 'tool_result') ? technicalText(ev.tool_result, t) : '';
+      const debug = own(ev, 'tool_debug') ? technicalText(ev.tool_debug, t) : '';
+      return {
+        title,
+        action: projected.action,
+        summary,
+        facts: projected.facts,
+        request,
+        result,
+        debug,
+        hasTechnical: !!(request || result || debug),
+      };
+    }
+
+    return { toolView };
+  })();
+
   /* ---------- fmt: 数字/金额/时间格式化(AI 生成代码的标准件) ---------- */
   const fmt = {
     num(n, digits) {
-      if (n == null || isNaN(n)) return '-';
-      return Number(n).toLocaleString('en-US', {
-        minimumFractionDigits: digits || 0,
-        maximumFractionDigits: digits == null ? 2 : digits,
+      const value = Number(n);
+      if (n == null || !Number.isFinite(value)) return '-';
+      const parsed = digits == null ? null : Number(digits);
+      const precision = parsed == null || !Number.isFinite(parsed) ? null : Math.min(20, Math.max(0, Math.floor(parsed)));
+      return value.toLocaleString('en-US', {
+        minimumFractionDigits: precision == null ? 0 : precision,
+        maximumFractionDigits: precision == null ? 2 : precision,
       });
     },
     // money(12345) → "¥12,345.00"; money(12345, {cents:true}) 表示入参是"分"
@@ -150,9 +713,15 @@
       return function (...args) {
         const now = Date.now();
         const rest = (ms || 200) - (now - last);
-        if (rest <= 0) { last = now; fn.apply(this, args); return; }
+        if (rest <= 0) {
+          clearTimeout(timer);
+          timer = 0;
+          last = now;
+          fn.apply(this, args);
+          return;
+        }
         clearTimeout(timer);
-        timer = setTimeout(() => { last = Date.now(); fn.apply(this, args); }, rest);
+        timer = setTimeout(() => { timer = 0; last = Date.now(); fn.apply(this, args); }, rest);
       };
     },
   };
@@ -211,9 +780,23 @@
     const width = Math.max(el.clientWidth || 320, spark ? 60 : 120);
     const height = opts.height || 220;
     const pad = spark ? { l: 2, r: 2, t: 3, b: 3 } : { l: 44, r: 10, t: 10, b: 22 };
-    const labels = (data && data.labels) || [];
-    const series = ((data && data.series) || []).filter((s) => s && s.data && s.data.length);
-    const svg = svgEl('svg', { viewBox: `0 0 ${width} ${height}`, width: '100%', height });
+    const rawLabels = Array.isArray(data && data.labels) ? data.labels : [];
+    const rawSeries = ((data && data.series) || []).filter((s) => s && Array.isArray(s.data) && s.data.length);
+    let sourceLength = rawLabels.length;
+    for (const item of rawSeries) sourceLength = Math.max(sourceLength, item.data.length);
+    const maxPoints = Math.max(100, Math.min(5000, Number(opts.maxPoints) || 1200));
+    const sampleCount = Math.min(sourceLength, maxPoints);
+    const indices = [];
+    for (let i = 0; i < sampleCount; i++) {
+      indices.push(sampleCount === sourceLength ? i : Math.round((i / Math.max(1, sampleCount - 1)) * (sourceLength - 1)));
+    }
+    const labels = indices.map((index) => rawLabels[index]);
+    const series = rawSeries.map((item) => ({ ...item, data: indices.map((index) => item.data[index]) }));
+    const chartLabel = opts.ariaLabel || `${kind === 'bars' ? '柱状图' : '折线图'}，${series.length} 个序列，${sourceLength} 个数据点`;
+    const svg = svgEl('svg', { viewBox: `0 0 ${width} ${height}`, width: '100%', height, role: 'img', 'aria-label': chartLabel });
+    const svgTitle = svgEl('title', {});
+    svgTitle.textContent = chartLabel;
+    svg.appendChild(svgTitle);
     el.appendChild(svg);
     if (!series.length) {
       const t = svgEl('text', { x: width / 2, y: height / 2, 'text-anchor': 'middle', 'font-size': 12, fill: tokenColor(el, '--ui-text-muted', '#888') });
@@ -221,14 +804,30 @@
       svg.appendChild(t);
       return;
     }
-    const all = series.flatMap((s) => s.data.map(Number)).filter((v) => !isNaN(v));
-    let min = Math.min(0, ...all);
-    let max = Math.max(...all);
+    let min = 0;
+    let max = 0;
+    let finiteCount = 0;
+    for (const item of series) {
+      for (const raw of item.data) {
+        const value = Number(raw);
+        if (!Number.isFinite(value)) continue;
+        min = Math.min(min, value);
+        max = Math.max(max, value);
+        finiteCount++;
+      }
+    }
+    if (!finiteCount) {
+      const t = svgEl('text', { x: width / 2, y: height / 2, 'text-anchor': 'middle', 'font-size': 12, fill: tokenColor(el, '--ui-text-muted', '#888') });
+      t.textContent = opts.emptyText || '暂无数据';
+      svg.appendChild(t);
+      return;
+    }
     const { lo, hi, ticks } = niceTicks(min, max, 4);
     const plotW = width - pad.l - pad.r;
     const plotH = height - pad.t - pad.b;
     const y = (v) => pad.t + plotH - ((v - lo) / (hi - lo)) * plotH;
-    const n = Math.max(...series.map((s) => s.data.length), labels.length, 1);
+    let n = Math.max(labels.length, 1);
+    for (const item of series) n = Math.max(n, item.data.length);
     const xAt = (i) => pad.l + (n === 1 ? plotW / 2 : (i / (n - 1)) * plotW);
     const border = tokenColor(el, '--ui-border', 'rgba(128,128,128,.25)');
     const muted = tokenColor(el, '--ui-text-muted', '#888');
@@ -254,7 +853,7 @@
       const barW = Math.max(3, Math.min(28, (groupW * 0.7) / series.length));
       series.forEach((s, si) => {
         s.data.forEach((v, i) => {
-          if (isNaN(Number(v))) return;
+          if (!Number.isFinite(Number(v))) return;
           const cx = pad.l + groupW * i + groupW / 2;
           const x0 = cx - (barW * series.length) / 2 + si * barW;
           const y1 = y(Math.max(0, Number(v)));
@@ -268,8 +867,8 @@
       });
     } else {
       series.forEach((s, si) => {
-        const pts = s.data.map((v, i) => (isNaN(Number(v)) ? null : `${xAt(i)},${y(Number(v))}`)).filter(Boolean);
-        if (opts.area !== false && series.length === 1) {
+        const pts = s.data.map((v, i) => (!Number.isFinite(Number(v)) ? null : `${xAt(i)},${y(Number(v))}`)).filter(Boolean);
+        if (pts.length && opts.area !== false && series.length === 1) {
           const area = svgEl('path', {
             d: `M ${pad.l},${y(Math.max(lo, 0))} L ${pts.join(' L ')} L ${xAt(s.data.length - 1)},${y(Math.max(lo, 0))} Z`,
             fill: colors[si], opacity: 0.12,
@@ -279,7 +878,7 @@
         svg.appendChild(svgEl('polyline', { points: pts.join(' '), fill: 'none', stroke: colors[si], 'stroke-width': spark ? 1.5 : 2, 'stroke-linejoin': 'round' }));
         if (!spark) {
           s.data.forEach((v, i) => {
-            if (isNaN(Number(v))) return;
+            if (!Number.isFinite(Number(v))) return;
             const dot = svgEl('circle', { cx: xAt(i), cy: y(Number(v)), r: 2.5, fill: colors[si] });
             const title = svgEl('title', {});
             title.textContent = `${s.name || ''} ${labels[i] != null ? labels[i] : i}: ${fmt.num(v)}`;
@@ -345,5 +944,811 @@
     gc() { liveCharts.forEach((c) => { if (c.el && !c.el.isConnected) c.destroy(); }); },
   };
 
-  window.__ihtmlLib = { makeT, fmt, util, chart };
+  /* ---------- itemLayout: 已有 Item 的页面级排版与外观状态机 ----------
+   * 模板编辑器只管结构；这里单独保存业务 Item 的顺序、大小、绝对坐标和少量安全外观。
+   * 纯函数状态机不接触 DOM/HTTP，持久化键使用页面名的 UTF-8 FNV-1a，避免把路由原文
+   * 直接拼进 KV key。styleFor 总是返回完整的受管样式集合，空字符串用于清掉模式切换后
+   * 遗留的 inline style。 */
+  const itemLayout = (() => {
+    const MODES = new Set(['grid', 'free']);
+    const MAX_ITEMS = 512;
+    const HISTORY_LIMIT = 80;
+    const own = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
+    const clone = (value) => JSON.parse(JSON.stringify(value));
+
+    function clipBytes(value, maxBytes) {
+      let out = ''; let bytes = 0;
+      for (const char of String(value == null ? '' : value)) {
+        const cp = char.codePointAt(0);
+        const size = cp <= 0x7f ? 1 : (cp <= 0x7ff ? 2 : (cp <= 0xffff ? 3 : 4));
+        if (bytes + size > maxBytes) break;
+        out += char; bytes += size;
+      }
+      return out;
+    }
+
+    function utf8Bytes(value) {
+      if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(String(value));
+      const bytes = [];
+      for (const char of String(value)) {
+        let cp = char.codePointAt(0);
+        if (cp >= 0xd800 && cp <= 0xdfff) cp = 0xfffd;
+        if (cp <= 0x7f) bytes.push(cp);
+        else if (cp <= 0x7ff) bytes.push(0xc0 | (cp >> 6), 0x80 | (cp & 0x3f));
+        else if (cp <= 0xffff) bytes.push(0xe0 | (cp >> 12), 0x80 | ((cp >> 6) & 0x3f), 0x80 | (cp & 0x3f));
+        else bytes.push(0xf0 | (cp >> 18), 0x80 | ((cp >> 12) & 0x3f), 0x80 | ((cp >> 6) & 0x3f), 0x80 | (cp & 0x3f));
+      }
+      return bytes;
+    }
+
+    function fnv1a(value) {
+      let hash = 0x811c9dc5;
+      for (const byte of utf8Bytes(value)) hash = Math.imul((hash ^ byte) >>> 0, 0x01000193) >>> 0;
+      return hash.toString(16).padStart(8, '0');
+    }
+
+    function key(page) {
+      const value = String(page == null ? '' : page);
+      return !value || value === 'root' ? 'item-layout.root' : 'item-layout.' + fnv1a(value);
+    }
+
+    function finite(value, fallback, min, max, integer) {
+      const number = Number(value);
+      if (!Number.isFinite(number)) return fallback;
+      const bounded = Math.min(max, Math.max(min, number));
+      return integer === false ? Math.round(bounded * 1000) / 1000 : Math.round(bounded);
+    }
+
+    function safeItemID(value) {
+      const id = clipBytes(String(value == null ? '' : value).trim(), 128);
+      if (!id || /["'<>`&\\/\r\n\t ]/.test(id)) return '';
+      return id;
+    }
+
+    function safeSlot(value) {
+      const slot = clipBytes(String(value == null ? '' : value).trim(), 128);
+      return !slot || /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(slot) ? slot : '';
+    }
+
+    // 这里只接受“颜色”，不接受 background-image/gradient 等可携带 URL 的完整 CSS。
+    function sanitizeColor(value) {
+      const color = String(value == null ? '' : value).trim();
+      if (!color || color.length > 96) return '';
+      if (/^#[0-9a-f]{3,4}$/i.test(color) || /^#[0-9a-f]{6}([0-9a-f]{2})?$/i.test(color)) return color.toLowerCase();
+      if (/^transparent$/i.test(color)) return 'transparent';
+      if (/^currentcolor$/i.test(color)) return 'currentColor';
+      const variable = color.match(/^var\((--[A-Za-z0-9_-]{1,64})\)$/);
+      if (variable) return 'var(' + variable[1] + ')';
+
+      const rgb = color.match(/^rgba?\(\s*(\d{1,3})(%?)\s*,\s*(\d{1,3})(%?)\s*,\s*(\d{1,3})(%?)(?:\s*,\s*(0|1|0?\.\d{1,3}))?\s*\)$/i);
+      if (rgb) {
+        const percent = rgb[2] || rgb[4] || rgb[6];
+        if (!!rgb[2] !== !!percent || !!rgb[4] !== !!percent || !!rgb[6] !== !!percent) return '';
+        const max = percent ? 100 : 255;
+        const channels = [Number(rgb[1]), Number(rgb[3]), Number(rgb[5])];
+        if (channels.some((part) => part > max)) return '';
+        const prefix = rgb[7] == null ? 'rgb' : 'rgba';
+        const suffix = percent ? '%' : '';
+        const parts = channels.map((part) => part + suffix);
+        if (rgb[7] != null) parts.push(String(Math.round(Number(rgb[7]) * 1000) / 1000));
+        return prefix + '(' + parts.join(', ') + ')';
+      }
+
+      const hsl = color.match(/^hsla?\(\s*(-?\d{1,3}(?:\.\d+)?)\s*,\s*(\d{1,3}(?:\.\d+)?)%\s*,\s*(\d{1,3}(?:\.\d+)?)%(?:\s*,\s*(0|1|0?\.\d{1,3}))?\s*\)$/i);
+      if (hsl) {
+        const saturation = Number(hsl[2]); const lightness = Number(hsl[3]);
+        if (Math.abs(Number(hsl[1])) > 360 || saturation > 100 || lightness > 100) return '';
+        const prefix = hsl[4] == null ? 'hsl' : 'hsla';
+        const parts = [String(Number(hsl[1])), saturation + '%', lightness + '%'];
+        if (hsl[4] != null) parts.push(String(Math.round(Number(hsl[4]) * 1000) / 1000));
+        return prefix + '(' + parts.join(', ') + ')';
+      }
+      return '';
+    }
+
+    function empty(page) {
+      return { version: 1, page: clipBytes(String(page == null ? '' : page), 256), mode: 'grid', orderBySlot: Object.create(null), items: Object.create(null) };
+    }
+
+    function sanitizeItem(id, raw) {
+      raw = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+      const flowRaw = raw.flow && typeof raw.flow === 'object' && !Array.isArray(raw.flow) ? raw.flow : {};
+      const freeRaw = raw.free && typeof raw.free === 'object' && !Array.isArray(raw.free) ? raw.free : {};
+      const appearanceRaw = raw.appearance && typeof raw.appearance === 'object' && !Array.isArray(raw.appearance) ? raw.appearance : {};
+      const flow = { span: finite(flowRaw.span, 12, 1, 12) };
+      if (own(flowRaw, 'height') && flowRaw.height !== '' && flowRaw.height != null && Number.isFinite(Number(flowRaw.height))) {
+        flow.height = finite(flowRaw.height, 64, 64, 4000);
+      }
+      const appearance = {};
+      const background = sanitizeColor(appearanceRaw.background);
+      const color = sanitizeColor(appearanceRaw.color);
+      if (background) appearance.background = background;
+      if (color) appearance.color = color;
+      if (own(appearanceRaw, 'radius') && appearanceRaw.radius !== '' && appearanceRaw.radius != null && Number.isFinite(Number(appearanceRaw.radius))) {
+        appearance.radius = finite(appearanceRaw.radius, 0, 0, 96);
+      }
+      if (own(appearanceRaw, 'opacity') && appearanceRaw.opacity !== '' && appearanceRaw.opacity != null && Number.isFinite(Number(appearanceRaw.opacity))) {
+        appearance.opacity = finite(appearanceRaw.opacity, 1, 0, 1, false);
+      }
+      return {
+        slot: safeSlot(raw.slot),
+        flow,
+        free: {
+          x: finite(freeRaw.x, 0, 0, 10000),
+          y: finite(freeRaw.y, 0, 0, 10000),
+          width: finite(freeRaw.width, 320, 120, 4000),
+          height: finite(freeRaw.height, 180, 64, 4000),
+          z: finite(freeRaw.z, 0, 0, 999),
+        },
+        appearance,
+      };
+    }
+
+    function normalize(input, pageOverride) {
+      const source = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
+      const page = arguments.length > 1 ? pageOverride : source.page;
+      const out = empty(page);
+      out.mode = MODES.has(source.mode) ? source.mode : 'grid';
+      const rawItems = source.items && typeof source.items === 'object' && !Array.isArray(source.items) ? source.items : {};
+      for (const [rawID, raw] of Object.entries(rawItems).slice(0, MAX_ITEMS)) {
+        const id = safeItemID(rawID);
+        if (!id || own(out.items, id) || !raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+        out.items[id] = sanitizeItem(id, raw);
+      }
+
+      const seen = new Set();
+      const rawOrder = source.orderBySlot && typeof source.orderBySlot === 'object' && !Array.isArray(source.orderBySlot) ? source.orderBySlot : {};
+      for (const [rawSlot, rawIDs] of Object.entries(rawOrder).slice(0, MAX_ITEMS)) {
+        const slot = safeSlot(rawSlot);
+        if (slot !== rawSlot || !Array.isArray(rawIDs)) continue;
+        const list = [];
+        for (const rawID of rawIDs.slice(0, MAX_ITEMS)) {
+          const id = safeItemID(rawID);
+          if (!id || seen.has(id) || !own(out.items, id) || out.items[id].slot !== slot) continue;
+          seen.add(id); list.push(id);
+        }
+        if (list.length) out.orderBySlot[slot] = list;
+      }
+      for (const id of Object.keys(out.items)) {
+        if (seen.has(id)) continue;
+        const slot = out.items[id].slot;
+        if (!out.orderBySlot[slot]) out.orderBySlot[slot] = [];
+        out.orderBySlot[slot].push(id);
+      }
+      return out;
+    }
+
+    function cloneDoc(doc) { return normalize(doc, doc && doc.page); }
+    function differs(doc, baseline) { return JSON.stringify(doc) !== JSON.stringify(baseline); }
+
+    function initial(page, input) {
+      if (page && typeof page === 'object' && input == null) { input = page; page = input.page; }
+      const doc = normalize(input, page);
+      return { doc, baseline: cloneDoc(doc), selectedId: '', pendingRemoveId: '', past: [], future: [], dirty: false };
+    }
+
+    function commit(state, candidate, selectedId) {
+      const doc = normalize(candidate, state.doc.page);
+      if (!differs(doc, state.doc)) return Object.assign({}, state, { pendingRemoveId: '' });
+      return Object.assign({}, state, {
+        doc,
+        selectedId: selectedId == null ? state.selectedId : selectedId,
+        pendingRemoveId: '',
+        past: state.past.concat([cloneDoc(state.doc)]).slice(-HISTORY_LIMIT),
+        future: [],
+        dirty: differs(doc, state.baseline),
+      });
+    }
+
+    function removeFromOrders(doc, id) {
+      for (const slot of Object.keys(doc.orderBySlot)) {
+        doc.orderBySlot[slot] = doc.orderBySlot[slot].filter((entry) => entry !== id);
+        if (!doc.orderBySlot[slot].length) delete doc.orderBySlot[slot];
+      }
+    }
+
+    function mergePatch(target, patch) {
+      if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return;
+      for (const [name, value] of Object.entries(patch)) {
+        if (value == null || value === '') delete target[name];
+        else target[name] = value;
+      }
+    }
+
+    function reduce(state, action) {
+      state = state && state.doc ? state : initial();
+      action = action && typeof action === 'object' ? action : {};
+      if (action.type === 'select') {
+        const id = safeItemID(action.id);
+        return !id || own(state.doc.items, id) ? Object.assign({}, state, { selectedId: id, pendingRemoveId: '' }) : state;
+      }
+      if (action.type === 'mode') {
+        if (!MODES.has(action.mode) || action.mode === state.doc.mode) return state;
+        const next = cloneDoc(state.doc); next.mode = action.mode;
+        return commit(state, next);
+      }
+      if (action.type === 'patch') {
+        const id = safeItemID(action.id || state.selectedId);
+        if (!id || !own(state.doc.items, id)) return state;
+        const next = cloneDoc(state.doc); const item = next.items[id];
+        const patch = action.patch && typeof action.patch === 'object' && !Array.isArray(action.patch) ? action.patch : {};
+        if (action.section === 'flow' || action.section === 'free' || action.section === 'appearance') mergePatch(item[action.section], patch);
+        else {
+          if (own(patch, 'slot')) item.slot = patch.slot;
+          for (const section of ['flow', 'free', 'appearance']) if (own(patch, section)) mergePatch(item[section], patch[section]);
+        }
+        if (safeSlot(item.slot) !== state.doc.items[id].slot) {
+          removeFromOrders(next, id);
+          const slot = safeSlot(item.slot);
+          item.slot = slot;
+          if (!next.orderBySlot[slot]) next.orderBySlot[slot] = [];
+          next.orderBySlot[slot].push(id);
+        }
+        return commit(state, next, id);
+      }
+      if (action.type === 'reorder') {
+        const next = cloneDoc(state.doc);
+        const id = safeItemID(action.id);
+        if (id && own(next.items, id)) {
+          const slot = own(action, 'slot') ? safeSlot(action.slot) : next.items[id].slot;
+          removeFromOrders(next, id);
+          next.items[id].slot = slot;
+          const list = next.orderBySlot[slot] || (next.orderBySlot[slot] = []);
+          const index = finite(action.index, list.length, 0, list.length);
+          list.splice(index, 0, id);
+          return commit(state, next, id);
+        }
+        const slot = safeSlot(action.slot);
+        const supplied = Array.isArray(action.ids) ? action.ids : (Array.isArray(action.order) ? action.order : null);
+        if (!supplied) return state;
+        const current = Object.keys(next.items).filter((itemID) => next.items[itemID].slot === slot);
+        const wanted = []; const seen = new Set();
+        for (const rawID of supplied.slice(0, MAX_ITEMS)) {
+          const itemID = safeItemID(rawID);
+          if (!itemID || seen.has(itemID) || !current.includes(itemID)) continue;
+          seen.add(itemID); wanted.push(itemID);
+        }
+        next.orderBySlot[slot] = wanted.concat(current.filter((itemID) => !seen.has(itemID)));
+        return commit(state, next);
+      }
+      if (['remove', 'requestRemove', 'removePending'].includes(action.type)) {
+        const id = safeItemID(action.id || state.selectedId);
+        return id && own(state.doc.items, id) ? Object.assign({}, state, { pendingRemoveId: id }) : state;
+      }
+      if (['cancelRemove', 'clearPendingRemove'].includes(action.type)) return state.pendingRemoveId ? Object.assign({}, state, { pendingRemoveId: '' }) : state;
+      if (['confirmRemove', 'removeConfirmed'].includes(action.type)) {
+        const id = safeItemID(action.id || state.pendingRemoveId);
+        if (!id || !own(state.doc.items, id) || (state.pendingRemoveId && id !== state.pendingRemoveId)) return state;
+        const next = cloneDoc(state.doc); delete next.items[id]; removeFromOrders(next, id);
+        return commit(state, next, state.selectedId === id ? '' : state.selectedId);
+      }
+      if (action.type === 'undo') {
+        if (!state.past.length) return state;
+        const doc = cloneDoc(state.past[state.past.length - 1]);
+        return Object.assign({}, state, {
+          doc, selectedId: own(doc.items, state.selectedId) ? state.selectedId : '', pendingRemoveId: '',
+          past: state.past.slice(0, -1), future: [cloneDoc(state.doc)].concat(state.future).slice(0, HISTORY_LIMIT),
+          dirty: differs(doc, state.baseline),
+        });
+      }
+      if (action.type === 'redo') {
+        if (!state.future.length) return state;
+        const doc = cloneDoc(state.future[0]);
+        return Object.assign({}, state, {
+          doc, selectedId: own(doc.items, state.selectedId) ? state.selectedId : '', pendingRemoveId: '',
+          past: state.past.concat([cloneDoc(state.doc)]).slice(-HISTORY_LIMIT), future: state.future.slice(1),
+          dirty: differs(doc, state.baseline),
+        });
+      }
+      if (action.type === 'markSaved') {
+        const doc = action.doc ? normalize(action.doc, state.doc.page) : cloneDoc(state.doc);
+        return Object.assign({}, state, { doc, baseline: cloneDoc(doc), pendingRemoveId: '', dirty: false });
+      }
+      if (action.type === 'replaceDoc') return commit(state, action.doc, action.selectedId);
+      if (action.type === 'replace') return initial(own(action, 'page') ? action.page : state.doc.page, action.doc);
+      return state;
+    }
+
+    const clearStyle = () => ({
+      position: '', left: '', top: '', right: '', bottom: '', width: '', height: '', zIndex: '',
+      gridColumn: '', gridRow: '', order: '', overflow: '', background: '', color: '', borderRadius: '', opacity: '', boxSizing: '',
+    });
+
+    function styleFor(source, idOrMode, modeOverride) {
+      let item = source; let mode = idOrMode;
+      if (source && source.items && typeof source.items === 'object') {
+        const id = safeItemID(idOrMode);
+        item = id && own(source.items, id) ? source.items[id] : null;
+        mode = modeOverride || source.mode;
+      }
+      const styles = clearStyle();
+      if (!item || typeof item !== 'object') return styles;
+      const normalized = sanitizeItem('', item);
+      styles.boxSizing = 'border-box';
+      styles.background = normalized.appearance.background || '';
+      styles.color = normalized.appearance.color || '';
+      styles.borderRadius = own(normalized.appearance, 'radius') ? normalized.appearance.radius + 'px' : '';
+      styles.opacity = own(normalized.appearance, 'opacity') ? String(normalized.appearance.opacity) : '';
+      if (mode === 'free') {
+        styles.position = 'absolute';
+        styles.left = normalized.free.x + 'px'; styles.top = normalized.free.y + 'px';
+        styles.width = normalized.free.width + 'px'; styles.height = normalized.free.height + 'px';
+        styles.zIndex = String(normalized.free.z); styles.overflow = 'auto';
+      } else {
+        styles.gridColumn = 'span ' + normalized.flow.span;
+        if (own(normalized.flow, 'height')) { styles.height = normalized.flow.height + 'px'; styles.overflow = 'auto'; }
+      }
+      return styles;
+    }
+
+    return { key, fnv1a, empty, normalize, initial, reduce, styleFor, sanitizeColor };
+  })();
+
+  /* ---------- template: 空模板结构编辑器的纯状态机 ----------
+   * 与 DOM/HTTP 解耦，既供内核编辑器使用，也能独立测试。模板只描述 Root / Container /
+   * Slot 的结构和排版，不保存或渲染业务 Item 内容。tablet/mobile 只保存覆写值，读取时
+   * 按 desktop -> tablet -> mobile 继承。 */
+  const template = (() => {
+    const BREAKPOINTS = ['desktop', 'tablet', 'mobile'];
+    const TYPES = new Set(['root', 'container', 'slot']);
+    const MODES = new Set(['flow', 'grid', 'free']);
+    const clone = (value) => JSON.parse(JSON.stringify(value));
+    const clipBytes = (value, maxBytes) => {
+      let out = ''; let bytes = 0;
+      for (const char of String(value == null ? '' : value)) {
+        const cp = char.codePointAt(0);
+        const size = cp <= 0x7f ? 1 : (cp <= 0x7ff ? 2 : (cp <= 0xffff ? 3 : 4));
+        if (bytes + size > maxBytes) break;
+        out += char; bytes += size;
+      }
+      return out;
+    };
+    const finite = (value, fallback, min, max) => {
+      const n = Number(value);
+      if (!Number.isFinite(n)) return fallback;
+      return Math.min(max, Math.max(min, Math.round(n)));
+    };
+    const baseLayout = () => ({ mode: 'flow', direction: 'column', gap: 12, padding: 16 });
+
+    function empty() {
+      return {
+        version: 1,
+        rootId: 'root',
+        nodes: {
+          root: { id: 'root', type: 'root', name: 'Root', parent: null, layouts: { desktop: baseLayout() }, frames: {} },
+        },
+        children: { root: [] },
+        meta: { version: 0, placements: [], breakpoints: [], slotMeta: {}, nodeKinds: {} },
+      };
+    }
+
+    function sanitizeLayout(raw, partial) {
+      raw = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+      const out = {};
+      if (MODES.has(raw.mode)) out.mode = raw.mode;
+      else if (!partial) out.mode = 'flow';
+      if (raw.direction === 'row' || raw.direction === 'column') out.direction = raw.direction;
+      if (raw.wrap === true || raw.wrap === false) out.wrap = raw.wrap;
+      if (['start', 'center', 'end', 'stretch'].includes(raw.align)) out.align = raw.align;
+      if (raw.gap != null) out.gap = finite(raw.gap, partial ? undefined : 12, 0, 128);
+      if (raw.padding != null) out.padding = finite(raw.padding, partial ? undefined : 16, 0, 160);
+      if (raw.columns != null) out.columns = finite(raw.columns, partial ? undefined : 12, 1, 24);
+      if (raw.minHeight != null) out.minHeight = finite(raw.minHeight, partial ? undefined : 160, 48, 4000);
+      if (!partial) return Object.assign(baseLayout(), out);
+      return out;
+    }
+
+    function sanitizeFrame(raw) {
+      raw = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+      const out = {};
+      if (raw.x != null) out.x = finite(raw.x, 0, 0, 4000);
+      if (raw.y != null) out.y = finite(raw.y, 0, 0, 4000);
+      if (raw.w != null) out.w = finite(raw.w, 240, 48, 10000);
+      if (raw.h != null) out.h = finite(raw.h, 120, 48, 4000);
+      if (raw.span != null) out.span = finite(raw.span, 1, 1, 24);
+      return out;
+    }
+
+    function normalize(input) {
+      const src = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
+      const out = empty();
+      const rawNodes = src.nodes && typeof src.nodes === 'object' && !Array.isArray(src.nodes) ? src.nodes : {};
+      const accepted = new Set(['root']);
+      for (const [key, raw] of Object.entries(rawNodes).slice(0, 1000)) {
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+        const id = clipBytes(String(raw.id || key).trim(), 128);
+        if (!id || id === 'root' || accepted.has(id) || !TYPES.has(raw.type) || raw.type === 'root') continue;
+        accepted.add(id);
+        const layouts = {};
+        const frames = {};
+        for (const [bp, value] of Object.entries(raw.layouts || {}).slice(0, 32)) {
+          if (/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(bp)) layouts[bp] = sanitizeLayout(value, bp !== 'desktop');
+        }
+        for (const [bp, value] of Object.entries(raw.frames || {}).slice(0, 32)) {
+          if (/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(bp)) frames[bp] = sanitizeFrame(value);
+        }
+        if (!layouts.desktop) layouts.desktop = baseLayout();
+        out.nodes[id] = {
+          id,
+          type: raw.type,
+          name: clipBytes(String(raw.name || (raw.type === 'slot' ? 'Slot' : 'Container')).trim(), 128),
+          parent: null,
+          layouts,
+          frames,
+        };
+        out.children[id] = [];
+      }
+      const rawRoot = rawNodes.root;
+      if (rawRoot && typeof rawRoot === 'object') {
+        out.nodes.root.name = clipBytes(String(rawRoot.name || 'Root').trim(), 128) || 'Root';
+        out.nodes.root.layouts = {};
+        out.nodes.root.frames = {};
+        for (const [bp, value] of Object.entries(rawRoot.layouts || {}).slice(0, 32)) {
+          if (/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(bp)) out.nodes.root.layouts[bp] = sanitizeLayout(value, bp !== 'desktop');
+        }
+        if (!out.nodes.root.layouts.desktop) out.nodes.root.layouts.desktop = baseLayout();
+      }
+      const rawChildren = src.children && typeof src.children === 'object' && !Array.isArray(src.children) ? src.children : {};
+      const visited = new Set(['root']);
+      function attach(parent) {
+        const list = Array.isArray(rawChildren[parent]) ? rawChildren[parent] : [];
+        for (const rawId of list.slice(0, 1000)) {
+          const id = String(rawId);
+          if (!accepted.has(id) || visited.has(id) || id === parent) continue;
+          visited.add(id);
+          out.nodes[id].parent = parent;
+          out.children[parent].push(id);
+          attach(id);
+        }
+      }
+      attach('root');
+      // 损坏/旧数据中的孤儿节点仍可编辑，安全地挂回 Root。
+      for (const id of accepted) {
+        if (id === 'root' || visited.has(id)) continue;
+        out.nodes[id].parent = 'root';
+        out.children.root.push(id);
+        visited.add(id);
+        attach(id);
+      }
+      const meta = src.meta && typeof src.meta === 'object' && !Array.isArray(src.meta) ? src.meta : {};
+      out.meta = {
+        version: Number.isFinite(Number(meta.version)) ? Math.max(0, Math.floor(Number(meta.version))) : 0,
+        placements: Array.isArray(meta.placements) ? clone(meta.placements.slice(0, 5000)) : [],
+        breakpoints: Array.isArray(meta.breakpoints) ? clone(meta.breakpoints.slice(0, 32)) : [],
+        slotMeta: meta.slotMeta && typeof meta.slotMeta === 'object' && !Array.isArray(meta.slotMeta) ? clone(meta.slotMeta) : {},
+        nodeKinds: meta.nodeKinds && typeof meta.nodeKinds === 'object' && !Array.isArray(meta.nodeKinds) ? clone(meta.nodeKinds) : {},
+        externalIDs: meta.externalIDs && typeof meta.externalIDs === 'object' && !Array.isArray(meta.externalIDs) ? clone(meta.externalIDs) : {},
+        extraProps: meta.extraProps && typeof meta.extraProps === 'object' && !Array.isArray(meta.extraProps) ? clone(meta.extraProps) : {},
+      };
+      return out;
+    }
+
+    function fromVersion(version) {
+      version = version && typeof version === 'object' && !Array.isArray(version) ? version : {};
+      const rootID = String(version.root_id || 'root');
+      const nodeList = Array.isArray(version.nodes) ? version.nodes : [];
+      const slotList = Array.isArray(version.slots) ? version.slots : [];
+      const raw = { nodes: {}, children: {}, meta: { version: version.version || 0, placements: version.placements || [], breakpoints: version.breakpoints || [], slotMeta: {}, nodeKinds: {}, externalIDs: { root: rootID }, extraProps: {} } };
+      raw.nodes.root = { id: 'root', type: 'root', name: 'Root', layouts: { desktop: baseLayout() }, frames: {} };
+      raw.children.root = [];
+      const idMap = new Map([[rootID, 'root']]);
+      for (const item of nodeList) {
+        if (!item || typeof item !== 'object') continue;
+        const sourceID = String(item.id || '');
+        if (!sourceID || sourceID === rootID) continue;
+        let targetID = sourceID === 'root' ? 'node-root' : sourceID;
+        let suffix = 2;
+        while (raw.nodes[targetID]) targetID = sourceID + '-' + suffix++;
+        idMap.set(sourceID, targetID);
+        raw.meta.externalIDs[targetID] = sourceID;
+        const props = item.props && typeof item.props === 'object' && !Array.isArray(item.props) ? item.props : {};
+        const inferredMode = item.kind === 'grid' ? 'grid' : (item.kind === 'group' ? 'free' : 'flow');
+        raw.nodes[targetID] = {
+          id: targetID,
+          type: 'container',
+          name: String(item.name || 'Container'),
+          layouts: props.layouts || { desktop: props.layout || Object.assign(baseLayout(), { mode: inferredMode }) },
+          frames: props.frames || {},
+        };
+        raw.children[targetID] = [];
+        raw.meta.nodeKinds[targetID] = item.kind;
+        raw.meta.extraProps[targetID] = Object.fromEntries(Object.entries(props).filter(([key]) => !['layouts', 'layout', 'frames', 'slot_layouts'].includes(key)));
+      }
+      const rootRecord = nodeList.find((node) => node && String(node.id) === rootID);
+      if (rootRecord) {
+        const props = rootRecord.props && typeof rootRecord.props === 'object' && !Array.isArray(rootRecord.props) ? rootRecord.props : {};
+        const inferredMode = rootRecord.kind === 'grid' ? 'grid' : (rootRecord.kind === 'group' ? 'free' : 'flow');
+        raw.nodes.root.name = String(rootRecord.name || 'Root');
+        raw.nodes.root.layouts = props.layouts || { desktop: props.layout || Object.assign(baseLayout(), { mode: inferredMode }) };
+        raw.meta.nodeKinds.root = rootRecord.kind;
+        raw.meta.extraProps.root = Object.fromEntries(Object.entries(props).filter(([key]) => !['layouts', 'layout', 'frames', 'slot_layouts'].includes(key)));
+      }
+      const ordered = nodeList.slice().sort((a, b) => Number(a && a.order || 0) - Number(b && b.order || 0));
+      for (const item of ordered) {
+        if (!item || String(item.id) === rootID) continue;
+        const id = idMap.get(String(item.id));
+        if (!id || !raw.nodes[id]) continue;
+        const parent = idMap.get(String(item.parent_id || rootID)) || 'root';
+        if (!raw.children[parent]) raw.children[parent] = [];
+        raw.children[parent].push(id);
+      }
+      // Slot 是独立于 Node 的命名挂载点。同一 Node 可以拥有多个 Slot，Root 也可以有 Slot；
+      // 编辑器用虚拟 Slot 图层表达它们，保存时不会伪造额外 TemplateNode。
+      for (const slot of slotList) {
+        if (!slot || typeof slot !== 'object') continue;
+        const owner = idMap.get(String(slot.node_id || ''));
+        if (!owner || !raw.nodes[owner]) continue;
+        const sourceID = String(slot.id || 'slot');
+        let layerID = sourceID;
+        let suffix = 2;
+        if (raw.nodes[layerID]) layerID = 'slot-layer-' + sourceID;
+        while (raw.nodes[layerID]) layerID = 'slot-layer-' + sourceID + '-' + suffix++;
+        const ownerSource = nodeList.find((item) => item && String(item.id) === String(slot.node_id));
+        const ownerProps = ownerSource && ownerSource.props && typeof ownerSource.props === 'object' ? ownerSource.props : {};
+        const slotLayout = ownerProps.slot_layouts && ownerProps.slot_layouts[sourceID] || {};
+        raw.nodes[layerID] = { id: layerID, type: 'slot', name: String(slot.name || 'Slot'), layouts: slotLayout.layouts || { desktop: baseLayout() }, frames: slotLayout.frames || {} };
+        raw.children[layerID] = [];
+        raw.children[owner].push(layerID);
+        raw.meta.slotMeta[layerID] = clone(slot);
+      }
+      return normalize(raw);
+    }
+
+    function toVersion(input) {
+      const doc = normalize(input);
+      const nodes = [];
+      const slots = [];
+      const externalID = (id) => String(doc.meta.externalIDs[id] || id);
+      const slotLayouts = {};
+      for (const { id, node } of flatten(doc)) {
+        if (node.type !== 'slot') continue;
+        const owner = node.parent || 'root';
+        const slotID = String((doc.meta.slotMeta[id] || {}).id || id);
+        if (!slotLayouts[owner]) slotLayouts[owner] = {};
+        slotLayouts[owner][slotID] = { layouts: clone(node.layouts || {}), frames: clone(node.frames || {}) };
+      }
+      for (const { id, node } of flatten(doc)) {
+        const siblings = (doc.children[node.parent || 'root'] || []).filter((childID) => doc.nodes[childID] && doc.nodes[childID].type !== 'slot');
+        const desktop = resolveLayout(node, 'desktop');
+        let kind = 'group';
+        if (node.type === 'slot') {
+          const previous = doc.meta.slotMeta[id] || {};
+          slots.push({ id: String(previous.id || id), node_id: externalID(node.parent || 'root'), name: node.name, accepts: Array.isArray(previous.accepts) ? previous.accepts : ['html'], locked: !!previous.locked });
+          continue;
+        }
+        const storedKind = doc.meta.nodeKinds[id];
+        const kindMatches = desktop.mode === 'grid' ? storedKind === 'grid' : (desktop.mode === 'free' ? storedKind === 'group' : (storedKind === 'stack' || storedKind === 'canvas'));
+        if (kindMatches) kind = storedKind;
+        else if (desktop.mode === 'grid') kind = 'grid';
+        else if (desktop.mode === 'free') kind = 'group';
+        else kind = id === 'root' ? 'canvas' : 'stack';
+        const props = Object.assign({}, clone(doc.meta.extraProps[id] || {}), { layouts: clone(node.layouts || {}), frames: clone(node.frames || {}) });
+        if (slotLayouts[id] && Object.keys(slotLayouts[id]).length) props.slot_layouts = slotLayouts[id];
+        nodes.push({
+          id: externalID(id),
+          parent_id: id === 'root' ? '' : externalID(node.parent || 'root'),
+          kind,
+          name: node.name,
+          order: id === 'root' ? 0 : Math.max(0, siblings.indexOf(id)),
+          props,
+        });
+      }
+      const validSlots = new Set(slots.map((slot) => slot.id));
+      const placements = (doc.meta.placements || []).map((placement) => {
+        const next = clone(placement);
+        if (next.slot_id && !validSlots.has(String(next.slot_id))) { next.slot_id = ''; next.unassigned = true; }
+        return next;
+      });
+      const breakpoints = doc.meta.breakpoints && doc.meta.breakpoints.length
+        ? clone(doc.meta.breakpoints)
+        : [
+            { id: 'desktop', name: 'Desktop', min_width: 1024, columns: 12, gap: 12 },
+            { id: 'tablet', name: 'Tablet', min_width: 768, max_width: 1023, columns: 8, gap: 12 },
+            { id: 'mobile', name: 'Mobile', max_width: 767, columns: 4, gap: 10 },
+          ];
+      return { version: doc.meta.version || 0, root_id: externalID('root'), nodes, slots, placements, breakpoints };
+    }
+
+    function saveRequest(record, page, doc) {
+      const current = record && typeof record === 'object' && !Array.isArray(record) ? clone(record) : {};
+      // page/persisted/migrated 属于 current endpoint 的绑定或响应元数据，不能混入 Template 实体。
+      delete current.page;
+      delete current.persisted;
+      delete current.migrated;
+      current.draft = toVersion(doc);
+      return { page: String(page || ''), expected_revision: Math.max(0, Number(current.revision) || 0), template: current };
+    }
+
+    function resolveMap(map, breakpoint, defaults) {
+      const result = Object.assign({}, defaults || {});
+      const index = BREAKPOINTS.indexOf(breakpoint);
+      if (index < 0) {
+        Object.assign(result, map && map.desktop || {}, map && map[breakpoint] || {});
+        return result;
+      }
+      for (let i = 0; i <= index; i++) Object.assign(result, map && map[BREAKPOINTS[i]] || {});
+      return result;
+    }
+    function resolveLayout(node, breakpoint) { return sanitizeLayout(resolveMap(node && node.layouts, breakpoint, baseLayout()), false); }
+    function resolveFrame(node, breakpoint) { return sanitizeFrame(resolveMap(node && node.frames, breakpoint, {})); }
+    function chooseBreakpoint(version, width) {
+      width = Math.max(0, Number(width) || 0);
+      const list = Array.isArray(version && version.breakpoints) ? version.breakpoints : [];
+      const matches = list.filter((bp) => bp && (!Number(bp.min_width) || width >= Number(bp.min_width)) && (!Number(bp.max_width) || width <= Number(bp.max_width)));
+      if (matches.length) return String(matches.sort((a, b) => Number(b.min_width || 0) - Number(a.min_width || 0))[0].id || 'desktop');
+      if (!list.length) return width < 768 ? 'mobile' : (width < 1024 ? 'tablet' : 'desktop');
+      return String(list.slice().sort((a, b) => Math.abs(width - Number(a.min_width || 0)) - Math.abs(width - Number(b.min_width || 0)))[0].id || 'desktop');
+    }
+    function resolvePlacement(version, itemID, breakpoint) {
+      const list = (Array.isArray(version && version.placements) ? version.placements : []).filter((placement) => placement && String(placement.item_id) === String(itemID));
+      if (!list.length) return null;
+      const chain = breakpoint === 'mobile' ? ['', 'desktop', 'tablet', 'mobile']
+        : (breakpoint === 'tablet' ? ['', 'desktop', 'tablet'] : ['', 'desktop', breakpoint]);
+      let found = null;
+      for (const key of chain) {
+        const candidate = list.find((placement) => String(placement.breakpoint || '') === key);
+        if (candidate) found = candidate;
+      }
+      return found || list.find((placement) => String(placement.breakpoint || '') === String(breakpoint)) || list.find((placement) => !placement.breakpoint) || null;
+    }
+    function descendants(doc, id) {
+      const out = [];
+      const visit = (key) => (doc.children[key] || []).forEach((child) => { out.push(child); visit(child); });
+      visit(id);
+      return out;
+    }
+    function flatten(doc) {
+      const out = [];
+      const visit = (id, depth) => {
+        if (!doc.nodes[id]) return;
+        out.push({ id, depth, node: doc.nodes[id] });
+        (doc.children[id] || []).forEach((child) => visit(child, depth + 1));
+      };
+      visit('root', 0);
+      return out;
+    }
+
+    function initial(doc) {
+      const normalized = normalize(doc);
+      return { doc: normalized, baseline: clone(normalized), selectedId: 'root', breakpoint: 'desktop', view: 'studio', past: [], future: [], dirty: false };
+    }
+    function differsFromBaseline(doc, baseline) {
+      return JSON.stringify(doc) !== JSON.stringify(baseline);
+    }
+    function commit(state, nextDoc, selectedId) {
+      const previous = clone(state.doc);
+      const past = state.past.concat([previous]).slice(-80);
+      const doc = normalize(nextDoc);
+      return Object.assign({}, state, { doc, selectedId: selectedId || state.selectedId, past, future: [], dirty: differsFromBaseline(doc, state.baseline) });
+    }
+    function move(doc, id, parent, index) {
+      if (id === 'root' || !doc.nodes[id] || !doc.nodes[parent] || doc.nodes[parent].type === 'slot' || descendants(doc, id).includes(parent)) return doc;
+      const next = clone(doc);
+      const oldParent = next.nodes[id].parent;
+      next.children[oldParent] = (next.children[oldParent] || []).filter((child) => child !== id);
+      const list = (next.children[parent] || []).filter((child) => child !== id);
+      const at = Math.min(list.length, Math.max(0, Number.isFinite(Number(index)) ? Math.floor(Number(index)) : list.length));
+      list.splice(at, 0, id);
+      next.children[parent] = list;
+      next.nodes[id].parent = parent;
+      return next;
+    }
+
+    function reduce(state, action) {
+      state = state || initial();
+      action = action || {};
+      if (action.type === 'select') return state.doc.nodes[action.id] ? Object.assign({}, state, { selectedId: action.id }) : state;
+      if (action.type === 'breakpoint' && BREAKPOINTS.includes(action.breakpoint)) return Object.assign({}, state, { breakpoint: action.breakpoint });
+      if (action.type === 'view' && (action.view === 'studio' || action.view === 'compare')) return Object.assign({}, state, { view: action.view });
+      if (action.type === 'markSaved') {
+        const doc = clone(state.doc);
+        if (action.version != null && Number.isFinite(Number(action.version))) doc.meta.version = Math.max(0, Math.floor(Number(action.version)));
+        return Object.assign({}, state, { doc, baseline: clone(doc), dirty: false });
+      }
+      if (action.type === 'replace') return initial(action.doc);
+      if (action.type === 'undo') {
+        if (!state.past.length) return state;
+        const doc = state.past[state.past.length - 1];
+        const selectedId = doc.nodes[state.selectedId] ? state.selectedId : 'root';
+        return Object.assign({}, state, { doc, selectedId, past: state.past.slice(0, -1), future: [clone(state.doc)].concat(state.future).slice(0, 80), dirty: differsFromBaseline(doc, state.baseline) });
+      }
+      if (action.type === 'redo') {
+        if (!state.future.length) return state;
+        const doc = state.future[0];
+        const selectedId = doc.nodes[state.selectedId] ? state.selectedId : 'root';
+        return Object.assign({}, state, { doc, selectedId, past: state.past.concat([clone(state.doc)]).slice(-80), future: state.future.slice(1), dirty: differsFromBaseline(doc, state.baseline) });
+      }
+      if (action.type === 'add') {
+        if (Object.keys(state.doc.nodes).length >= 512) return state;
+        const type = action.nodeType === 'slot' ? 'slot' : 'container';
+        const id = clipBytes(String(action.id || '').trim(), 128);
+        const parent = state.doc.nodes[action.parentId] ? action.parentId : state.selectedId;
+        if (!id || state.doc.nodes[id] || !state.doc.nodes[parent]) return state;
+        const next = clone(state.doc);
+        next.nodes[id] = { id, type, name: clipBytes(action.name || (type === 'slot' ? 'Slot' : 'Container'), 128), parent, layouts: { desktop: baseLayout() }, frames: {} };
+        next.children[id] = [];
+        const list = next.children[parent] || (next.children[parent] = []);
+        const at = Math.min(list.length, Math.max(0, Number.isFinite(Number(action.index)) ? Math.floor(Number(action.index)) : list.length));
+        list.splice(at, 0, id);
+        const parentLayout = resolveLayout(next.nodes[parent], state.breakpoint);
+        if (parentLayout.mode === 'free') {
+          next.nodes[id].frames[state.breakpoint] = { x: 0, y: at * 136, w: 240, h: 120 };
+        }
+        return commit(state, next, id);
+      }
+      if (action.type === 'remove') {
+        const id = action.id || state.selectedId;
+        if (id === 'root' || !state.doc.nodes[id]) return state;
+        const next = clone(state.doc);
+        const removeIds = [id].concat(descendants(next, id));
+        const parent = next.nodes[id].parent || 'root';
+        next.children[parent] = (next.children[parent] || []).filter((child) => child !== id);
+        removeIds.forEach((key) => { delete next.nodes[key]; delete next.children[key]; });
+        return commit(state, next, parent);
+      }
+      if (action.type === 'move') {
+        const next = move(state.doc, action.id || state.selectedId, action.parentId, action.index);
+        return next === state.doc ? state : commit(state, next, action.id || state.selectedId);
+      }
+      if (action.type === 'duplicate') {
+        const id = action.id || state.selectedId;
+        if (id === 'root' || !state.doc.nodes[id] || !action.newId) return state;
+        const source = state.doc.nodes[id];
+        const newID = clipBytes(String(action.newId).trim(), 128);
+        if (!newID || state.doc.nodes[newID]) return state;
+        const next = clone(state.doc);
+        next.nodes[newID] = clone(source);
+        next.nodes[newID].id = newID;
+        next.nodes[newID].name = clipBytes(source.name + ' copy', 128);
+        next.children[newID] = [];
+        const siblings = next.children[source.parent] || (next.children[source.parent] = []);
+        siblings.splice(siblings.indexOf(id) + 1, 0, newID);
+        const parentLayout = resolveLayout(next.nodes[source.parent], state.breakpoint);
+        if (parentLayout.mode === 'free') {
+          const frame = resolveFrame(source, state.breakpoint);
+          next.nodes[newID].frames[state.breakpoint] = Object.assign({}, frame, { x: (frame.x || 0) + 16, y: (frame.y || 0) + 16 });
+        }
+        if (source.type === 'slot' && next.meta.slotMeta[id]) {
+          next.meta.slotMeta[newID] = clone(next.meta.slotMeta[id]);
+          next.meta.slotMeta[newID].id = newID;
+          next.meta.slotMeta[newID].node_id = newID;
+        }
+        if (source.type !== 'slot') {
+          if (next.meta.extraProps[id]) next.meta.extraProps[newID] = clone(next.meta.extraProps[id]);
+          if (next.meta.nodeKinds[id]) next.meta.nodeKinds[newID] = next.meta.nodeKinds[id];
+        }
+        return commit(state, next, newID);
+      }
+      if (['rename', 'patchLayout', 'patchFrame'].includes(action.type)) {
+        const id = action.id || state.selectedId;
+        if (!state.doc.nodes[id]) return state;
+        const next = clone(state.doc);
+        if (action.type === 'rename') next.nodes[id].name = clipBytes(String(action.name || '').trim(), 128) || next.nodes[id].name;
+        else {
+          const breakpoint = BREAKPOINTS.includes(action.breakpoint) ? action.breakpoint : state.breakpoint;
+          const field = action.type === 'patchLayout' ? 'layouts' : 'frames';
+          next.nodes[id][field] = next.nodes[id][field] || {};
+          const current = next.nodes[id][field][breakpoint] || {};
+          const patch = action.patch && typeof action.patch === 'object' ? action.patch : {};
+          const merged = Object.assign({}, current, patch);
+          for (const [key, value] of Object.entries(merged)) if (value == null || value === '') delete merged[key];
+          next.nodes[id][field][breakpoint] = action.type === 'patchLayout' ? sanitizeLayout(merged, breakpoint !== 'desktop') : sanitizeFrame(merged);
+          if (action.type === 'patchLayout' && patch.mode === 'free') {
+            (next.children[id] || []).forEach((childID, index) => {
+              const child = next.nodes[childID];
+              child.frames = child.frames || {};
+              const own = child.frames[breakpoint] || {};
+              if (own.x == null || own.y == null) child.frames[breakpoint] = Object.assign({ x: 0, y: index * 136, w: 240, h: 120 }, own);
+            });
+          }
+        }
+        return commit(state, next, id);
+      }
+      return state;
+    }
+
+    return { BREAKPOINTS, empty, normalize, fromVersion, toVersion, saveRequest, initial, reduce, resolveLayout, resolveFrame, chooseBreakpoint, resolvePlacement, descendants, flatten };
+  })();
+
+  window.__ihtmlLib = { makeT, fmt, util, chart, template, chatAgent, chatTrace, itemLayout };
 })();

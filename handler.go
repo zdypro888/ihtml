@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"net/http"
 	"strings"
 	"sync"
@@ -17,7 +18,10 @@ import (
 	"time"
 )
 
-//go:embed web
+// Only production assets belong in downstream binaries. Tests and design
+// artifacts must not be pulled in by a directory-wide embed pattern.
+//
+//go:embed web/index.html web/ihtml-lib.js web/ihtml.js web/ihtml.css
 var webFS embed.FS
 
 // Handler 是库的 HTTP 入口: 服务空壳页面、内核资源与全部 /api/* 接口。
@@ -44,7 +48,8 @@ type Handler struct {
 	wsMu    sync.Mutex
 	wsConns map[io.Closer]struct{} // 活跃对话连接, 供 Close 优雅断开
 
-	closed atomic.Bool
+	closeCh chan struct{} // 同时终止内置/自定义 Broadcaster 上的 SSE
+	closed  atomic.Bool
 }
 
 type rateWindow struct {
@@ -52,10 +57,40 @@ type rateWindow struct {
 	n     int
 }
 
-// New 创建 Handler。store 必填, 行为经 Option 调整。
+// ErrInvalidHandlerConfig matches constructor failures reported by NewHandler.
+var ErrInvalidHandlerConfig = errors.New("ihtml: invalid handler configuration")
+
+// HandlerConfigError identifies the option or dependency that failed startup
+// validation. Callers should use errors.As instead of matching Error strings.
+type HandlerConfigError struct {
+	Field   string
+	Problem string
+}
+
+func (e *HandlerConfigError) Error() string {
+	if e == nil {
+		return ErrInvalidHandlerConfig.Error()
+	}
+	return fmt.Sprintf("%s: %s: %s", ErrInvalidHandlerConfig, e.Field, e.Problem)
+}
+
+func (e *HandlerConfigError) Unwrap() error { return ErrInvalidHandlerConfig }
+
+// New creates a Handler and preserves the original panic-on-programmer-error
+// behavior for source compatibility. NewHandler is recommended for SDK users
+// that want startup errors returned to their application.
 func New(store Store, opts ...Option) *Handler {
+	h, err := NewHandler(store, opts...)
+	if err != nil {
+		panic(err)
+	}
+	return h
+}
+
+// NewHandler validates dependencies and options, then creates a Handler.
+func NewHandler(store Store, opts ...Option) (*Handler, error) {
 	if store == nil {
-		panic("ihtml: store is required")
+		return nil, &HandlerConfigError{Field: "Store", Problem: "is required"}
 	}
 	o := options{
 		resolver:     DefaultUserResolver,
@@ -64,8 +99,17 @@ func New(store Store, opts ...Option) *Handler {
 		pageTitle:    "ihtml",
 		limits:       Limits{}.normalized(),
 	}
-	for _, fn := range opts {
+	for index, fn := range opts {
+		if fn == nil {
+			return nil, &HandlerConfigError{Field: fmt.Sprintf("Option[%d]", index), Problem: "is nil"}
+		}
 		fn(&o)
+	}
+	if o.logger == nil {
+		return nil, &HandlerConfigError{Field: "Logger", Problem: "is nil"}
+	}
+	if o.maxRevisions < 0 {
+		return nil, &HandlerConfigError{Field: "MaxRevisions", Problem: "cannot be negative"}
 	}
 	if o.broadcaster == nil {
 		o.broadcaster = newHub()
@@ -77,15 +121,16 @@ func New(store Store, opts ...Option) *Handler {
 		rates:   make(map[string]*rateWindow),
 		conns:   make(map[string]int),
 		wsConns: make(map[io.Closer]struct{}),
+		closeCh: make(chan struct{}),
 	}
 	raw, err := webFS.ReadFile("web/index.html")
 	if err != nil {
-		panic(fmt.Sprintf("ihtml: embedded index.html missing: %v", err))
+		return nil, fmt.Errorf("%w: embedded index.html: %v", ErrInvalidHandlerConfig, err)
 	}
 	h.page = bytes.Replace(raw, []byte("{{TITLE}}"), []byte(htmlEscape(o.pageTitle)), 1)
 	h.pageETag = etagOf(h.page)
 	h.routes()
-	return h
+	return h, nil
 }
 
 func etagOf(b []byte) string {
@@ -163,12 +208,21 @@ func (h *Handler) acquireConn(key string, limit int) func() {
 	}
 }
 
-// accessFor 计算该请求的访问策略。
-func (h *Handler) accessFor(r *http.Request, user string) Access {
+func (h *Handler) accessDecision(r *http.Request, user string) (Access, error) {
 	if h.opts.access == nil {
-		return Access{}
+		return Access{}, nil
 	}
 	return h.opts.access(r, user)
+}
+
+// accessFor is used after withUser has already rejected policy backend errors.
+// Long-lived paths also fail closed by treating a new error as no write/chat.
+func (h *Handler) accessFor(r *http.Request, user string) Access {
+	access, err := h.accessDecision(r, user)
+	if err != nil {
+		return Access{ReadOnly: true, ChatDisabled: true}
+	}
+	return access
 }
 
 // Close 优雅停机: 拒绝新连接、断开全部 SSE/WS。应在 http.Server.Shutdown
@@ -177,6 +231,7 @@ func (h *Handler) Close() error {
 	if h.closed.Swap(true) {
 		return nil
 	}
+	close(h.closeCh)
 	if hb, ok := h.opts.broadcaster.(*hub); ok {
 		hb.close()
 	}
@@ -203,23 +258,24 @@ func (h *Handler) routes() {
 
 	mux.HandleFunc("GET /api/config", h.withUser(h.handleConfig))
 	mux.HandleFunc("GET /api/items", h.withUser(h.handleListItems))
-	mux.HandleFunc("PUT /api/items", h.withWrite(h.handlePutItems))
-	mux.HandleFunc("POST /api/items", h.withWrite(h.handlePutItems)) // 等价 PUT, 方便简单客户端
+	mux.HandleFunc("PUT /api/items", h.withJSONWrite(h.handlePutItems))
+	mux.HandleFunc("POST /api/items", h.withJSONWrite(h.handlePutItems)) // 等价 PUT
 	mux.HandleFunc("DELETE /api/items", h.withWrite(h.handleDeleteItems))
-	mux.HandleFunc("POST /api/items/replace", h.withWrite(h.handleReplaceItems))
+	mux.HandleFunc("POST /api/items/replace", h.withJSONWrite(h.handleReplaceItems))
 	mux.HandleFunc("GET /api/pages", h.withUser(h.handleListPages))
-	mux.HandleFunc("PUT /api/pages", h.withWrite(h.handleSetPage))
+	mux.HandleFunc("PUT /api/pages", h.withJSONWrite(h.handleSetPage))
 	mux.HandleFunc("DELETE /api/pages/{name}", h.withWrite(h.handleDeletePage))
+	h.registerTemplateRoutes(mux)
 	mux.HandleFunc("GET /api/revisions", h.withUser(h.handleListRevisions))
 	mux.HandleFunc("GET /api/revisions/{id}", h.withUser(h.handleRevisionItems))
 	mux.HandleFunc("POST /api/revisions/{id}/rollback", h.withWrite(h.handleRollback))
 	mux.HandleFunc("GET /api/kv/{key}", h.withUser(h.handleKVGet))
-	mux.HandleFunc("PUT /api/kv/{key}", h.withWrite(h.handleKVSet))
+	mux.HandleFunc("PUT /api/kv/{key}", h.withJSONWrite(h.handleKVSet))
 	mux.HandleFunc("DELETE /api/kv/{key}", h.withWrite(h.handleKVDelete))
 	mux.HandleFunc("GET /api/export", h.withUser(h.handleExport))
 	mux.HandleFunc("GET /api/events", h.withUser(h.handleEvents))
 	mux.HandleFunc("GET /api/errors", h.withUser(h.handleListErrors))
-	mux.HandleFunc("POST /api/errors", h.withUser(h.handleReportErrors))
+	mux.HandleFunc("POST /api/errors", h.withJSONUser(h.handleReportErrors))
 	mux.HandleFunc("GET /api/chat/models", h.withUser(h.handleChatModels))
 	mux.HandleFunc("GET /api/chat/ws", h.withUser(h.handleChatWS))
 	h.mux = mux
@@ -237,8 +293,31 @@ func (h *Handler) withWrite(fn func(w http.ResponseWriter, r *http.Request, user
 			writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": "写操作过于频繁, 请稍后再试"})
 			return
 		}
-		fn(w, r, user)
+		fn(w, r.WithContext(withMutationSource(r.Context(), "api")), user)
 	})
+}
+
+// withJSONWrite 为消费 JSON 的写端点增加媒体类型约束。
+// application/json 不是 CORS safelisted Content-Type，因此这也会
+// 阻断把 JSON 伪装成 text/plain 的简单请求 CSRF。
+func (h *Handler) withJSONWrite(fn func(w http.ResponseWriter, r *http.Request, user string)) http.HandlerFunc {
+	return h.requireJSON(h.withWrite(fn))
+}
+
+func (h *Handler) withJSONUser(fn func(w http.ResponseWriter, r *http.Request, user string)) http.HandlerFunc {
+	return h.requireJSON(h.withUser(fn))
+}
+
+func (h *Handler) requireJSON(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+		structuredJSON := strings.HasPrefix(mediaType, "application/") && strings.HasSuffix(mediaType, "+json")
+		if err != nil || mediaType != "application/json" && !structuredJSON {
+			writeJSON(w, http.StatusUnsupportedMediaType, map[string]any{"error": "Content-Type must be application/json"})
+			return
+		}
+		next(w, r)
+	}
 }
 
 // originAllowed 判断 Origin 是否在 WithCORS 白名单内。
@@ -253,17 +332,38 @@ func (h *Handler) originAllowed(origin string) bool {
 
 // ServeHTTP 实现 http.Handler。
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// CORS: 宿主页面跨域 mount 内核时放行(鉴权走参数, 不放 cookie)
-	if origin := r.Header.Get("Origin"); origin != "" && h.originAllowed(origin) {
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Referrer-Policy", "same-origin")
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	corsAllowed := origin != "" && h.originAllowed(origin)
+	// 浏览器的非安全请求只允许同源或 WithCORS 显式白名单。
+	// 对没有 Origin 的非浏览器客户端保持兼容；Sec-Fetch-Site
+	// 可以覆盖某些浏览器省略 Origin 的边界情况。
+	if isUnsafeMethod(r.Method) {
+		if origin != "" && !h.sameOrigin(r) && !corsAllowed {
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "cross-origin request rejected"})
+			return
+		}
+		if origin == "" && strings.EqualFold(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")), "cross-site") {
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "cross-site request rejected"})
+			return
+		}
+	}
+
+	// CORS: 宿主页面跨域 mount 内核时显式放行。
+	if corsAllowed {
 		w.Header().Set("Access-Control-Allow-Origin", origin)
 		w.Header().Set("Vary", "Origin")
 		if r.Method == http.MethodOptions {
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Ihtml-User")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Ihtml-User")
 			w.Header().Set("Access-Control-Max-Age", "600")
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
+	} else if r.Method == http.MethodOptions && origin != "" {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "CORS origin rejected"})
+		return
 	}
 	// 经 StripPrefix("/ui", h) 挂载时, 访问 /ui 会得到空 path;
 	// 内核依赖相对路径, 必须重定向到带斜杠的 /ui/。
@@ -280,7 +380,31 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mux.ServeHTTP(w, r)
 }
 
+func isUnsafeMethod(method string) bool {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace:
+		return false
+	default:
+		return true
+	}
+}
+
 func (h *Handler) handlePage(w http.ResponseWriter, r *http.Request) {
+	// 默认禁止跨域 iframe 嵌入；宿主显式配置 postMessage
+	// Origin 时，同一白名单也是唯一可嵌入页面的 frame ancestor。
+	frameAncestors := "'self'"
+	if len(h.opts.messageOrigins) > 0 {
+		if containsString(h.opts.messageOrigins, "*") {
+			frameAncestors = "*"
+		} else {
+			frameAncestors += " " + strings.Join(h.opts.messageOrigins, " ")
+		}
+	} else {
+		// X-Frame-Options 无法表达多个跨域白名单，因此只在
+		// 默认同源策略下作为旧浏览器兜底。
+		w.Header().Set("X-Frame-Options", "SAMEORIGIN")
+	}
+	w.Header().Set("Content-Security-Policy", "frame-ancestors "+frameAncestors)
 	if match := r.Header.Get("If-None-Match"); match != "" && match == h.pageETag {
 		w.WriteHeader(http.StatusNotModified)
 		return
@@ -342,15 +466,30 @@ func (h *Handler) withUser(fn func(w http.ResponseWriter, r *http.Request, user 
 	return func(w http.ResponseWriter, r *http.Request) {
 		user, err := h.opts.resolver(r)
 		if err != nil || strings.TrimSpace(user) == "" {
+			h.metric("auth_rejected", 1)
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 			return
 		}
-		fn(w, r, user)
+		if _, err := h.accessDecision(r, strings.TrimSpace(user)); err != nil {
+			h.metric("access_policy_errors", 1)
+			h.opts.logger.Error("ihtml: access policy failed", "user", strings.TrimSpace(user), "err", err)
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "access policy unavailable"})
+			return
+		}
+		fn(w, r, strings.TrimSpace(user))
 	}
+}
+
+// requestUserValid 用于长连接定期重验宿主会话，并确保会话
+// 中途切换账号时不会延续旧用户的订阅/对话权限。
+func (h *Handler) requestUserValid(r *http.Request, user string) bool {
+	resolved, err := h.opts.resolver(r)
+	return err == nil && strings.TrimSpace(resolved) == user
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }
@@ -365,7 +504,19 @@ func (h *Handler) writeError(w http.ResponseWriter, status int, err error) {
 func readJSON(w http.ResponseWriter, r *http.Request, limit int64, v any) error {
 	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	dec := json.NewDecoder(r.Body)
-	return dec.Decode(v)
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	// Decoder.Decode 本身会在第一个 JSON 值后停止。必须再读一次，
+	// 否则 {"ok":true}{"smuggled":true} 这类 trailing data 会被静默忽略。
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("request body must contain exactly one JSON value")
+		}
+		return fmt.Errorf("invalid trailing data: %w", err)
+	}
+	return nil
 }
 
 func (h *Handler) handleConfig(w http.ResponseWriter, r *http.Request, user string) {
@@ -374,6 +525,10 @@ func (h *Handler) handleConfig(w http.ResponseWriter, r *http.Request, user stri
 		"user":      user,
 		"chat":      h.opts.chat != nil && !access.ChatDisabled,
 		"read_only": access.ReadOnly,
+		"templates": true,
+	}
+	if len(h.opts.messageOrigins) > 0 {
+		out["message_origins"] = append([]string(nil), h.opts.messageOrigins...)
 	}
 	if h.opts.pageConfig != nil {
 		if params := h.opts.pageConfig(r, user); params != nil {
@@ -389,8 +544,31 @@ func (h *Handler) handleExport(w http.ResponseWriter, r *http.Request, user stri
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	w.Header().Set("Content-Disposition", `attachment; filename="ihtml-`+htmlEscape(user)+`.json"`)
+	w.Header().Set("Content-Disposition", `attachment; filename="`+exportFilename(user)+`"`)
 	writeJSON(w, http.StatusOK, export)
+}
+
+// exportFilename 只保留 Content-Disposition quoted-string 内安全的
+// ASCII 字符，防止 resolver 返回的用户名注入 CRLF/额外响应头。
+func exportFilename(user string) string {
+	var b strings.Builder
+	b.WriteString("ihtml-")
+	for _, r := range user {
+		if b.Len() >= 72 {
+			break
+		}
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	if b.Len() == len("ihtml-") {
+		b.WriteString("export")
+	}
+	b.WriteString(".json")
+	return b.String()
 }
 
 // handleListItems 支持页面过滤:
@@ -632,7 +810,9 @@ func (h *Handler) handleReportErrors(w http.ResponseWriter, r *http.Request, use
 }
 
 // handleEvents 是 SSE 端点: 推送 items/kv/pages 变更事件, 25s 心跳保活,
-// 55 分钟强制到期(配合 LB 排空; 内核会自动重连并整体 refresh)。
+// 订阅成功立即发 resync 消除"先 fetch 后 subscribe"空窗，之后每分钟
+// 周期性 resync 使不能报告丢包的外部 Broadcaster 也最终收敛。
+// 连接 55 分钟强制到期，配合 LB 排空。
 func (h *Handler) handleEvents(w http.ResponseWriter, r *http.Request, user string) {
 	if h.closed.Load() {
 		h.writeError(w, http.StatusServiceUnavailable, fmt.Errorf("shutting down"))
@@ -653,27 +833,46 @@ func (h *Handler) handleEvents(w http.ResponseWriter, r *http.Request, user stri
 	h.metric("sse_connections", 1)
 	defer h.metric("sse_connections", -1)
 
+	// 必须先订阅再向客户端宣告就绪；否则响应头已到达
+	// 但 Subscribe 尚未建立的短窗口仍可丢失变更。
+	ch, cancel := h.opts.broadcaster.Subscribe(user)
+	defer cancel()
+
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
-	_, _ = fmt.Fprint(w, "retry: 3000\n\n: hello\n\n")
+	_, _ = fmt.Fprint(w, "retry: 3000\n\n")
+	initial := h.resyncEvent(user, "subscribe")
+	if err := writeSSEEvent(w, initial); err != nil {
+		return
+	}
 	flusher.Flush()
 
-	ch, cancel := h.opts.broadcaster.Subscribe(user)
-	defer cancel()
 	ticker := time.NewTicker(25 * time.Second)
 	defer ticker.Stop()
+	resync := time.NewTicker(time.Minute)
+	defer resync.Stop()
 	expire := time.NewTimer(55 * time.Minute)
 	defer expire.Stop()
 	for {
 		select {
 		case <-r.Context().Done():
 			return
+		case <-h.closeCh:
+			return
 		case <-expire.C:
 			return
 		case <-ticker.C:
+			if !h.requestUserValid(r, user) {
+				return
+			}
 			if _, err := fmt.Fprint(w, ": ping\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
+		case <-resync.C:
+			if err := writeSSEEvent(w, h.resyncEvent(user, "periodic")); err != nil {
 				return
 			}
 			flusher.Flush()
@@ -681,14 +880,32 @@ func (h *Handler) handleEvents(w http.ResponseWriter, r *http.Request, user stri
 			if !ok {
 				return // Broadcaster 关闭(优雅停机)
 			}
-			raw, err := json.Marshal(ev)
-			if err != nil {
-				continue
-			}
-			if _, err := fmt.Fprintf(w, "data: %s\n\n", raw); err != nil {
+			if err := writeSSEEvent(w, ev); err != nil {
 				return
 			}
 			flusher.Flush()
 		}
 	}
+}
+
+func (h *Handler) resyncEvent(user, reason string) Event {
+	ev := Event{Type: "resync", Reason: reason}
+	if versioned, ok := h.opts.broadcaster.(VersionedBroadcaster); ok {
+		ev.Version = versioned.CurrentVersion(user)
+	}
+	return ev
+}
+
+func writeSSEEvent(w io.Writer, ev Event) error {
+	raw, err := json.Marshal(ev)
+	if err != nil {
+		return err
+	}
+	if ev.Version > 0 {
+		if _, err := fmt.Fprintf(w, "id: %d\n", ev.Version); err != nil {
+			return err
+		}
+	}
+	_, err = fmt.Fprintf(w, "data: %s\n\n", raw)
+	return err
 }

@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "server": {
+    "addr": "127.0.0.1:8899",
+    "data_dir": "../uidata"
+  },
+  "ai": {
+    "schema_version": 1,
+    "enabled": true,
+    "provider": "claude",
+    "base_url": "https://open.bigmodel.cn/api/anthropic",
+    "model": "glm-5.2",
+    "auth": {
+      "type": "auth_token",
+      "env": "ANTHROPIC_AUTH_TOKEN"
+    },
+    "generation": {
+      "stream": true,
+      "max_tokens": 8192,
+      "thinking": {
+        "enabled": true,
+        "budget_tokens": 1024
+      }
+    },
+    "agent": {
+      "deep_enabled": true,
+      "allow_model_select": true,
+      "max_iterations": 16,
+      "max_model_calls": 24,
+      "max_subtasks": 3,
+      "request_timeout": "5m",
+      "max_turn_duration": "3m"
+    },
+    "safety": {
+      "confirm_writes": true,
+      "writes_per_minute": 240
+    },
+    "history": {
+      "max_sessions": 128,
+      "max_events_per_session": 256,
+      "max_bytes_per_session": 2097152,
+      "ttl": "12h"
+    },
+    "system_prompt": ""
+  }
+}

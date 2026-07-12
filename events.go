@@ -4,21 +4,50 @@ import (
 	"sync"
 )
 
+const (
+	EventItems     = "items"
+	EventTemplates = "templates"
+	EventKV        = "kv"
+	EventPages     = "pages"
+	EventResync    = "resync"
+
+	EventOpPut      = "put"
+	EventOpPublish  = "publish"
+	EventOpDelete   = "delete"
+	EventOpReplace  = "replace"
+	EventOpRollback = "rollback"
+	EventOpImport   = "import"
+	EventOpPurge    = "purge"
+
+	ResyncSubscribe = "subscribe"
+	ResyncOverflow  = "overflow"
+	ResyncPeriodic  = "periodic"
+)
+
 // Event 是推送给页面内核的实时事件(经 SSE 下发)。
 type Event struct {
-	// Type: "items" 表示 Item 集合变化; "kv" 表示某个 KV 键变化(如主题);
-	// "pages" 表示页面注册表变化。
+	// Type: "items" 表示 Item 集合变化; "templates" 表示模板变化;
+	// "kv" 表示某个 KV 键变化; "pages" 表示页面注册表变化;
+	// "resync" 表示客户端必须全量刷新。
 	Type string `json:"type"`
-	// Op 是 items 事件的操作: put / delete / replace / rollback / import / purge。
+	// Op 是 items/templates 事件的操作: put / publish / delete / replace /
+	// rollback / import / purge。
 	Op string `json:"op,omitempty"`
 	// Items 携带 put 的新内容, 内核原地应用。
 	Items []Item `json:"items,omitempty"`
+	// Templates 携带模板 put/publish 的最新完整值。
+	Templates []Template `json:"templates,omitempty"`
 	// IDs 携带 delete 的目标。
 	IDs []string `json:"ids,omitempty"`
 	// Key 是 kv 事件变化的键名。
 	Key string `json:"key,omitempty"`
 	// By 是变更来源(api / chat / import 等), 供宿主联动与前端展示。
 	By string `json:"by,omitempty"`
+	// Version 是某用户事件流的单调版本。默认 hub 总会填充；
+	// 外部 Broadcaster 若能提供全局单调版本也应填充。
+	Version uint64 `json:"version,omitempty"`
+	// Reason 说明 resync 原因: subscribe / overflow / periodic。
+	Reason string `json:"reason,omitempty"`
 }
 
 // Broadcaster 把变更事件广播给某用户的全部页面订阅者。
@@ -27,21 +56,35 @@ type Event struct {
 // 连接在副本 B 上的页面。
 type Broadcaster interface {
 	// Publish 向该用户的所有订阅者投递事件。实现应保证不阻塞调用方。
+	// 若实现会丢弃积压事件，必须改为投递 Type="resync" 以显式
+	// 告知订阅者，不得静默丢弃。
 	Publish(user string, ev Event)
 	// Subscribe 订阅该用户的事件流; cancel 幂等, 调用后通道会被关闭。
 	Subscribe(user string) (ch <-chan Event, cancel func())
 }
 
-// hub 是进程内 Broadcaster 默认实现。订阅者写阻塞时丢弃该条
-// (内核在 SSE 重连后会整体 refresh 兜底)。
+// VersionedBroadcaster 是 Broadcaster 的可选扩展。多副本实现可用
+// Redis INCR/流序号等返回用户级全局版本，使 SSE resync 事件
+// 能建立准确基线。Publish 投递的 Event.Version 应与此版本一致。
+type VersionedBroadcaster interface {
+	Broadcaster
+	CurrentVersion(user string) uint64
+}
+
+// hub 是进程内 Broadcaster 默认实现。订阅者积压时会清空
+// 不完整的增量队列并投递 resync，不会静默丢事件。
 type hub struct {
-	mu     sync.Mutex
-	subs   map[string]map[chan Event]struct{}
-	closed bool
+	mu       sync.Mutex
+	subs     map[string]map[chan Event]struct{}
+	versions map[string]uint64
+	closed   bool
 }
 
 func newHub() *hub {
-	return &hub{subs: make(map[string]map[chan Event]struct{})}
+	return &hub{
+		subs:     make(map[string]map[chan Event]struct{}),
+		versions: make(map[string]uint64),
+	}
 }
 
 // Subscribe 实现 Broadcaster。
@@ -72,6 +115,7 @@ func (h *hub) Subscribe(user string) (<-chan Event, func()) {
 				}
 				if len(set) == 0 {
 					delete(h.subs, user)
+					delete(h.versions, user)
 				}
 			}
 			h.mu.Unlock()
@@ -87,12 +131,35 @@ func (h *hub) Publish(user string, ev Event) {
 	if h.closed {
 		return
 	}
+	if len(h.subs[user]) == 0 {
+		return // 无订阅者时不需要保留用户版本，避免键空间泄漏。
+	}
+	h.versions[user]++
+	ev.Version = h.versions[user]
 	for ch := range h.subs[user] {
 		select {
 		case ch <- ev:
-		default: // 订阅者积压则丢弃, 依赖重连 refresh
+		default:
+			// 队列中已经存在缺口，保留任何增量都可能产生
+			// 错误状态。清空后投递一条不可丢的全量刷新信号。
+			draining := true
+			for draining {
+				select {
+				case <-ch:
+				default:
+					draining = false
+				}
+			}
+			ch <- Event{Type: "resync", Reason: "overflow", Version: ev.Version}
 		}
 	}
+}
+
+// CurrentVersion 返回当前用户事件版本。
+func (h *hub) CurrentVersion(user string) uint64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.versions[user]
 }
 
 // close 关闭全部订阅(优雅停机): 订阅通道关闭后 SSE 循环自然退出。
@@ -108,5 +175,6 @@ func (h *hub) close() {
 			close(ch)
 		}
 		delete(h.subs, user)
+		delete(h.versions, user)
 	}
 }

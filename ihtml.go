@@ -5,7 +5,7 @@
 //
 // 库对外的三个扩展点:
 //   - Store: 持久化接口, 内置 Memory/File 两个实现, 生产可换数据库;
-//   - UserResolver: 从请求参数解析当前用户, 对接宿主服务的鉴权;
+//   - UserResolver: 从宿主已验证的会话或令牌解析当前用户;
 //   - ChatBackend: AI 对话后端, 子包 chat 提供基于 eino 的实现。
 package ihtml
 
@@ -43,8 +43,9 @@ type Item struct {
 	Content string `json:"content"`
 	// Meta 是附加元数据。约定:
 	//   - js 类型 meta["module"]=="true" 时以 <script type="module"> 执行;
-	//   - html 类型 meta["slot"] 可取 sidebar/header/footer/main(默认),
-	//     存在 sidebar/header/footer Item 时内核自动启用 app-shell 布局。
+	//   - html 类型 meta["slot"] 是 Item 对当前 Template Slot.id 的规范绑定;
+	//     sidebar/header/footer/main 是旧内核兼容名称。绑定缺失或 Slot 已删除时,
+	//     模板运行时必须把 Item 放到 Root 末尾的未分配区，而不是丢弃内容。
 	Meta      map[string]string `json:"meta,omitempty"`
 	UpdatedAt time.Time         `json:"updated_at"`
 }
@@ -52,10 +53,11 @@ type Item struct {
 // Page 是页面注册表条目: 应用的一个"页", 也是侧边菜单的数据源。
 // 页面下的 Item 通过 Item.Page 归属。
 type Page struct {
-	Name  string `json:"name"`            // 路由名, 如 bills; 出现在 #/bills
-	Title string `json:"title"`           // 菜单显示名
-	Icon  string `json:"icon,omitempty"`  // 菜单图标(emoji 或短文本)
-	Order int    `json:"order,omitempty"` // 菜单排序
+	Name       string `json:"name"`                  // 路由名, 如 bills; 出现在 #/bills
+	Title      string `json:"title"`                 // 菜单显示名
+	Icon       string `json:"icon,omitempty"`        // 菜单图标(emoji 或短文本)
+	Order      int    `json:"order,omitempty"`       // 菜单排序
+	TemplateID string `json:"template_id,omitempty"` // 稳定引用的布局模板
 }
 
 var pageNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
@@ -78,6 +80,11 @@ func (p *Page) Validate() error {
 	}
 	if len(p.Title) > 64 || len(p.Icon) > 16 {
 		return fmt.Errorf("page %q: title/icon too long", p.Name)
+	}
+	if p.TemplateID != "" {
+		if err := validateTemplateID(p.TemplateID); err != nil {
+			return fmt.Errorf("page %q: %w", p.Name, err)
+		}
 	}
 	return nil
 }
@@ -118,29 +125,40 @@ const (
 	DefaultMaxRevisions = 50
 	// MaxPageErrors 是每个用户保留的页面错误条数。
 	MaxPageErrors = 50
+	// CurrentDataVersion 是 Revision 与 UserExport 当前使用的数据契约版本。
+	// v1/零值快照只包含 Items；v2 增加页面注册表；v3 增加模板目录。
+	CurrentDataVersion = 3
 )
 
-// Revision 是某用户 Item 全集的一次历史快照, 每次变更前自动保存, 用于回滚。
+// Revision 是某用户 UI 状态的一次历史快照, 每次变更前自动保存, 用于回滚。
+// Version 为 0/1 的旧快照只有 Items；Version >= 2 同时恢复 Pages；
+// Version >= 3 同时恢复模板目录与 root 模板绑定。
 type Revision struct {
-	ID        string    `json:"id"`
-	Note      string    `json:"note,omitempty"` // 变更说明, 如 "put 2 items"
-	By        string    `json:"by,omitempty"`   // 变更来源: api / chat
-	CreatedAt time.Time `json:"created_at"`
-	Items     []Item    `json:"items"`
+	Version               int        `json:"version,omitempty"`
+	ID                    string     `json:"id"`
+	Note                  string     `json:"note,omitempty"` // 变更说明, 如 "put 2 items"
+	By                    string     `json:"by,omitempty"`   // 变更来源: api / chat
+	CreatedAt             time.Time  `json:"created_at"`
+	Items                 []Item     `json:"items"`
+	Pages                 []Page     `json:"pages,omitempty"`
+	Templates             []Template `json:"templates,omitempty"`
+	RootTemplateID        string     `json:"root_template_id,omitempty"`
+	TemplateRevisionClock uint64     `json:"template_revision_clock,omitempty"`
 }
 
 // RevisionInfo 是快照的元信息(不含 Item 内容), 用于列表展示。
 type RevisionInfo struct {
-	ID        string    `json:"id"`
-	Note      string    `json:"note,omitempty"`
-	By        string    `json:"by,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
-	ItemCount int       `json:"item_count"`
+	ID            string    `json:"id"`
+	Note          string    `json:"note,omitempty"`
+	By            string    `json:"by,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+	ItemCount     int       `json:"item_count"`
+	TemplateCount int       `json:"template_count,omitempty"`
 }
 
 // Info 返回快照的元信息。
 func (r *Revision) Info() RevisionInfo {
-	return RevisionInfo{ID: r.ID, Note: r.Note, By: r.By, CreatedAt: r.CreatedAt, ItemCount: len(r.Items)}
+	return RevisionInfo{ID: r.ID, Note: r.Note, By: r.By, CreatedAt: r.CreatedAt, ItemCount: len(r.Items), TemplateCount: len(r.Templates)}
 }
 
 // PageError 是内核上报的一条前端运行错误, 保留下来供 AI 修复参考。

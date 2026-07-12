@@ -1,6 +1,8 @@
 # 运行时数据
 uidata/
 *.log
+example/ihtml.local.json
+example/secrets/
 
 # 系统与编辑器
 .DS_Store

@@ -5,16 +5,20 @@ package chat
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
 	"github.com/cloudwego/eino/adk"
-	adksession "github.com/cloudwego/eino/adk/session"
 	"github.com/cloudwego/eino/schema"
 
 	"github.com/zdypro888/ihtml"
@@ -25,34 +29,99 @@ import (
 const (
 	ProviderOpenAI = "openai"
 	ProviderClaude = "claude"
+
+	AgentModeFast = "fast"
+	AgentModeDeep = "deep"
 )
 
 // Config 是对话后端配置。
 type Config struct {
-	Provider string // openai / claude, 必填
-	BaseURL  string // API 根地址, 必填(如 https://api.openai.com/v1)
-	APIKey   string // 密钥, 本地网关可留空
-	Model    string // 默认模型; 前端可另选
+	Provider  string // openai / claude, 必填
+	BaseURL   string // API 根地址, 必填(如 https://api.openai.com/v1)
+	APIKey    string // OpenAI Bearer 或 Anthropic x-api-key；本地网关可留空
+	AuthToken string // Anthropic Authorization Bearer；仅 claude provider 使用
+	Model     string // 默认模型；仅 AllowModelSelect=true 时允许前端另选
 
 	Stream         bool          // 流式输出, 建议 true
 	Thinking       bool          // 透出思考过程(需模型支持 reasoning)
 	RequestTimeout time.Duration // 单轮超时, 0 不限
 	MaxTokens      int
-	Temperature    float32
+	// Temperature is the legacy non-zero override. Use TemperatureOverride when
+	// the provider must receive an explicit zero value.
+	Temperature float32
+	// TemperatureOverride, when non-nil, takes precedence over Temperature and
+	// preserves the distinction between "unset" and an explicit 0.
+	TemperatureOverride *float32
+	// ThinkingBudgetTokens 是 Claude extended thinking 的 token 预算。
+	// Thinking=true 且该值为 0 时使用 1024；MaxTokens 必须更大。
+	ThinkingBudgetTokens int
 
 	// SystemPrompt 追加在内置系统提示之后, 用于业务定制(如"你是某某产品的助手")。
 	SystemPrompt string
-	// ConfirmWrites 为 true 时所有写操作都要人工确认;
-	// 默认只有整体替换与回滚需要确认(普通改动有快照兜底)。
+	// ConfirmWrites 为 true 时所有中风险写操作也要人工确认。
+	// 无论此项为何值，高风险操作和可能安装 HTML/JS/CSS 的 Item 写入都会确认。
 	ConfirmWrites bool
+	// AllowUnconfirmedItemWrites 仅供完全信任模型和提示词的受控环境使用。
+	// 开启后，普通 ui_item_put 可不经人工确认直接执行；整体替换和回滚仍会确认。
+	AllowUnconfirmedItemWrites bool
 	// MaxIterations 是单轮的模型-工具循环上限, 默认 16。
 	MaxIterations int
-	// ConfirmSecret 是确认卡 HMAC 密钥。不设置则每进程随机——滚动发布/重启
-	// 会让已签发的确认卡失效; 生产环境应配置固定密钥。
+	// EnableDeepAgent 显式开放多 Agent 深度模式。默认关闭；客户端只有在该项
+	// 开启后才能为某轮请求 agent_mode=deep，空值始终走 fast。
+	EnableDeepAgent bool
+	// MaxModelCallsPerTurn 是根 Agent 与全部子 Agent 共享的模型调用上限，
+	// 默认 24；负数表示不限。fast 仍同时受 MaxIterations 限制。
+	MaxModelCallsPerTurn int
+	// MaxSubtasksPerTurn 是 Deep 模式每轮最多启动的只读子任务数，默认 3；
+	// 负数表示不限。fast 不启动子任务。
+	MaxSubtasksPerTurn int
+	// MaxTurnDuration 是一轮（含全部子 Agent）的总墙钟预算，默认 2 分钟；
+	// 负数表示不限。若 RequestTimeout 更短，则采用更短值。
+	MaxTurnDuration time.Duration
+	// ConfirmSecret 是确认卡 HMAC 密钥。不设置则每进程随机。
+	// 固定密钥只保证跨实例验签；若确认卡还需跨重启/实例一次性核销，必须同时
+	// 配置共享的 ConfirmNonceStore。默认 nonce store 是进程内存态。
 	ConfirmSecret []byte
+	// ConfirmNonceStore 保存并原子核销确认 nonce。多副本部署应提供共享实现。
+	ConfirmNonceStore ConfirmNonceStore
 	// AllowModelSelect 为 true 时前端展示模型选择器。默认隐藏:
-	// 模型是运维概念, 终端用户直接用 Config.Model / 网关首个已加载模型。
+	// 模型是运维概念；选择器隐藏时必须由 Config.Model 明确配置。
 	AllowModelSelect bool
+
+	// ProbeBaseURL 是 api_probe 唯一可信的目标源（如 https://app.internal）。
+	// 不配置时禁用探测；绝不会从客户端可控的 Request.Host 推导。
+	ProbeBaseURL string
+	// ProbeHTTPClient 可注入 mTLS、专用 Transport 等。其重定向策略会被安全
+	// 策略覆盖：只允许同源且仍命中 API 目录的重定向。
+	ProbeHTTPClient *http.Client
+	// ProbeForwardHeaders 是从 WebSocket 握手请求转发到探测请求的显式白名单。
+	// 默认不转发任何身份；如需当前会话身份，可明确加入 Cookie/Authorization。
+	ProbeForwardHeaders []string
+	// ProbeForwardQuery 是从握手 URL 转发的查询键白名单（例如旧系统的 uid）。
+	// 转发值会覆盖模型提供的同名 query，防止模型借该键冒充其他身份。
+	ProbeForwardQuery []string
+	// ProbeRequest 在发出探测前注入服务身份。inbound 是握手请求头的副本，
+	// outbound 是该探测请求的请求头；回调无法改写方法、URL、Host 或 Body。
+	ProbeRequest func(ctx context.Context, user string, inbound, outbound http.Header) error
+
+	// SessionStore 可替换默认的有界内存会话历史。自定义实现需要自行负责持久化、
+	// 容量限制和淘汰；默认实现支持 csid 重连并按以下四个上限淘汰。
+	SessionStore adk.SessionEventStore[*schema.Message]
+	// MaxHistorySessions 默认 128；负数表示不按会话数淘汰。
+	MaxHistorySessions int
+	// MaxHistoryEvents 默认每会话 256；负数表示不按事件数截断。
+	MaxHistoryEvents int
+	// MaxHistoryBytes 默认每会话 2 MiB；负数表示不按字节数截断。
+	MaxHistoryBytes int64
+	// HistoryTTL 默认 12 小时；负数表示不按空闲时间淘汰。
+	HistoryTTL time.Duration
+
+	// WritesPerMinute 是 chat 工具的独立写限额，避免工具调用绕过 HTTP 限流。
+	// 0 使用默认值 240，负数禁用。批量工具调用按一次写计数。
+	WritesPerMinute int
+	// WriteInterceptor 在每次真正执行写工具前调用，可接入共享配额/审计网关。
+	// 返回错误则拒绝该次写入。
+	WriteInterceptor func(ctx context.Context, user, tool string) error
 	// TurnInterceptor 在每轮模型调用前执行(限流/配额/计费检查),
 	// 返回错误则该轮以 turn_error 结束(错误文案直接展示给用户)。
 	TurnInterceptor func(ctx context.Context, user string) error
@@ -64,11 +133,13 @@ func (c *Config) ready() bool {
 
 // Backend 实现 ihtml.ChatBackend 与 ihtml.ModelLister。
 type Backend struct {
-	cfg    Config
-	signer *confirmSigner
+	cfg          Config
+	signer       *confirmSigner
+	writeLimiter *userWriteLimiter
 	// 会话历史存储放 Backend 级共享: 前端带稳定 csid 重连时,
 	// 同一 SessionID 命中同一份历史, 断线/刷新不失忆。
-	store adk.SessionEventStore[*schema.Message]
+	store   adk.SessionEventStore[*schema.Message]
+	history *boundedSessionStore
 }
 
 // New 创建对话后端。
@@ -76,10 +147,33 @@ func New(cfg Config) *Backend {
 	if cfg.MaxIterations <= 0 {
 		cfg.MaxIterations = 16
 	}
+	if cfg.MaxModelCallsPerTurn == 0 {
+		cfg.MaxModelCallsPerTurn = 24
+	}
+	if cfg.MaxSubtasksPerTurn == 0 {
+		cfg.MaxSubtasksPerTurn = 3
+	}
+	if cfg.MaxTurnDuration == 0 {
+		cfg.MaxTurnDuration = 2 * time.Minute
+	}
+	cfg.ProbeForwardHeaders = append([]string(nil), cfg.ProbeForwardHeaders...)
+	cfg.ProbeForwardQuery = append([]string(nil), cfg.ProbeForwardQuery...)
+	if cfg.TemperatureOverride != nil {
+		value := *cfg.TemperatureOverride
+		cfg.TemperatureOverride = &value
+	}
+	store := cfg.SessionStore
+	var history *boundedSessionStore
+	if store == nil {
+		history = newBoundedSessionStore(historyLimitsFromConfig(cfg))
+		store = history
+	}
 	return &Backend{
-		cfg:    cfg,
-		signer: newConfirmSigner(cfg.ConfirmSecret),
-		store:  adksession.NewInMemoryStore[*schema.Message](nil),
+		cfg:          cfg,
+		signer:       newConfirmSigner(cfg.ConfirmSecret, cfg.ConfirmNonceStore),
+		writeLimiter: newUserWriteLimiter(cfg.WritesPerMinute),
+		store:        store,
+		history:      history,
 	}
 }
 
@@ -87,48 +181,79 @@ var csidPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 // NewSession 实现 ihtml.ChatBackend。
 func (b *Backend) NewSession(_ context.Context, sctx *ihtml.ChatSessionContext) (ihtml.ChatSession, error) {
-	apiBase := ""
-	csid := ""
-	if sctx.Request != nil {
-		if sctx.Request.Host != "" {
-			scheme := "http"
-			if sctx.Request.TLS != nil {
-				scheme = "https"
-			}
-			apiBase = scheme + "://" + sctx.Request.Host
-		}
-		if v := sctx.Request.URL.Query().Get("csid"); csidPattern.MatchString(v) {
-			csid = v
-		}
+	if sctx == nil {
+		return nil, errors.New("chat session context is required")
 	}
-	sessionID := fmt.Sprintf("ihtml-%s-%d", sctx.User, time.Now().UnixNano())
-	if csid != "" {
-		// 稳定会话号: 重连恢复上下文("新会话"由前端换 csid 实现)
-		sessionID = "ihtml-" + sctx.User + "-" + csid
+	if strings.TrimSpace(sctx.User) == "" || sctx.Service == nil || sctx.Emit == nil {
+		return nil, errors.New("chat session requires user, service and emitter")
+	}
+	csid := ""
+	inboundHeaders := make(http.Header)
+	inboundQuery := make(url.Values)
+	if sctx.Request != nil {
+		if sctx.Request.URL != nil {
+			requestQuery := sctx.Request.URL.Query()
+			if v := requestQuery.Get("csid"); csidPattern.MatchString(v) {
+				csid = v
+			}
+			for _, rawKey := range b.cfg.ProbeForwardQuery {
+				key := strings.TrimSpace(rawKey)
+				if key != "" {
+					inboundQuery[key] = append([]string(nil), requestQuery[key]...)
+				}
+			}
+		}
+		inboundHeaders = sctx.Request.Header.Clone()
+	}
+	sessionID := secureSessionID(sctx.User, csid)
+	if b.history != nil {
+		b.history.acquire(sessionID)
 	}
 	return &session{
-		backend:   b,
-		user:      sctx.User,
-		svc:       sctx.Service,
-		emit:      sctx.Emit,
-		apis:      sctx.APIs,
-		apiBase:   apiBase,
-		access:    sctx.Access,
-		sessionID: sessionID,
-		store:     b.store,
+		backend:      b,
+		user:         sctx.User,
+		svc:          sctx.Service,
+		emit:         sctx.Emit,
+		apis:         append([]ihtml.APISpec(nil), sctx.APIs...),
+		apiBase:      strings.TrimSpace(b.cfg.ProbeBaseURL),
+		inbound:      inboundHeaders,
+		inboundQuery: inboundQuery,
+		access:       sctx.Access,
+		sessionID:    sessionID,
+		store:        b.store,
 	}, nil
+}
+
+var sessionIDFallback atomic.Uint64
+
+// secureSessionID 用长度无歧义的哈希隔离 user/csid，避免字符串拼接造成跨用户
+// 会话碰撞，也不把用户标识直接泄漏到外部 SessionStore 的键中。
+func secureSessionID(user, csid string) string {
+	seed := csid
+	if seed == "" {
+		var nonce [16]byte
+		if _, err := rand.Read(nonce[:]); err == nil {
+			seed = fmt.Sprintf("ephemeral:%x", nonce[:])
+		} else {
+			seed = fmt.Sprintf("ephemeral:%d:%d", time.Now().UnixNano(), sessionIDFallback.Add(1))
+		}
+	}
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%d:%s:%d:%s", len(user), user, len(seed), seed)))
+	return fmt.Sprintf("ihtml-%x", sum[:20])
 }
 
 // session 对应一条 WS 连接: 多轮历史存 ADK SessionStore(内存态),
 // 前端每轮只发当前这条 user 消息; 新会话 = 前端重开 WS。
 type session struct {
-	backend *Backend
-	user    string
-	svc     ihtml.Service
-	emit    func(ihtml.ChatStreamEvent) error
-	apis    []ihtml.APISpec
-	apiBase string
-	access  ihtml.Access
+	backend      *Backend
+	user         string
+	svc          ihtml.Service
+	emit         func(ihtml.ChatStreamEvent) error
+	apis         []ihtml.APISpec
+	apiBase      string
+	inbound      http.Header
+	inboundQuery url.Values
+	access       ihtml.Access
 
 	loopMu     sync.Mutex
 	loop       *adk.TurnLoop[*turnItem, *schema.Message]
@@ -140,11 +265,14 @@ type session struct {
 
 	sessionID string
 	store     adk.SessionEventStore[*schema.Message]
+	closeOnce sync.Once
 }
 
 type turnItem struct {
-	agent        *adk.ChatModelAgent
+	agent        adk.Agent
 	cfg          Config
+	mode         string
+	budget       *turnBudget
 	current      *schema.Message
 	emit         func(ihtml.ChatStreamEvent) error
 	runCancel    context.CancelFunc
@@ -154,6 +282,10 @@ type turnItem struct {
 
 // HandleEvent 实现 ihtml.ChatSession。
 func (s *session) HandleEvent(ctx context.Context, ev *ihtml.ChatClientEvent) {
+	if ev == nil {
+		_ = s.emit(ihtml.ChatStreamEvent{Type: "turn_error", Error: "缺少对话事件。", ModelReady: true})
+		return
+	}
 	switch strings.TrimSpace(ev.Type) {
 	case "user_message":
 		s.cancelManual()
@@ -172,7 +304,14 @@ func (s *session) HandleEvent(ctx context.Context, ev *ihtml.ChatClientEvent) {
 }
 
 // Close 实现 ihtml.ChatSession。
-func (s *session) Close() { s.stopActiveWork() }
+func (s *session) Close() {
+	s.closeOnce.Do(func() {
+		s.stopActiveWork()
+		if s.backend.history != nil {
+			s.backend.history.release(s.sessionID)
+		}
+	})
+}
 
 func (s *session) newEmitter(runID, turnID string) func(ihtml.ChatStreamEvent) error {
 	var seq int64
@@ -191,10 +330,32 @@ func (s *session) newEmitter(runID, turnID string) func(ihtml.ChatStreamEvent) e
 func (s *session) enqueueTurn(parent context.Context, ev *ihtml.ChatClientEvent) error {
 	runID := fmt.Sprintf("ai_%d", time.Now().UnixNano())
 	emit := s.newEmitter(runID, runID+"_turn")
-	if err := emit(ihtml.ChatStreamEvent{Type: "turn_start", ModelReady: true}); err != nil {
+	cfg := s.backend.cfg
+	mode, modeErr := selectAgentMode(cfg, ev.AgentMode)
+	if mode == "" {
+		mode = AgentModeFast
+	}
+	toolsEnabled := true
+	if ev.ToolsEnabled != nil {
+		toolsEnabled = *ev.ToolsEnabled
+	}
+	if mode == AgentModeDeep && !toolsEnabled && modeErr == nil {
+		modeErr = errors.New("Deep 模式需要启用工具")
+	}
+	budget := newTurnBudget(cfg, mode, emit)
+	approvalResume := ""
+	if mode == AgentModeDeep {
+		approvalResume = "manual_tool_only"
+	}
+	if err := emit(ihtml.ChatStreamEvent{
+		Type: "turn_start", ModelReady: true, Budget: budget.snapshot(),
+		Agent: &ihtml.ChatAgentStage{Mode: mode, Agent: "root", TaskID: "root", Phase: "turn", Status: "running", ApprovalResume: approvalResume},
+	}); err != nil {
 		return err
 	}
-	cfg := s.backend.cfg
+	if modeErr != nil {
+		return emit(ihtml.ChatStreamEvent{Type: "turn_error", Error: modeErr.Error(), ModelReady: true, Budget: budget.snapshot()})
+	}
 	if !cfg.ready() {
 		return emit(ihtml.ChatStreamEvent{
 			Type:       "assistant_done",
@@ -211,19 +372,16 @@ func (s *session) enqueueTurn(parent context.Context, ev *ihtml.ChatClientEvent)
 	if err != nil {
 		return emit(ihtml.ChatStreamEvent{Type: "turn_error", Error: err.Error(), ModelReady: true})
 	}
-	model, err := normalizeModel(ev.Model)
+	cfg, err = selectTurnModel(cfg, ev.Model)
 	if err != nil {
 		return emit(ihtml.ChatStreamEvent{Type: "turn_error", Error: err.Error(), ModelReady: true})
 	}
-	if model != "" {
-		cfg.Model = model
-	}
 	if strings.TrimSpace(cfg.Model) == "" {
-		return emit(ihtml.ChatStreamEvent{Type: "assistant_done", ModelReady: true, Message: "请先在助手顶部选择或填写模型名。"})
-	}
-	toolsEnabled := true
-	if ev.ToolsEnabled != nil {
-		toolsEnabled = *ev.ToolsEnabled
+		message := "服务端尚未配置默认模型。"
+		if cfg.AllowModelSelect {
+			message = "请先在助手顶部选择或填写模型名。"
+		}
+		return emit(ihtml.ChatStreamEvent{Type: "assistant_done", ModelReady: true, Message: message})
 	}
 	if err := emit(ihtml.ChatStreamEvent{Type: "assistant_status", Status: "正在连接模型。", ModelReady: true}); err != nil {
 		return err
@@ -232,28 +390,12 @@ func (s *session) enqueueTurn(parent context.Context, ev *ihtml.ChatClientEvent)
 	if err != nil {
 		return emit(ihtml.ChatStreamEvent{Type: "turn_error", Error: userFacingError(err), ModelReady: true})
 	}
-	tl := &timeline{emit: emit}
-	rt := &runtime{svc: s.svc, user: s.user, cfg: cfg, signer: s.backend.signer, timeline: tl, apis: s.apis, apiBase: s.apiBase, access: s.access}
-	agentCfg := &adk.ChatModelAgentConfig{
-		Name:        "ihtml_ui_agent",
-		Description: "ihtml page building assistant.",
-		// 系统提示注入"页面现状"清单: 省一次 ui_item_list 往返, 也防盲写撞 id
-		Instruction: buildSystemPrompt(cfg, ev.ClientContext, s.apis) + inventoryPrompt(parent, s.svc, s.user),
-		Model:       chatModel,
-		// 自定义拼装避免默认 f-string 模板: 系统提示里有大量 {} 代码示例。
-		GenModelInput: func(_ context.Context, instruction string, input *adk.AgentInput) ([]*schema.Message, error) {
-			out := make([]*schema.Message, 0, len(input.Messages)+1)
-			if instruction != "" {
-				out = append(out, schema.SystemMessage(instruction))
-			}
-			return append(out, input.Messages...), nil
-		},
-		MaxIterations: cfg.MaxIterations,
-	}
-	if toolsEnabled {
-		agentCfg.ToolsConfig = adk.ToolsConfig{ToolsNodeConfig: toolsNodeConfig(rt)}
-	}
-	agent, err := adk.NewChatModelAgent(parent, agentCfg)
+	chatModel = withTurnBudget(chatModel, budget)
+	tl := &timeline{emit: emit, mode: mode}
+	rt := &runtime{svc: s.svc, user: s.user, cfg: cfg, mode: mode, signer: s.backend.signer, writeLimiter: s.backend.writeLimiter, timeline: tl, apis: s.apis, apiBase: s.apiBase, inbound: s.inbound, inboundQuery: s.inboundQuery, access: s.access}
+	// 系统提示注入"页面现状"清单: 省一次 ui_item_list 往返, 也防盲写撞 id。
+	instruction := buildSystemPrompt(cfg, ev.ClientContext, s.apis) + inventoryPrompt(parent, s.svc, s.user)
+	agent, err := buildTurnAgent(parent, mode, instruction, chatModel, rt, budget, cfg, toolsEnabled)
 	if err != nil {
 		return emit(ihtml.ChatStreamEvent{Type: "turn_error", Error: userFacingError(err), ModelReady: true})
 	}
@@ -263,6 +405,8 @@ func (s *session) enqueueTurn(parent context.Context, ev *ihtml.ChatClientEvent)
 	item := &turnItem{
 		agent:        agent,
 		cfg:          cfg,
+		mode:         mode,
+		budget:       budget,
 		current:      current,
 		emit:         emit,
 		timeline:     tl,
@@ -314,7 +458,9 @@ func (s *session) genInput(ctx context.Context, _ *adk.TurnLoop[*turnItem, *sche
 	}
 	item := items[0]
 	runCtx := ctx
-	if item.cfg.RequestTimeout > 0 {
+	if item.budget != nil && !item.budget.deadline.IsZero() {
+		runCtx, item.runCancel = context.WithDeadline(ctx, item.budget.deadline)
+	} else if item.cfg.RequestTimeout > 0 {
 		runCtx, item.runCancel = context.WithTimeout(ctx, item.cfg.RequestTimeout)
 	}
 	return &adk.GenInputResult[*turnItem, *schema.Message]{
@@ -355,15 +501,33 @@ func (s *session) onAgentEvents(ctx context.Context, tc *adk.TurnContext[*turnIt
 		if ctx.Err() != nil {
 			return nil
 		}
-		_ = item.emit(ihtml.ChatStreamEvent{Type: "turn_error", Error: userFacingError(err), ModelReady: true})
+		_ = item.emit(ihtml.ChatStreamEvent{
+			Type: "assistant_agent", ModelReady: true, Budget: item.budget.snapshot(),
+			Agent: &ihtml.ChatAgentStage{Mode: item.mode, Agent: "root", TaskID: "root", Phase: "turn", Status: "error", Summary: userFacingError(err)},
+		})
+		_ = item.emit(ihtml.ChatStreamEvent{Type: "turn_error", Error: userFacingError(err), ModelReady: true, Budget: item.budget.snapshot()})
 		return nil
+	}
+	if item.mode == AgentModeDeep && len(resp.ToolCalls) > 0 {
+		// 当前 WS 确认协议仍在模型循环之外核销。Deep 在此强制停止且覆盖
+		// 模型措辞，绝不让待确认操作被描述成已经完成。
+		resp = enforceDeepConfirmationPause(item.mode, resp, item.timeline)
+		_ = item.emit(ihtml.ChatStreamEvent{
+			Type: "assistant_agent", ModelReady: true, Budget: item.budget.snapshot(),
+			Agent: &ihtml.ChatAgentStage{Mode: item.mode, Agent: "root", TaskID: "root", Phase: "approval", Status: "paused", Summary: deepApprovalPausedMessage, ApprovalResume: "manual_tool_only"},
+		})
+	} else {
+		_ = item.emit(ihtml.ChatStreamEvent{
+			Type: "assistant_agent", ModelReady: true, Budget: item.budget.snapshot(),
+			Agent: &ihtml.ChatAgentStage{Mode: item.mode, Agent: "root", TaskID: "root", Phase: "turn", Status: "completed"},
+		})
 	}
 	if strings.TrimSpace(resp.Message) != "" && !resp.Streamed {
 		if err := item.emit(ihtml.ChatStreamEvent{Type: "assistant_delta", Delta: resp.Message, ModelReady: true, ToolCalls: resp.ToolCalls}); err != nil {
 			return nil
 		}
 	}
-	_ = item.emit(ihtml.ChatStreamEvent{Type: "assistant_done", Message: resp.Message, ModelReady: true, ToolCalls: resp.ToolCalls})
+	_ = item.emit(ihtml.ChatStreamEvent{Type: "assistant_done", Message: resp.Message, ModelReady: true, ToolCalls: resp.ToolCalls, Budget: item.budget.snapshot()})
 	return nil
 }
 
@@ -391,7 +555,11 @@ func (s *session) startConfirm(parent context.Context, ev *ihtml.ChatClientEvent
 			callCtx, callCancel = context.WithTimeout(ctx, s.backend.cfg.RequestTimeout)
 			defer callCancel()
 		}
-		rt := &runtime{svc: s.svc, user: s.user, cfg: s.backend.cfg, signer: s.backend.signer, timeline: &timeline{emit: emit}, apis: s.apis, apiBase: s.apiBase, access: s.access}
+		mode := AgentModeFast
+		if ev.ToolCall != nil && ev.ToolCall.AgentMode == AgentModeDeep {
+			mode = AgentModeDeep
+		}
+		rt := &runtime{svc: s.svc, user: s.user, cfg: s.backend.cfg, mode: mode, signer: s.backend.signer, writeLimiter: s.backend.writeLimiter, timeline: &timeline{emit: emit, mode: mode}, apis: s.apis, apiBase: s.apiBase, inbound: s.inbound, inboundQuery: s.inboundQuery, access: s.access}
 		if err := executeConfirmedTool(callCtx, rt, ev.ToolCall, emit); err != nil && ctx.Err() == nil {
 			_ = emit(ihtml.ChatStreamEvent{Type: "turn_error", Error: userFacingError(err), ModelReady: true})
 		}
@@ -470,13 +638,93 @@ func normalizeModel(model string) (string, error) {
 	return model, nil
 }
 
+func selectAgentMode(cfg Config, requested string) (string, error) {
+	requested = strings.ToLower(strings.TrimSpace(requested))
+	switch requested {
+	case "", AgentModeFast:
+		return AgentModeFast, nil
+	case AgentModeDeep:
+		if !cfg.EnableDeepAgent {
+			return "", errors.New("服务端未开启 Deep 模式")
+		}
+		return AgentModeDeep, nil
+	default:
+		return "", fmt.Errorf("不支持的 Agent 模式 %q", requested)
+	}
+}
+
+func selectTurnModel(cfg Config, requested string) (Config, error) {
+	configured, err := normalizeModel(cfg.Model)
+	if err != nil {
+		return cfg, fmt.Errorf("服务端模型配置无效: %w", err)
+	}
+	requested, err = normalizeModel(requested)
+	if err != nil {
+		return cfg, err
+	}
+	cfg.Model = configured
+	if cfg.AllowModelSelect {
+		if requested != "" {
+			cfg.Model = requested
+		}
+		return cfg, nil
+	}
+	if requested != "" && configured != "" && requested != configured {
+		return cfg, errors.New("服务端不允许客户端覆盖模型")
+	}
+	return cfg, nil
+}
+
 func userFacingError(err error) string {
 	if err == nil {
 		return "未知错误"
 	}
-	msg := err.Error()
+	if errors.Is(err, context.Canceled) {
+		return "操作已取消。"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "模型响应超时，请稍后重试。"
+	}
+	msg := strings.TrimSpace(err.Error())
+	lower := strings.ToLower(msg)
+	// 对话事件会直接呈现给终端用户，不能把 eino 节点路径、
+	// 网关 URL 或底层 dial/TLS 诊断投影进 UI。服务端仍可在自己的模型
+	// transport/observability 中记录原始错误。
+	switch {
+	case strings.Contains(lower, "model_not_found"), strings.Contains(lower, "model not found"),
+		strings.Contains(lower, "model does not exist"), strings.Contains(lower, "unknown model"),
+		strings.Contains(lower, "模型不存在"):
+		return "模型不存在或当前账号无权使用，请检查模型名称。"
+	case strings.Contains(lower, "status code: 401"), strings.Contains(lower, "status code: 403"),
+		strings.Contains(lower, "status=401"), strings.Contains(lower, "status=403"),
+		strings.Contains(lower, "http 401"), strings.Contains(lower, "http 403"),
+		strings.Contains(lower, "401 unauthorized"), strings.Contains(lower, "403 forbidden"),
+		strings.Contains(lower, "unauthorized"), strings.Contains(lower, "authentication"):
+		return "模型服务鉴权失败，请检查服务端配置。"
+	case strings.Contains(lower, "status code: 429"), strings.Contains(lower, "status=429"),
+		strings.Contains(lower, "http 429"), strings.Contains(lower, "rate limit"), strings.Contains(lower, "too many requests"):
+		return "模型服务当前繁忙，请稍后重试。"
+	case strings.Contains(lower, "connection refused"), strings.Contains(lower, "no such host"),
+		strings.Contains(lower, "dial tcp"), strings.Contains(lower, "tls handshake"),
+		strings.Contains(lower, "connection reset"), strings.Contains(lower, "unexpected eof"):
+		return "无法连接模型服务，请检查服务端配置或稍后重试。"
+	case strings.Contains(lower, "400 bad request"), strings.Contains(lower, "status code: 400"),
+		strings.Contains(lower, "status=400"), strings.Contains(lower, "invalid_request_error"):
+		return "模型服务拒绝了请求，请检查模型名称与参数配置。"
+	case strings.Contains(lower, "noderunerror"), strings.Contains(lower, "node path:"):
+		return "模型执行失败，请稍后重试。"
+	}
+	if cut := strings.Index(msg, "------------------------"); cut >= 0 {
+		msg = strings.TrimSpace(msg[:cut])
+	}
+	if cut := strings.IndexAny(msg, "\r\n"); cut >= 0 {
+		msg = strings.TrimSpace(msg[:cut])
+	}
 	if len(msg) > 400 {
 		msg = msg[:400] + "…"
+	}
+	if msg == "" {
+		return "未知错误"
 	}
 	return msg
 }

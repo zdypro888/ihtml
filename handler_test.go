@@ -14,7 +14,9 @@ import (
 
 func newTestServer(t *testing.T, opts ...Option) (*httptest.Server, *Handler) {
 	t.Helper()
-	h := New(NewMemoryStore(), opts...)
+	allOpts := []Option{WithUserResolver(DevelopmentUserResolver)}
+	allOpts = append(allOpts, opts...)
+	h := New(NewMemoryStore(), allOpts...)
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 	return srv, h
@@ -288,6 +290,7 @@ func TestHandlerPages(t *testing.T) {
 
 func TestGovernance(t *testing.T) {
 	h := New(NewMemoryStore(),
+		WithUserResolver(DevelopmentUserResolver),
 		WithLimits(Limits{WritesPerMinute: 2, MaxKVKeysPerUser: 2}),
 		WithAccessPolicy(func(_ *http.Request, user string) Access {
 			return Access{ReadOnly: user == "viewer", ChatDisabled: user == "viewer"}
@@ -307,7 +310,8 @@ func TestGovernance(t *testing.T) {
 
 	// 写频率限制: 前 2 次过, 第 3 次 429
 	for i := range 2 {
-		status, _ = doJSON(t, "PUT", srv.URL+"/api/items?uid=w", `[{"id":"a","type":"css","content":"x"}]`)
+		body := fmt.Sprintf(`[{"id":"a","type":"css","content":"x%d"}]`, i)
+		status, _ = doJSON(t, "PUT", srv.URL+"/api/items?uid=w", body)
 		if status != 200 {
 			t.Fatalf("write %d should pass: %d", i, status)
 		}
@@ -338,7 +342,7 @@ func TestGovernance(t *testing.T) {
 
 func TestAuditAndExportImportPurge(t *testing.T) {
 	var audits []AuditEvent
-	h := New(NewMemoryStore(), WithAudit(func(_ context.Context, e AuditEvent) {
+	h := New(NewMemoryStore(), WithUserResolver(DevelopmentUserResolver), WithAudit(func(_ context.Context, e AuditEvent) {
 		audits = append(audits, e)
 	}))
 	ctx := context.Background()
@@ -450,7 +454,7 @@ func TestHandlerClose(t *testing.T) {
 }
 
 func TestHandlerStripPrefixRedirect(t *testing.T) {
-	h := New(NewMemoryStore())
+	h := New(NewMemoryStore(), WithUserResolver(DevelopmentUserResolver))
 	mux := http.NewServeMux()
 	mux.Handle("/ui/", http.StripPrefix("/ui", h))
 	srv := httptest.NewServer(mux)

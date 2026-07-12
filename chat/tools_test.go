@@ -37,13 +37,47 @@ func newTestRuntime(t *testing.T) (*runtime, *eventSink, ihtml.Service) {
 	svc := ihtml.New(ihtml.NewMemoryStore())
 	sink := &eventSink{}
 	rt := &runtime{
-		svc:      svc,
-		user:     "t1",
-		cfg:      Config{Provider: ProviderOpenAI, BaseURL: "http://gateway"},
-		signer:   newConfirmSigner(nil),
-		timeline: &timeline{emit: sink.emit},
+		svc:          svc,
+		user:         "t1",
+		cfg:          Config{Provider: ProviderOpenAI, BaseURL: "http://gateway", AllowUnconfirmedItemWrites: true, WritesPerMinute: -1},
+		signer:       newConfirmSigner(nil),
+		timeline:     &timeline{emit: sink.emit},
+		writeLimiter: newUserWriteLimiter(-1),
 	}
 	return rt, sink, svc
+}
+
+func TestToolPutRequiresConfirmationByDefault(t *testing.T) {
+	rt, _, svc := newTestRuntime(t)
+	rt.cfg.AllowUnconfirmedItemWrites = false
+	put := findTool(t, rt, "ui_item_put")
+	out, err := put.InvokableRun(context.Background(), `{"items":[{"id":"unsafe","type":"js","content":"fetch('/admin')"}]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, `"status":"pending_confirmation"`) {
+		t.Fatalf("code write must wait for confirmation: %s", out)
+	}
+	items, err := svc.ListItems(context.Background(), "t1")
+	if err != nil || len(items) != 0 {
+		t.Fatalf("item executed before confirmation: %v %v", items, err)
+	}
+	pending := rt.timeline.pendingCalls()
+	if len(pending) != 1 || !strings.Contains(pending[0].Reason, "HTML/JS/CSS") {
+		t.Fatalf("missing explicit code execution warning: %+v", pending)
+	}
+}
+
+func TestHighRiskWriteRequiresConfirmationByDefault(t *testing.T) {
+	rt, _, _ := newTestRuntime(t)
+	pageDelete := findTool(t, rt, "ui_page_delete")
+	out, err := pageDelete.InvokableRun(context.Background(), `{"name":"billing"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, `"status":"pending_confirmation"`) {
+		t.Fatalf("high-risk write bypassed confirmation: %s", out)
+	}
 }
 
 func findTool(t *testing.T, rt *runtime, name string) *semanticTool {
@@ -143,6 +177,13 @@ func TestToolConfirmationFlow(t *testing.T) {
 	if rt.signer.consume(rt.user, tampered) {
 		t.Fatal("tampered call must be rejected")
 	}
+	tampered = pending[0]
+	tampered.Title = "无害操作"
+	tampered.Risk = "low"
+	tampered.Reason = ""
+	if rt.signer.consume(rt.user, tampered) {
+		t.Fatal("tampered confirmation warning must be rejected")
+	}
 
 	// 原样确认 → 执行成功, 内容回滚
 	sink2 := &eventSink{}
@@ -174,12 +215,36 @@ func TestToolConfirmationFlow(t *testing.T) {
 func TestToolKVReserved(t *testing.T) {
 	rt, _, _ := newTestRuntime(t)
 	set := findTool(t, rt, "ui_kv_set")
-	out, err := set.InvokableRun(context.Background(), `{"key":"__ihtml.errors","value":1}`)
-	if err != nil {
-		t.Fatal(err)
+	for _, key := range []string{
+		"__ihtml.errors", "__ihtml.templates",
+		"layout.root", "LAYOUT.dashboard",
+		"item-layout.card", "ITEM-LAYOUT.chart",
+	} {
+		out, err := set.InvokableRun(context.Background(), `{"key":"`+key+`","value":1}`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out, `"status":"error"`) {
+			t.Fatalf("reserved key %q must be rejected: %s", key, out)
+		}
 	}
-	if !strings.Contains(out, `"status":"error"`) {
-		t.Fatalf("reserved key must be rejected: %s", out)
+}
+
+func TestToolWriteRateLimit(t *testing.T) {
+	rt, _, svc := newTestRuntime(t)
+	rt.writeLimiter = newUserWriteLimiter(1)
+	set := findTool(t, rt, "ui_theme_set")
+	first, err := set.InvokableRun(context.Background(), `{"mode":"dark"}`)
+	if err != nil || !strings.Contains(first, `"status":"ok"`) {
+		t.Fatalf("first write: %s %v", first, err)
+	}
+	second, err := set.InvokableRun(context.Background(), `{"mode":"light"}`)
+	if err != nil || !strings.Contains(second, `"status":"rate_limited"`) {
+		t.Fatalf("second write should be limited: %s %v", second, err)
+	}
+	raw, err := svc.KVGet(context.Background(), "t1", "theme")
+	if err != nil || !strings.Contains(string(raw), `"dark"`) {
+		t.Fatalf("rate-limited write changed state: %s %v", raw, err)
 	}
 }
 
@@ -190,7 +255,7 @@ func TestSystemPromptBraces(t *testing.T) {
 		Locale:   "zh-CN",
 		Page:     ihtml.ChatClientPage{VisibleText: "现有页面文本"},
 	}, []ihtml.APISpec{{Name: "player_search", Method: "GET", Path: "/capi/players", Description: "按昵称搜玩家; 参数 q/limit"}})
-	for _, want := range []string{"ui_item_list", "ui_page_set", "--ui-primary", "扩展指令", "mobile", "现有页面文本", "不可信", "/capi/players", "api_probe", "ihtml-mobile"} {
+	for _, want := range []string{"ui_item_list", "ui_page_set", "ui_template_get", "ui_template_publish", "Template.published", "unassigned", "item-layout.*", "--ui-primary", "扩展指令", "mobile", "现有页面文本", "不可信", "/capi/players", "api_probe", "ihtml-mobile", ".ihtml-root", "同源运行", "@import", "pending_confirmation"} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q", want)
 		}

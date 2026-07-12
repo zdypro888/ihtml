@@ -12,6 +12,12 @@ type MemoryStore struct {
 	users map[string]*memoryUser
 }
 
+var (
+	_ Store          = (*MemoryStore)(nil)
+	_ UserStateStore = (*MemoryStore)(nil)
+	_ RevisionStore  = (*MemoryStore)(nil)
+)
+
 type memoryUser struct {
 	items     []Item
 	kv        map[string]json.RawMessage
@@ -107,6 +113,26 @@ func (s *MemoryStore) EraseUser(_ context.Context, user string) error {
 	return nil
 }
 
+// UserState 原子读取用户的完整状态。
+func (s *MemoryStore) UserState(_ context.Context, user string) (UserState, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	u := s.user(user, false)
+	if u == nil {
+		return UserState{KV: map[string]json.RawMessage{}}, nil
+	}
+	return cloneUserState(UserState{Items: u.items, KV: u.kv, Revisions: u.revisions}), nil
+}
+
+// ReplaceUserState 原子替换用户的完整状态。
+func (s *MemoryStore) ReplaceUserState(_ context.Context, user string, state UserState) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next := cloneUserState(state)
+	s.users[user] = &memoryUser{items: next.Items, kv: next.KV, revisions: next.Revisions}
+	return nil
+}
+
 // Revisions 实现 Store。
 func (s *MemoryStore) Revisions(_ context.Context, user string) ([]RevisionInfo, error) {
 	s.mu.RLock()
@@ -138,12 +164,28 @@ func (s *MemoryStore) RevisionItems(_ context.Context, user, id string) ([]Item,
 	return nil, ErrNotFound
 }
 
+// Revision 返回指定完整快照。
+func (s *MemoryStore) Revision(_ context.Context, user, id string) (Revision, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	u := s.user(user, false)
+	if u == nil {
+		return Revision{}, ErrNotFound
+	}
+	for i := range u.revisions {
+		if u.revisions[i].ID == id {
+			return cloneRevisions(u.revisions[i : i+1])[0], nil
+		}
+	}
+	return Revision{}, ErrNotFound
+}
+
 // AddRevision 实现 Store。
 func (s *MemoryStore) AddRevision(_ context.Context, user string, rev Revision, keep int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	u := s.user(user, true)
-	rev.Items = cloneItems(rev.Items)
+	rev = cloneRevisions([]Revision{rev})[0]
 	u.revisions = append([]Revision{rev}, u.revisions...)
 	if keep > 0 && len(u.revisions) > keep {
 		u.revisions = u.revisions[:keep]

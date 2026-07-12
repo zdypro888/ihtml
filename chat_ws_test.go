@@ -36,7 +36,7 @@ func (s *fakeChatSession) HandleEvent(ctx context.Context, ev *ChatClientEvent) 
 func (s *fakeChatSession) Close() {}
 
 func TestChatWebSocket(t *testing.T) {
-	h := New(NewMemoryStore(), WithChatBackend(&fakeChatBackend{}))
+	h := New(NewMemoryStore(), WithUserResolver(DevelopmentUserResolver), WithChatBackend(&fakeChatBackend{}))
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 

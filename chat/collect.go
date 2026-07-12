@@ -3,6 +3,7 @@ package chat
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 
@@ -23,12 +24,25 @@ type streamCollectResult struct {
 	Streamed bool
 }
 
+// thinkingState tracks reasoning segments within one model turn. A segment is
+// allocated lazily for each MessageOutput that actually contains reasoning, so
+// empty provider frames do not create phantom steps in the client timeline.
+type thinkingState struct {
+	sawThinking bool
+	segments    int
+}
+
+func (s *thinkingState) nextSegmentID() string {
+	s.segments++
+	return fmt.Sprintf("reasoning-%d", s.segments)
+}
+
 // collectEvents 消费一轮 agent 的事件流: 思考/正文增量转成 WS 事件,
 // 工具事件由工具自身经 timeline 发出, 这里只管文本。
 func collectEvents(ctx context.Context, iter *adk.AsyncIterator[*adk.AgentEvent], cfg Config, tl *timeline, emit func(ihtml.ChatStreamEvent) error) (collectResp, error) {
 	var content strings.Builder
 	streamed := false
-	sawThinking := false
+	thinking := &thinkingState{}
 	for {
 		select {
 		case <-ctx.Done():
@@ -54,7 +68,7 @@ func collectEvents(ctx context.Context, iter *adk.AsyncIterator[*adk.AgentEvent]
 		if event.Output == nil || event.Output.MessageOutput == nil {
 			continue
 		}
-		result, err := collectMessageOutput(ctx, event.Output.MessageOutput, cfg, emit, &sawThinking)
+		result, err := collectMessageOutput(ctx, event.Output.MessageOutput, cfg, emit, thinking)
 		if err != nil {
 			return collectResp{}, err
 		}
@@ -78,18 +92,19 @@ func collectEvents(ctx context.Context, iter *adk.AsyncIterator[*adk.AgentEvent]
 	return collectResp{Message: message, Streamed: streamed, ToolCalls: tl.pendingCalls()}, nil
 }
 
-func collectMessageOutput(ctx context.Context, mv *adk.MessageVariant, cfg Config, emit func(ihtml.ChatStreamEvent) error, sawThinking *bool) (streamCollectResult, error) {
+func collectMessageOutput(ctx context.Context, mv *adk.MessageVariant, cfg Config, emit func(ihtml.ChatStreamEvent) error, thinking *thinkingState) (streamCollectResult, error) {
 	if mv == nil || mv.Role == schema.Tool {
 		return streamCollectResult{}, nil
 	}
 	if mv.IsStreaming {
-		return streamModelMessage(ctx, mv.MessageStream, cfg, emit, sawThinking)
+		return streamModelMessage(ctx, mv.MessageStream, cfg, emit, thinking)
 	}
 	if mv.Message == nil || mv.Message.Role == schema.Tool || mv.Message.ToolCallID != "" || len(mv.Message.ToolCalls) > 0 {
 		return streamCollectResult{}, nil
 	}
 	if cfg.Thinking && strings.TrimSpace(mv.Message.ReasoningContent) != "" && emit != nil {
-		if err := emitThinking(emit, mv.Message.ReasoningContent, sawThinking); err != nil {
+		segmentID := thinking.nextSegmentID()
+		if err := emitThinking(emit, mv.Message.ReasoningContent, segmentID, true, thinking); err != nil {
 			return streamCollectResult{}, err
 		}
 	}
@@ -105,7 +120,7 @@ func collectMessageOutput(ctx context.Context, mv *adk.MessageVariant, cfg Confi
 	return streamCollectResult{Message: mv.Message.Content, Streamed: emit != nil}, nil
 }
 
-func streamModelMessage(ctx context.Context, stream *schema.StreamReader[*schema.Message], cfg Config, emit func(ihtml.ChatStreamEvent) error, sawThinking *bool) (streamCollectResult, error) {
+func streamModelMessage(ctx context.Context, stream *schema.StreamReader[*schema.Message], cfg Config, emit func(ihtml.ChatStreamEvent) error, thinking *thinkingState) (streamCollectResult, error) {
 	if stream == nil {
 		return streamCollectResult{}, nil
 	}
@@ -113,6 +128,7 @@ func streamModelMessage(ctx context.Context, stream *schema.StreamReader[*schema
 	var out streamCollectResult
 	var content strings.Builder
 	streamRole := schema.RoleType("")
+	segmentID := ""
 	for {
 		select {
 		case <-ctx.Done():
@@ -136,7 +152,10 @@ func streamModelMessage(ctx context.Context, stream *schema.StreamReader[*schema
 			continue
 		}
 		if cfg.Thinking && strings.TrimSpace(chunk.ReasoningContent) != "" && emit != nil {
-			if err := emitThinking(emit, chunk.ReasoningContent, sawThinking); err != nil {
+			if segmentID == "" {
+				segmentID = thinking.nextSegmentID()
+			}
+			if err := emitThinking(emit, chunk.ReasoningContent, segmentID, false, thinking); err != nil {
 				return out, err
 			}
 		}
@@ -154,16 +173,27 @@ func streamModelMessage(ctx context.Context, stream *schema.StreamReader[*schema
 		}
 		out.Streamed = emit != nil
 	}
+	if segmentID != "" {
+		if err := emitThinking(emit, "", segmentID, true, thinking); err != nil {
+			return out, err
+		}
+	}
 	out.Message = strings.TrimSpace(content.String())
 	return out, nil
 }
 
-func emitThinking(emit func(ihtml.ChatStreamEvent) error, thinking string, sawThinking *bool) error {
-	if !*sawThinking {
+func emitThinking(emit func(ihtml.ChatStreamEvent) error, content, segmentID string, done bool, thinking *thinkingState) error {
+	if !thinking.sawThinking {
 		if err := emit(ihtml.ChatStreamEvent{Type: "assistant_status", Status: "模型正在分析。", ModelReady: true}); err != nil {
 			return err
 		}
-		*sawThinking = true
+		thinking.sawThinking = true
 	}
-	return emit(ihtml.ChatStreamEvent{Type: "assistant_thinking", Thinking: thinking, ModelReady: true})
+	return emit(ihtml.ChatStreamEvent{
+		Type:         "assistant_thinking",
+		Thinking:     content,
+		ThinkingID:   segmentID,
+		ThinkingDone: done,
+		ModelReady:   true,
+	})
 }
