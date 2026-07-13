@@ -26,6 +26,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/zdypro888/ihtml/chat"
+	"github.com/zdypro888/ihtml/internal/nilcheck"
 )
 
 const (
@@ -140,6 +141,15 @@ type Options struct {
 	Secrets SecretResolver
 }
 
+// Validate checks host-provided loader dependencies without reading a
+// configuration document or resolving a secret.
+func (o Options) Validate() error {
+	if o.Secrets != nil && nilcheck.IsNil(o.Secrets) {
+		return configError(ErrorSecretUnavailable, "options.secrets", "must not contain a typed nil implementation", nil)
+	}
+	return nil
+}
+
 // Loader is immutable after construction and safe for concurrent use.
 type Loader struct {
 	secrets SecretResolver
@@ -148,7 +158,21 @@ type Loader struct {
 // NewLoader constructs an isolated loader. It does not read files, environment
 // variables, or global provider settings.
 func NewLoader(opts Options) *Loader {
+	// Preserve the original no-error constructor while making a typed nil behave
+	// like plain nil rather than a delayed method-call panic. NewLoaderChecked is
+	// available to reject the programming error immediately.
+	if nilcheck.IsNil(opts.Secrets) {
+		opts.Secrets = nil
+	}
 	return &Loader{secrets: opts.Secrets}
+}
+
+// NewLoaderChecked validates host dependencies before constructing a Loader.
+func NewLoaderChecked(opts Options) (*Loader, error) {
+	if err := opts.Validate(); err != nil {
+		return nil, err
+	}
+	return NewLoader(opts), nil
 }
 
 // Result is the resolved SDK configuration. Config is zero when Enabled is false.
@@ -160,7 +184,7 @@ type Result struct {
 // Decode reads a standalone AI configuration object. The same object can be
 // embedded under an application's own "ai" field and passed to DecodeSection.
 func (l *Loader) Decode(ctx context.Context, r io.Reader) (Result, error) {
-	if r == nil {
+	if nilcheck.IsNil(r) {
 		return Result{}, configError(ErrorSyntax, "$", "reader is nil", nil)
 	}
 	data, err := io.ReadAll(io.LimitReader(r, MaxDocumentBytes+1))
@@ -504,7 +528,7 @@ func (l *Loader) resolveSecret(ctx context.Context, raw secretFileRef, path stri
 	if err != nil {
 		return "", err
 	}
-	if l == nil || l.secrets == nil {
+	if l == nil || nilcheck.IsNil(l.secrets) {
 		return "", configError(ErrorSecretUnavailable, path, "no SecretResolver was supplied", nil)
 	}
 	if err := ctx.Err(); err != nil {

@@ -18,6 +18,13 @@ type fakeChatSession struct {
 	sctx *ChatSessionContext
 }
 
+type typedNilSessionBackend struct{}
+
+func (*typedNilSessionBackend) NewSession(context.Context, *ChatSessionContext) (ChatSession, error) {
+	var session *fakeChatSession
+	return session, nil
+}
+
 func (b *fakeChatBackend) NewSession(_ context.Context, sctx *ChatSessionContext) (ChatSession, error) {
 	return &fakeChatSession{sctx: sctx}, nil
 }
@@ -76,6 +83,28 @@ func TestChatWebSocket(t *testing.T) {
 	items, err := h.ListItems(context.Background(), "w1")
 	if err != nil || len(items) != 1 || items[0].ID != "from-ai" {
 		t.Fatalf("service write from chat session failed: %v %v", items, err)
+	}
+}
+
+func TestChatBackendTypedNilSessionFailsWithoutPanic(t *testing.T) {
+	h := New(NewMemoryStore(), WithUserResolver(DevelopmentUserResolver), WithChatBackend(&typedNilSessionBackend{}))
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	defer h.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/api/chat/ws?uid=nil-session"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	var event ChatStreamEvent
+	if err := conn.ReadJSON(&event); err != nil {
+		t.Fatalf("read initialization failure: %v", err)
+	}
+	if event.Type != "turn_error" || event.Error == "" {
+		t.Fatalf("initialization event = %+v", event)
 	}
 }
 

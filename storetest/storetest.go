@@ -13,10 +13,12 @@
 package storetest
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -122,8 +124,16 @@ func testKV(t *testing.T, s ihtml.Store) {
 	if err := s.KVSet(ctx, user, "other", json.RawMessage(`1`)); err != nil {
 		t.Fatal(err)
 	}
+	exact := json.RawMessage(" { \"html\" : \"<script>&\" , \"values\" : [ 1, 2 ] } \n")
+	if err := s.KVSet(ctx, user, "exact", exact); err != nil {
+		t.Fatal(err)
+	}
+	exactRead, err := s.KVGet(ctx, user, "exact")
+	if err != nil || !bytes.Equal(exactRead, exact) {
+		t.Fatalf("kv get must preserve whitespace and HTML bytes exactly: %q %v", exactRead, err)
+	}
 	keys, err := s.KVKeys(ctx, user)
-	if err != nil || len(keys) != 2 {
+	if err != nil || len(keys) != 3 {
 		t.Fatalf("kv keys: %v %v", keys, err)
 	}
 	if err := s.KVDelete(ctx, user, "theme"); err != nil {
@@ -200,12 +210,36 @@ func testIsolation(t *testing.T, s ihtml.Store) {
 func testOwnership(t *testing.T, s ihtml.Store) {
 	t.Helper()
 	ctx := context.Background()
-	if err := s.ReplaceItems(ctx, user, seedItems()); err != nil {
+	inputItems := seedItems()
+	inputItems[0].Meta = map[string]string{}
+	if err := s.ReplaceItems(ctx, user, inputItems); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.KVSet(ctx, user, "own", json.RawMessage(`{"a":1}`)); err != nil {
+	inputValue := json.RawMessage(`{"a":1}`)
+	if err := s.KVSet(ctx, user, "own", inputValue); err != nil {
 		t.Fatal(err)
 	}
+	inputItems[0].Content = "mutated input"
+	inputItems[0].Meta["empty-input"] = "mutated input"
+	inputItems[1].Meta["slot"] = "mutated input"
+	inputValue[0] = 'X'
+
+	rev := revisionAt(42)
+	rev.Items[0].Meta = map[string]string{}
+	rev.Templates = []ihtml.Template{{
+		ID: "ownership", Draft: ihtml.TemplateVersion{Nodes: []ihtml.TemplateNode{{
+			ID: "root", Kind: ihtml.NodeCanvas,
+			Props: map[string]json.RawMessage{"custom": json.RawMessage(`{"v":1}`)},
+		}}},
+	}}
+	if err := s.AddRevision(ctx, user, rev, 0); err != nil {
+		t.Fatal(err)
+	}
+	rev.Items[0].Content = "mutated revision input"
+	rev.Items[0].Meta["empty-input"] = "mutated revision input"
+	rev.Items[1].Meta["slot"] = "mutated revision input"
+	rev.Templates[0].Draft.Nodes[0].Props["custom"][0] = 'X'
+
 	items, err := s.Items(ctx, user)
 	if err != nil {
 		t.Fatal(err)
@@ -215,6 +249,7 @@ func testOwnership(t *testing.T, s ihtml.Store) {
 		items[i].Content = "mutated"
 		if items[i].Meta != nil {
 			items[i].Meta["slot"] = "mutated"
+			items[i].Meta["empty-output"] = "mutated"
 		}
 	}
 	value, err := s.KVGet(ctx, user, "own")
@@ -229,13 +264,33 @@ func testOwnership(t *testing.T, s ihtml.Store) {
 		t.Fatal(err)
 	}
 	for _, it := range reread {
-		if it.Content == "mutated" || it.Meta["slot"] == "mutated" {
+		if it.Content == "mutated" || it.Content == "mutated input" ||
+			it.Meta["slot"] == "mutated" || it.Meta["slot"] == "mutated input" ||
+			it.Meta["empty-input"] != "" || it.Meta["empty-output"] != "" {
 			t.Fatalf("mutating returned items leaked into store: %+v", it)
 		}
 	}
 	rereadValue, err := s.KVGet(ctx, user, "own")
 	if err != nil || string(rereadValue) != `{"a":1}` {
 		t.Fatalf("mutating returned kv leaked into store: %s %v", rereadValue, err)
+	}
+	revisionItems, err := s.RevisionItems(ctx, user, rev.ID)
+	if err != nil || len(revisionItems) != len(rev.Items) {
+		t.Fatalf("read back AddRevision input: %+v %v", revisionItems, err)
+	}
+	if revisionItems[0].Content == "mutated revision input" ||
+		revisionItems[0].Meta["empty-input"] != "" ||
+		revisionItems[1].Meta["slot"] == "mutated revision input" {
+		t.Fatalf("mutating AddRevision input leaked into store: %+v %v", revisionItems, err)
+	}
+	if full, ok := s.(ihtml.RevisionStore); ok {
+		stored, err := full.Revision(ctx, user, rev.ID)
+		if err != nil || len(stored.Templates) != 1 || len(stored.Templates[0].Draft.Nodes) != 1 {
+			t.Fatalf("read back full AddRevision input: %+v %v", stored, err)
+		}
+		if string(stored.Templates[0].Draft.Nodes[0].Props["custom"]) != `{"v":1}` {
+			t.Fatalf("mutating revision template input leaked into store: %+v %v", stored, err)
+		}
 	}
 }
 
@@ -286,12 +341,20 @@ func testUserState(t *testing.T, s ihtml.UserStateStore) {
 	if err := s.ReplaceUserState(ctx, user, state); err != nil {
 		t.Fatal(err)
 	}
+	state.Items[0].Content = "mutated state input"
+	state.Items[1].Meta["slot"] = "mutated state input"
+	state.KV["k"][0] = 'X'
+	state.Revisions[0].Items[0].Content = "mutated state revision input"
 	reread, err := s.UserState(ctx, user)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(reread.Items) != 2 || string(reread.KV["k"]) != "true" || len(reread.Revisions) != 2 {
 		t.Fatalf("user state roundtrip: %+v", reread)
+	}
+	if reread.Items[0].Content == "mutated state input" || reread.Items[1].Meta["slot"] == "mutated state input" ||
+		reread.Revisions[0].Items[0].Content == "mutated state revision input" {
+		t.Fatalf("mutating ReplaceUserState input leaked into store: %+v", reread)
 	}
 	if reread.Revisions[0].ID != "r-001" {
 		t.Fatalf("user state revisions must stay newest-first: %+v", reread.Revisions)
@@ -329,6 +392,41 @@ func testVersioning(t *testing.T, s ihtml.VersionedUserStateStore) {
 	state, err := s.UserState(ctx, user)
 	if err != nil || state.Version != 0 {
 		t.Fatalf("fresh user version must be 0: %d %v", state.Version, err)
+	}
+
+	// 多个写者基于同一 expected 并发条件写，只允许一个成功。
+	const writers = 16
+	start := make(chan struct{})
+	results := make(chan error, writers)
+	var wg sync.WaitGroup
+	for i := range writers {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			candidate := ihtml.UserState{
+				Items: []ihtml.Item{{ID: fmt.Sprintf("winner-%02d", i), Type: ihtml.ItemHTML, Content: "<p/>"}},
+				KV:    map[string]json.RawMessage{},
+			}
+			results <- s.ReplaceUserStateVersioned(ctx, user+"-concurrent", candidate, 0)
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	successes, conflicts := 0, 0
+	for err := range results {
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, ihtml.ErrVersionConflict):
+			conflicts++
+		default:
+			t.Fatalf("concurrent conditional write returned unexpected error: %v", err)
+		}
+	}
+	if successes != 1 || conflicts != writers-1 {
+		t.Fatalf("same expected version admitted successes=%d conflicts=%d", successes, conflicts)
 	}
 
 	// 条件写: 基于同一版本的第二次写必须冲突且不产生任何修改。
@@ -373,6 +471,7 @@ func testVersioning(t *testing.T, s ihtml.VersionedUserStateStore) {
 	checkBump("ReplaceItems", func() error { return base.ReplaceItems(ctx, user, seedItems()) })
 	checkBump("KVSet", func() error { return base.KVSet(ctx, user, "vk", json.RawMessage(`1`)) })
 	checkBump("KVDelete", func() error { return base.KVDelete(ctx, user, "vk") })
+	checkBump("KVDelete missing", func() error { return base.KVDelete(ctx, user, "vk-missing") })
 	checkBump("AddRevision", func() error { return base.AddRevision(ctx, user, revisionAt(9), 0) })
 	checkBump("ReplaceUserState", func() error {
 		st, err := s.UserState(ctx, user)
@@ -382,19 +481,26 @@ func testVersioning(t *testing.T, s ihtml.VersionedUserStateStore) {
 		return s.ReplaceUserState(ctx, user, st)
 	})
 
-	// EraseUser 归零, expected=0 重新可用。
+	// EraseUser 清空数据但版本继续递增，旧 expected 永不复用。
+	beforeErase, err := s.UserState(ctx, user)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := base.EraseUser(ctx, user); err != nil {
 		t.Fatal(err)
 	}
 	erased, err := s.UserState(ctx, user)
-	if err != nil || erased.Version != 0 {
-		t.Fatalf("erase must reset version to 0: %d %v", erased.Version, err)
+	if err != nil || erased.Version <= beforeErase.Version || len(erased.Items) != 0 || len(erased.KV) != 0 || len(erased.Revisions) != 0 {
+		t.Fatalf("erase must leave an empty, newer tombstone: %+v %v", erased, err)
+	}
+	if err := s.ReplaceUserStateVersioned(ctx, user, beforeErase, beforeErase.Version); !errors.Is(err, ihtml.ErrVersionConflict) {
+		t.Fatalf("pre-erase expected version must never become valid again: %v", err)
 	}
 	erased.Items = []ihtml.Item{{ID: "c", Type: ihtml.ItemHTML, Content: "<c/>", UpdatedAt: time.Unix(1700000000, 0).UTC()}}
 	if erased.KV == nil {
 		erased.KV = map[string]json.RawMessage{}
 	}
-	if err := s.ReplaceUserStateVersioned(ctx, user, erased, 0); err != nil {
-		t.Fatalf("versioned replace after erase must accept expected=0: %v", err)
+	if err := s.ReplaceUserStateVersioned(ctx, user, erased, erased.Version); err != nil {
+		t.Fatalf("versioned replace after erase must accept the tombstone version: %v", err)
 	}
 }

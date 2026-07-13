@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -53,6 +54,61 @@ func TestSQLiteConformance(t *testing.T) {
 // TestSQLiteEndToEnd 在真实 SQLite 上跑与 Postgres 相同的 Handler 级回归。
 func TestSQLiteEndToEnd(t *testing.T) {
 	endToEnd(t, newSQLiteStore(t))
+}
+
+func TestUserStateReadsPreVersionSchemaAndWriteRequestsMigration(t *testing.T) {
+	store := newSQLiteStore(t)
+	ctx := context.Background()
+	user := "legacy-version-table"
+	if err := store.ReplaceItems(ctx, user, []ihtml.Item{{
+		ID: "legacy", Type: ihtml.ItemHTML, Content: "<p>legacy</p>", UpdatedAt: time.Now(),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(ctx, `DROP TABLE ihtml_user_version`); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := store.UserState(ctx, user)
+	if err != nil || state.Version != 0 || len(state.Items) != 1 || state.Items[0].ID != "legacy" {
+		t.Fatalf("pre-version schema must remain readable: %+v err=%v", state, err)
+	}
+	state.Items[0].Content = "updated"
+	err = store.ReplaceUserStateVersioned(ctx, user, state, 0)
+	if err == nil || errors.Is(err, ihtml.ErrVersionConflict) || !strings.Contains(err.Error(), "Store.Init") {
+		t.Fatalf("write before migration must return an explicit Init error, got %v", err)
+	}
+	if err := store.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceUserStateVersioned(ctx, user, state, 0); err != nil {
+		t.Fatalf("write after migration failed: %v", err)
+	}
+}
+
+func TestInitialCASDoesNotMisclassifyInsertErrorsAsConflicts(t *testing.T) {
+	store := newSQLiteStore(t)
+	ctx := context.Background()
+	if _, err := store.db.ExecContext(ctx, `
+		CREATE TRIGGER reject_initial_version
+		BEFORE INSERT ON ihtml_user_version
+		WHEN NEW.usr = 'blocked'
+		BEGIN
+			SELECT RAISE(ABORT, 'initial version blocked');
+		END`); err != nil {
+		t.Fatal(err)
+	}
+
+	err := store.ReplaceUserStateVersioned(ctx, "blocked", ihtml.UserState{
+		KV: map[string]json.RawMessage{},
+	}, 0)
+	if err == nil || errors.Is(err, ihtml.ErrVersionConflict) || !strings.Contains(err.Error(), "initial version blocked") {
+		t.Fatalf("non-unique initial INSERT error must remain operational, got %v", err)
+	}
+	state, readErr := store.UserState(ctx, "blocked")
+	if readErr != nil || state.Version != 0 {
+		t.Fatalf("failed initial CAS must not create a version row: %+v %v", state, readErr)
+	}
 }
 
 // TestPostgres 需要真实 postgres: 设置 IHTML_TEST_PG_DSN 才会运行。

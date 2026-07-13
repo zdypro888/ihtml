@@ -11,6 +11,24 @@ import (
 	"github.com/zdypro888/ihtml"
 )
 
+type nilMetrics struct{}
+
+func (*nilMetrics) Add(string, float64)     {}
+func (*nilMetrics) Observe(string, float64) {}
+
+type nilBroadcaster struct{}
+
+func (*nilBroadcaster) Publish(string, ihtml.Event) {}
+func (*nilBroadcaster) Subscribe(string) (<-chan ihtml.Event, func()) {
+	return nil, func() {}
+}
+
+type nilChatBackend struct{}
+
+func (*nilChatBackend) NewSession(context.Context, *ihtml.ChatSessionContext) (ihtml.ChatSession, error) {
+	return nil, nil
+}
+
 func ExampleNewHandler() {
 	handler, err := ihtml.NewHandler(
 		ihtml.NewMemoryStore(),
@@ -38,6 +56,66 @@ func TestNewHandlerReturnsTypedConfigurationErrors(t *testing.T) {
 	}
 	if _, err := ihtml.NewHandler(ihtml.NewMemoryStore(), ihtml.WithMaxRevisions(-1)); !errors.Is(err, ihtml.ErrInvalidHandlerConfig) {
 		t.Fatalf("invalid revision error = %v", err)
+	}
+}
+
+func TestNewHandlerRejectsTypedNilInterfaceDependencies(t *testing.T) {
+	var nilStore *ihtml.MemoryStore
+	var nilChat *nilChatBackend
+	var nilMetricSink *nilMetrics
+	var nilEvents *nilBroadcaster
+
+	tests := []struct {
+		name  string
+		field string
+		new   func() (*ihtml.Handler, error)
+	}{
+		{name: "store", field: "Store", new: func() (*ihtml.Handler, error) { return ihtml.NewHandler(nilStore) }},
+		{name: "chat", field: "ChatBackend", new: func() (*ihtml.Handler, error) {
+			return ihtml.NewHandler(ihtml.NewMemoryStore(), ihtml.WithChatBackend(nilChat))
+		}},
+		{name: "metrics", field: "Metrics", new: func() (*ihtml.Handler, error) {
+			return ihtml.NewHandler(ihtml.NewMemoryStore(), ihtml.WithMetrics(nilMetricSink))
+		}},
+		{name: "broadcaster", field: "Broadcaster", new: func() (*ihtml.Handler, error) {
+			return ihtml.NewHandler(ihtml.NewMemoryStore(), ihtml.WithBroadcaster(nilEvents))
+		}},
+		{name: "ordered broadcaster", field: "Broadcaster", new: func() (*ihtml.Handler, error) {
+			return ihtml.NewHandler(ihtml.NewMemoryStore(), ihtml.WithOrderedBroadcaster(nilEvents))
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, err := tt.new()
+			if h != nil || !errors.Is(err, ihtml.ErrInvalidHandlerConfig) {
+				t.Fatalf("handler=%v error=%v", h, err)
+			}
+			var configErr *ihtml.HandlerConfigError
+			if !errors.As(err, &configErr) || configErr.Field != tt.field {
+				t.Fatalf("config error=%#v, want field %q", configErr, tt.field)
+			}
+		})
+	}
+}
+
+func TestScopeServiceRejectsTypedNilService(t *testing.T) {
+	var service *ihtml.Handler
+	scoped, err := ihtml.ScopeService(service, "alice")
+	if scoped != nil || !errors.Is(err, ihtml.ErrInvalidServiceScope) {
+		t.Fatalf("scoped=%v error=%v", scoped, err)
+	}
+}
+
+func TestReservedKVContractIsTypedForSDKCallers(t *testing.T) {
+	handler, err := ihtml.NewHandler(ihtml.NewMemoryStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer handler.Close()
+
+	key := ihtml.ReservedKVPrefix + ".host-test"
+	if _, err := handler.KVGet(context.Background(), "alice", key); !errors.Is(err, ihtml.ErrReservedKVKey) {
+		t.Fatalf("reserved KV error = %v", err)
 	}
 }
 

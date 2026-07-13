@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+
+	"github.com/zdypro888/ihtml/internal/nilcheck"
 )
 
 // ErrInvalidServiceScope is returned when a user-scoped service cannot be
@@ -79,7 +81,7 @@ type boundService struct {
 // policy by itself; use Handler.ServiceForRequest when handling an HTTP request.
 func ScopeService(service Service, user string) (ScopedService, error) {
 	user = strings.TrimSpace(user)
-	if service == nil {
+	if nilcheck.IsNil(service) {
 		return nil, errors.Join(ErrInvalidServiceScope, errors.New("service is required"))
 	}
 	if user == "" {

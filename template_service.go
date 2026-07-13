@@ -725,10 +725,11 @@ func (h *Handler) PutCurrentTemplate(ctx context.Context, user, page string, inp
 	if !wrote {
 		return cloneTemplate(saved), nil
 	}
-	h.publish(user, Event{Type: "templates", Op: "put", Templates: []Template{cloneTemplate(saved)}, By: by})
+	events := []Event{{Type: "templates", Op: "put", Templates: []Template{cloneTemplate(saved)}, By: by}}
 	if bindingChanged && page != "" {
-		h.publish(user, Event{Type: "pages"})
+		events = append(events, Event{Type: "pages"})
 	}
+	h.publishEvents(user, events...)
 	h.metric("writes", 1)
 	h.audit(ctx, user, "template.current.put", by, "", map[string]any{"template": saved.ID, "page": page, "revision": saved.Revision})
 	return cloneTemplate(saved), nil
@@ -926,10 +927,11 @@ func (h *Handler) DeleteTemplate(ctx context.Context, user, id string, expectedR
 	if err != nil {
 		return err
 	}
-	h.publish(user, Event{Type: "templates", Op: "delete", IDs: []string{id}, By: by})
+	events := []Event{{Type: "templates", Op: "delete", IDs: []string{id}, By: by}}
 	if bindingsChanged {
-		h.publish(user, Event{Type: "pages"})
+		events = append(events, Event{Type: "pages"})
 	}
+	h.publishEvents(user, events...)
 	h.metric("writes", 1)
 	h.audit(ctx, user, "template.delete", by, "", map[string]any{"template": id})
 	return nil

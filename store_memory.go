@@ -90,12 +90,12 @@ func (s *MemoryStore) KVSet(_ context.Context, user, key string, value json.RawM
 func (s *MemoryStore) KVDelete(_ context.Context, user, key string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if u := s.user(user, false); u != nil {
-		if _, ok := u.kv[key]; ok {
-			delete(u.kv, key)
-			u.version++
-		}
-	}
+	// KVDelete is a successful write even when the key is absent. Advancing the
+	// version keeps its observable semantics aligned with SQLStore, Handler
+	// metrics/events, and the VersionedUserStateStore contract.
+	u := s.user(user, true)
+	delete(u.kv, key)
+	u.version++
 	return nil
 }
 
@@ -118,7 +118,13 @@ func (s *MemoryStore) KVKeys(_ context.Context, user string) ([]string, error) {
 func (s *MemoryStore) EraseUser(_ context.Context, user string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.users, user)
+	var version uint64
+	if u := s.user(user, false); u != nil {
+		version = u.version
+	}
+	// 保留空 tombstone，使 purge 前读到的任何 expected 版本
+	// 永远不会在用户重建后再次命中。
+	s.users[user] = &memoryUser{kv: make(map[string]json.RawMessage), version: version + 1}
 	return nil
 }
 

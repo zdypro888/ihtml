@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/zdypro888/ihtml/internal/nilcheck"
 )
 
 // 对话走 WebSocket, 线格式与 casino admin AI 助手保持一致,
@@ -106,6 +108,11 @@ type ChatClientInspection struct {
 	Page        string                     `json:"page,omitempty"` // 当前页面名, 空 = 单页/根
 	Viewport    ChatClientViewport         `json:"viewport"`
 	ThemeMode   string                     `json:"theme_mode,omitempty"` // light / dark
+	Total       int                        `json:"total,omitempty"`      // 过滤后的 Item 总数
+	Offset      int                        `json:"offset,omitempty"`
+	Limit       int                        `json:"limit,omitempty"`
+	NextOffset  int                        `json:"next_offset,omitempty"`
+	Truncated   bool                       `json:"truncated,omitempty"` // 仍有后续分页
 	Items       []ChatClientInspectionItem `json:"items,omitempty"`
 	Errors      []string                   `json:"errors,omitempty"`       // 最近页面错误摘要
 	VisibleText string                     `json:"visible_text,omitempty"` // 全页可见文本(截断)
@@ -192,7 +199,10 @@ type ChatStreamEvent struct {
 	Budget       *ChatTurnBudget    `json:"budget,omitempty"`
 	Error        string             `json:"error,omitempty"`
 	// InspectID 仅用于 inspect_request: 内核应答 inspect_result 时原样带回。
-	InspectID string `json:"inspect_id,omitempty"`
+	InspectID     string   `json:"inspect_id,omitempty"`
+	InspectOffset int      `json:"inspect_offset,omitempty"`
+	InspectLimit  int      `json:"inspect_limit,omitempty"`
+	InspectIDs    []string `json:"inspect_ids,omitempty"`
 }
 
 // ProposedToolCall 是一次工具调用的描述; 需人工确认的调用带 HMAC 签名的
@@ -429,7 +439,10 @@ func (h *Handler) handleChatWS(w http.ResponseWriter, r *http.Request, user stri
 		Access:        access,
 	}
 	session, err := h.opts.chat.NewSession(ctx, sessionContext)
-	if err != nil {
+	if err != nil || nilcheck.IsNil(session) {
+		if err == nil {
+			err = errors.New("chat backend returned a nil session")
+		}
 		h.opts.logger.Warn("ihtml: chat session init failed", "user", user, "err", err)
 		_ = emit(ChatStreamEvent{Type: "turn_error", Error: "AI 会话初始化失败", ModelReady: true})
 		return

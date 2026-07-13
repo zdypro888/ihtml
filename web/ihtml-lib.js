@@ -1750,5 +1750,583 @@
     return { BREAKPOINTS, empty, normalize, fromVersion, toVersion, saveRequest, initial, reduce, resolveLayout, resolveFrame, chooseBreakpoint, resolvePlacement, descendants, flatten };
   })();
 
-  window.__ihtmlLib = { makeT, fmt, util, chart, template, chatAgent, chatTrace, itemLayout };
+  /* ---------- runtime 纯函数: 多实例命名/样式与 inspect 分页 ---------- */
+  const runtime = (() => {
+    function storageHash(value) {
+      value = String(value || '');
+      let hash = 0x811c9dc5;
+      for (let i = 0; i < value.length; i++) {
+        hash ^= value.charCodeAt(i);
+        hash = Math.imul(hash, 0x01000193) >>> 0;
+      }
+      return hash.toString(36);
+    }
+    function storageKey(kind, base, host, user) {
+      return 'ihtml.' + String(kind || '') + '.' + storageHash([base, host, user || 'anonymous'].join('\u001f'));
+    }
+    function migrateLegacyStorage(storage, markerKey, pairs) {
+      if (!storage || typeof storage.getItem !== 'function' || typeof storage.setItem !== 'function') return false;
+      try {
+        if (storage.getItem(String(markerKey || '')) != null) return false;
+        for (const pair of pairs || []) {
+          const legacy = pair && String(pair.legacy || '');
+          const scoped = pair && String(pair.scoped || '');
+          if (!legacy || !scoped || storage.getItem(scoped) != null) continue;
+          const value = storage.getItem(legacy);
+          if (value != null) storage.setItem(scoped, value);
+        }
+        // Keep the old keys for rollback; the marker only prevents another
+        // mount/user from claiming the same process-global legacy values.
+        storage.setItem(String(markerKey || ''), '1');
+        return true;
+      } catch { return false; }
+    }
+    function selectPrimary(current, candidates) {
+      const list = Array.from(candidates || []).filter(Boolean);
+      return current && list.includes(current) ? current : list[0] || null;
+    }
+    function itemLifecycleRecord(registry, id, lifecycle) {
+      if (!registry || typeof registry.get !== 'function') return null;
+      const record = registry.get(String(id || ''));
+      return record && record.lifecycle === lifecycle ? record : null;
+    }
+    function itemFacadeExpression(apiExpression, id, lifecycle) {
+      return '(' + String(apiExpression || 'null') + ').__itemFacade(' +
+        JSON.stringify(String(id || '')) + ',' + JSON.stringify(lifecycle) + ')';
+    }
+    function normalizeMountOptions(opts, href, standalone) {
+      if (opts == null) opts = {};
+      if (typeof opts !== 'object') throw new TypeError('ihtml.mount: options must be an object');
+      const out = { ...opts };
+      const base = out.base ? new URL(String(out.base), String(href || '')) : new URL('.', String(href || ''));
+      if (base.protocol !== 'http:' && base.protocol !== 'https:') {
+        throw new TypeError('ihtml.mount: base must use http: or https:');
+      }
+      if (base.username || base.password) {
+        throw new TypeError('ihtml.mount: base must not contain credentials');
+      }
+      // API paths are always resolved below a directory. A query/hash on the
+      // configured base is page state, not part of that directory.
+      base.search = '';
+      base.hash = '';
+      if (!base.pathname.endsWith('/')) base.pathname += '/';
+      out.base = base.href;
+      if (!standalone) out.params = new URLSearchParams(out.params || {});
+      if (out.storageKey != null) out.storageKey = String(out.storageKey);
+      if (Array.isArray(out.messageOrigins)) out.messageOrigins = out.messageOrigins.slice();
+      out.routing = out.routing || (standalone ? 'hash' : 'memory');
+      if (out.routing !== 'memory' && out.routing !== 'hash') {
+        throw new TypeError('ihtml.mount: routing must be "memory" or "hash"');
+      }
+      return out;
+    }
+    function scopeCSS(css, standalone, scopeStyles, instanceKey) {
+      css = String(css || '');
+      if (standalone || scopeStyles === false) return css;
+      return '@scope (.ihtml-root[data-ihtml-instance="' + String(instanceKey || '') + '"]) {\n' + css + '\n}';
+    }
+    function inspectRange(total, offset, limit, legacy) {
+      total = Math.max(0, Math.floor(Number(total) || 0));
+      if (legacy === true) {
+        const legacyLimit = 200;
+        const end = Math.min(total, legacyLimit);
+        return { total, offset: 0, limit: legacyLimit, end, nextOffset: end < total ? end : 0, truncated: end < total };
+      }
+      offset = Math.max(0, Math.min(total, Math.floor(Number(offset) || 0)));
+      limit = Math.max(1, Math.min(20, Math.floor(Number(limit) || 20)));
+      const end = Math.min(total, offset + limit);
+      return { total, offset, limit, end, nextOffset: end < total ? end : 0, truncated: end < total };
+    }
+
+    // 仅用于判断能否安全地在 ES module 顶层注入词法 ihtml 变量。
+    // 它不改写源码；字符串/模板/注释先被遮掉，块/函数内部的词法
+    // shadow 不会误伤模块顶层绑定。var 在裸块中仍会提升到模块作用域，
+    // 因此对嵌套 var 保持保守判断。
+    function unicodeIdentifierEscape(code, index) {
+      if (code[index] !== '\\' || code[index + 1] !== 'u') return null;
+      if (code[index + 2] === '{') {
+        let end = index + 3;
+        while (end < code.length && end < index + 9 && /[0-9A-Fa-f]/.test(code[end])) end++;
+        if (end === index + 3 || code[end] !== '}') return null;
+        const point = Number.parseInt(code.slice(index + 3, end), 16);
+        if (!Number.isFinite(point) || point > 0x10ffff) return null;
+        return { end: end + 1, value: String.fromCodePoint(point) };
+      }
+      const hex = code.slice(index + 2, index + 6);
+      if (!/^[0-9A-Fa-f]{4}$/.test(hex)) return null;
+      return { end: index + 6, value: String.fromCharCode(Number.parseInt(hex, 16)) };
+    }
+    function identifierAt(code, start) {
+      let index = start;
+      let decoded = '';
+      let first = true;
+      while (index < code.length) {
+        const escape = unicodeIdentifierEscape(code, index);
+        if (escape) {
+          const valid = first ? /[A-Za-z_$]/.test(escape.value) : /[A-Za-z0-9_$]/.test(escape.value);
+          if (!valid) break;
+          decoded += escape.value;
+          index = escape.end;
+          first = false;
+          continue;
+        }
+        const ch = code[index];
+        const valid = first ? /[A-Za-z_$]/.test(ch) : /[A-Za-z0-9_$]/.test(ch);
+        if (!valid) break;
+        decoded += ch;
+        index++;
+        first = false;
+      }
+      return index > start ? { end: index, decoded } : null;
+    }
+    function maskJSLiterals(code) {
+      code = String(code || '');
+      let out = '';
+      let state = 'code';
+      let quote = '';
+      let escaped = false;
+      let regexClass = false;
+      let canStartRegex = true;
+      let pendingControl = '';
+      const parenKinds = [];
+      const braceKinds = [];
+      let lastToken = 'start';
+      let pendingClass = false;
+      let labelCandidate = false;
+      const regexPrefixWords = new Set([
+        'await', 'break', 'case', 'continue', 'debugger', 'default', 'delete', 'do', 'else', 'in', 'instanceof', 'new',
+        'of', 'return', 'throw', 'typeof', 'void', 'yield',
+      ]);
+      const controlWords = new Set(['catch', 'for', 'if', 'switch', 'while', 'with']);
+      for (let i = 0; i < code.length; i++) {
+        const ch = code[i];
+        const next = code[i + 1] || '';
+        if (state === 'line') {
+          if (ch === '\n' || ch === '\r') { state = 'code'; out += ch; }
+          else out += ' ';
+          continue;
+        }
+        if (state === 'block') {
+          if (ch === '*' && next === '/') { out += '  '; i++; state = 'code'; }
+          else out += ch === '\n' || ch === '\r' ? ch : ' ';
+          continue;
+        }
+        if (state === 'literal') {
+          if (escaped) { escaped = false; out += ch === '\n' || ch === '\r' ? ch : ' '; continue; }
+          if (ch === '\\') { escaped = true; out += ' '; continue; }
+          if (ch === quote) { state = 'code'; quote = ''; canStartRegex = false; lastToken = 'operand'; out += ' '; }
+          else out += ch === '\n' || ch === '\r' ? ch : ' ';
+          continue;
+        }
+        if (state === 'regex') {
+          if (ch === '\n' || ch === '\r') {
+            state = 'code';
+            regexClass = false;
+            canStartRegex = true;
+            out += ch;
+            continue;
+          }
+          if (escaped) { escaped = false; out += ' '; continue; }
+          if (ch === '\\') { escaped = true; out += ' '; continue; }
+          if (ch === '[') { regexClass = true; out += ' '; continue; }
+          if (ch === ']' && regexClass) { regexClass = false; out += ' '; continue; }
+          if (ch === '/' && !regexClass) {
+            state = 'code';
+            canStartRegex = false;
+            lastToken = 'operand';
+            out += ' ';
+            while (i + 1 < code.length && /[A-Za-z]/.test(code[i + 1])) { out += ' '; i++; }
+            continue;
+          }
+          out += ' ';
+          continue;
+        }
+        if (ch === '/' && next === '/') { out += '  '; i++; state = 'line'; continue; }
+        if (ch === '/' && next === '*') { out += '  '; i++; state = 'block'; continue; }
+        if (ch === '/' && canStartRegex) {
+          state = 'regex';
+          regexClass = false;
+          escaped = false;
+          pendingControl = '';
+          out += ' ';
+          continue;
+        }
+        if (ch === '/') {
+          out += ch;
+          if (next === '=') { out += next; i++; }
+          canStartRegex = true;
+          pendingControl = '';
+          lastToken = '/';
+          continue;
+        }
+        if (ch === '\'' || ch === '"' || ch === '`') {
+          state = 'literal'; quote = ch; escaped = false; pendingControl = ''; labelCandidate = false; out += '__ihtmlString__'; continue;
+        }
+        if (/\s/.test(ch)) { out += ch; continue; }
+        const identifier = identifierAt(code, i);
+        if (identifier) {
+          out += identifier.decoded;
+          i = identifier.end - 1;
+          labelCandidate = lastToken === 'start' || lastToken === ';' || lastToken === '}block' ||
+            lastToken === 'control)' || lastToken === 'label:' ||
+            (lastToken === '{' && braceKinds[braceKinds.length - 1] === 'block');
+          if (controlWords.has(identifier.decoded)) pendingControl = identifier.decoded;
+          else pendingControl = '';
+          if (identifier.decoded === 'class') pendingClass = true;
+          canStartRegex = regexPrefixWords.has(identifier.decoded) || controlWords.has(identifier.decoded);
+          lastToken = identifier.decoded;
+          continue;
+        }
+        if (/[0-9]/.test(ch)) {
+          let end = i + 1;
+          while (end < code.length && /[A-Za-z0-9_.]/.test(code[end])) end++;
+          out += code.slice(i, end);
+          i = end - 1;
+          canStartRegex = false;
+          pendingControl = '';
+          labelCandidate = false;
+          lastToken = 'operand';
+          continue;
+        }
+        if (ch === '(') {
+          labelCandidate = false;
+          parenKinds.push(pendingControl ? 'control' : 'normal');
+          pendingControl = '';
+          canStartRegex = true;
+          lastToken = '(';
+        } else if (ch === ')') {
+          labelCandidate = false;
+          const kind = parenKinds.pop();
+          canStartRegex = kind === 'control';
+          pendingControl = '';
+          lastToken = kind === 'control' ? 'control)' : ')';
+        } else if (ch === '{') {
+          labelCandidate = false;
+          const classBody = pendingClass && parenKinds.length === 0;
+          const block = classBody || lastToken === 'start' || lastToken === ';' || lastToken === 'control)' || lastToken === ')' ||
+            lastToken === '=>' || lastToken === 'else' || lastToken === 'do' || lastToken === 'try' || lastToken === 'finally' ||
+            lastToken === '}block' || lastToken === 'label:';
+          if (classBody) pendingClass = false;
+          braceKinds.push(block ? 'block' : 'object');
+          pendingControl = '';
+          canStartRegex = true;
+          lastToken = '{';
+        } else if (ch === '}') {
+          labelCandidate = false;
+          const kind = braceKinds.pop();
+          pendingControl = '';
+          canStartRegex = kind === 'block';
+          lastToken = kind === 'block' ? '}block' : '}object';
+        } else if (ch === '=' && next === '>') {
+          labelCandidate = false;
+          out += ch;
+          i++;
+          pendingControl = '';
+          canStartRegex = true;
+          lastToken = '=>';
+          out += next;
+          continue;
+        } else {
+          pendingControl = '';
+          const labelColon = ch === ':' && labelCandidate;
+          labelCandidate = false;
+          if (ch === ']' || ch === '.') canStartRegex = false;
+          else if ((ch === '+' && next === '+') || (ch === '-' && next === '-')) {
+            out += ch;
+            i++;
+            canStartRegex = false;
+          } else canStartRegex = true;
+          lastToken = labelColon ? 'label:' : ch;
+        }
+        out += ch;
+      }
+      return out;
+    }
+    function hasIHTMLBinding(code) {
+      const masked = maskJSLiterals(code);
+      const tokens = masked.match(/[A-Za-z_$][\w$]*|=>|\.\.\.|[{}()[\],;=:.\-*]/g) || [];
+
+      const closeForOpen = new Map();
+      const controlParens = new Set();
+      const parenStack = [];
+      const controls = new Set(['catch', 'for', 'if', 'switch', 'while', 'with']);
+      for (let i = 0; i < tokens.length; i++) {
+        if (tokens[i] === '(') {
+          const previous = tokens[i - 1];
+          const control = controls.has(previous) || (previous === 'await' && tokens[i - 2] === 'for');
+          parenStack.push({ index: i, control });
+        } else if (tokens[i] === ')') {
+          const open = parenStack.pop();
+          if (!open) continue;
+          closeForOpen.set(open.index, i);
+          if (open.control) controlParens.add(i);
+        }
+      }
+
+      // A var conflicts with the injected module binding only in the module's
+      // own var-scope. Mark function/method/class bodies as barriers while
+      // leaving ordinary blocks transparent (var inside them still hoists).
+      const barrierBraces = new Set();
+      const keywordActsAsProperty = (index) => {
+        const previous = tokens[index - 1];
+        const next = tokens[index + 1];
+        // Reserved words are valid IdentifierName property keys. Treating
+        // `obj.class`, `{ class: 1 }`, or `{ function() {} }` as declaration
+        // keywords can incorrectly turn a later ordinary block into a
+        // function/class barrier and miss its module-scoped `var ihtml`.
+        if (previous === '.' || next === ':') return true;
+        if (next !== '(' && next !== '=' && next !== ';') return false;
+        if (previous === '{' || previous === '}' || previous === ';') return true;
+        if (previous === ',') {
+          let depth = 0;
+          for (let i = index - 1; i >= 0; i--) {
+            if (tokens[i] === '}' || tokens[i] === ')' || tokens[i] === ']') depth++;
+            else if (tokens[i] === '{' || tokens[i] === '(' || tokens[i] === '[') {
+              if (depth) depth--;
+              else return tokens[i] === '{';
+            }
+          }
+        }
+        if (previous === 'static' || previous === 'get' || previous === 'set') return true;
+        if (previous === 'async') {
+          const beforeAsync = tokens[index - 2];
+          return beforeAsync === '{' || beforeAsync === '}' || beforeAsync === ';' || beforeAsync === ',';
+        }
+        return false;
+      };
+      const nextBodyAfterFunction = (start) => {
+        let open = start + 1;
+        if (tokens[open] === '*') open++;
+        if (tokens[open] && !['('].includes(tokens[open])) open++;
+        while (open < tokens.length && tokens[open] !== '(') open++;
+        const close = closeForOpen.get(open);
+        if (close != null && tokens[close + 1] === '{') barrierBraces.add(close + 1);
+      };
+      for (let i = 0; i < tokens.length; i++) {
+        if (tokens[i] === 'function' && !keywordActsAsProperty(i)) nextBodyAfterFunction(i);
+        if (tokens[i] === '=>' && tokens[i + 1] === '{') barrierBraces.add(i + 1);
+        if (tokens[i] === 'class' && !keywordActsAsProperty(i)) {
+          let parens = 0;
+          let brackets = 0;
+          for (let j = i + 1; j < tokens.length; j++) {
+            if (tokens[j] === '(') parens++;
+            else if (tokens[j] === ')') parens = Math.max(0, parens - 1);
+            else if (tokens[j] === '[') brackets++;
+            else if (tokens[j] === ']') brackets = Math.max(0, brackets - 1);
+            else if (tokens[j] === '{' && parens === 0 && brackets === 0) { barrierBraces.add(j); break; }
+          }
+        }
+      }
+      const preliminaryBraces = [];
+      for (let i = 0; i < tokens.length; i++) {
+        if (tokens[i] === ')' && tokens[i + 1] === '{' && !controlParens.has(i) &&
+            preliminaryBraces[preliminaryBraces.length - 1] === 'object') {
+          // Method syntax is only valid while the nearest enclosing grammar
+          // context is an object literal. `foo()\n{ var ihtml }` is instead a
+          // call followed by an ordinary block, whose var still hoists.
+          barrierBraces.add(i + 1);
+        }
+        if (tokens[i] === '{') {
+          let kind = 'object';
+          const previous = tokens[i - 1];
+          if (barrierBraces.has(i)) kind = 'barrier';
+          else if (i === 0 || controlParens.has(i - 1) ||
+              [';', 'else', 'do', 'try', 'finally'].includes(previous) || previous === '}') kind = 'block';
+          preliminaryBraces.push(kind);
+        } else if (tokens[i] === '}') preliminaryBraces.pop();
+      }
+
+      const scopes = [];
+      let braces = 0;
+      let parens = 0;
+      let barriers = 0;
+      const braceStack = [];
+      for (let i = 0; i < tokens.length; i++) {
+        scopes.push({ braces, parens, barriers });
+        if (tokens[i] === '{') {
+          const barrier = barrierBraces.has(i);
+          braceStack.push(barrier);
+          braces++;
+          if (barrier) barriers++;
+        } else if (tokens[i] === '}') {
+          const barrier = braceStack.pop();
+          braces = Math.max(0, braces - 1);
+          if (barrier) barriers = Math.max(0, barriers - 1);
+        }
+        else if (tokens[i] === '(') parens++;
+        else if (tokens[i] === ')') parens = Math.max(0, parens - 1);
+      }
+
+      const matching = { '(': ')', '[': ']', '{': '}' };
+      const skipBalanced = (start) => {
+        const close = matching[tokens[start]];
+        if (!close) return start + 1;
+        const stack = [close];
+        let index = start + 1;
+        while (index < tokens.length && stack.length) {
+          const token = tokens[index++];
+          if (matching[token]) stack.push(matching[token]);
+          else if (token === stack[stack.length - 1]) stack.pop();
+        }
+        return index;
+      };
+      const skipExpression = (start, stops) => {
+        const stack = [];
+        let index = start;
+        while (index < tokens.length) {
+          const token = tokens[index];
+          if (!stack.length && stops.has(token)) break;
+          if (matching[token]) stack.push(matching[token]);
+          else if (stack.length && token === stack[stack.length - 1]) stack.pop();
+          index++;
+        }
+        return index;
+      };
+      const parseBindingPattern = (start) => {
+        let index = start;
+        if (tokens[index] === '...') index++;
+        const first = tokens[index];
+        if (first !== '{' && first !== '[') {
+          return { binds: first === 'ihtml', end: first ? index + 1 : index };
+        }
+        const close = first === '{' ? '}' : ']';
+        index++;
+        while (index < tokens.length && tokens[index] !== close) {
+          if (tokens[index] === ',') { index++; continue; }
+          if (tokens[index] === '...') {
+            const rest = parseBindingPattern(index + 1);
+            if (rest.binds) return rest;
+            index = rest.end;
+          } else if (first === '[') {
+            const item = parseBindingPattern(index);
+            if (item.binds) return item;
+            index = item.end;
+          } else if (tokens[index] === '[') {
+            index = skipBalanced(index);
+            if (tokens[index] === ':') index++;
+            const value = parseBindingPattern(index);
+            if (value.binds) return value;
+            index = value.end;
+          } else if (tokens[index] === ':') {
+            // A string/numeric property key is masked/omitted by the lexer.
+            const value = parseBindingPattern(index + 1);
+            if (value.binds) return value;
+            index = value.end;
+          } else {
+            const key = tokens[index++];
+            if (tokens[index] === ':') {
+              const value = parseBindingPattern(index + 1);
+              if (value.binds) return value;
+              index = value.end;
+            } else if (key === 'ihtml') return { binds: true, end: index };
+          }
+          if (tokens[index] === '=') index = skipExpression(index + 1, new Set([',', close]));
+          while (index < tokens.length && tokens[index] !== ',' && tokens[index] !== close) index++;
+        }
+        return { binds: false, end: tokens[index] === close ? index + 1 : index };
+      };
+      const variableDeclarationBinds = (start) => {
+        let index = start + 1;
+        while (index < tokens.length) {
+          const pattern = parseBindingPattern(index);
+          if (pattern.binds) return true;
+          if (pattern.end <= index) return false;
+          index = pattern.end;
+          if (tokens[index] === '=') {
+            index = skipExpression(index + 1, new Set([',', ';', 'in', 'of', ')']));
+          }
+          if (tokens[index] !== ',') return false;
+          index++;
+        }
+        return false;
+      };
+      const importBinds = (start) => {
+        let index = start + 1;
+        if (tokens[index] === '(' || tokens[index] === '.' || tokens[index] === ';' || tokens[index] == null) return false;
+        if (tokens[index] !== '{' && tokens[index] !== '*') {
+          if (tokens[index] === 'ihtml') return true;
+          index++;
+          if (tokens[index] === ',') index++;
+          else return false;
+        }
+        if (tokens[index] === '*') return tokens[index + 1] === 'as' && tokens[index + 2] === 'ihtml';
+        if (tokens[index] !== '{') return false;
+        index++;
+        while (index < tokens.length && tokens[index] !== '}') {
+          if (tokens[index] === ',') { index++; continue; }
+          const imported = tokens[index++];
+          let local = imported;
+          if (tokens[index] === 'as') { local = tokens[index + 1]; index += 2; }
+          if (local === 'ihtml') return true;
+          while (index < tokens.length && tokens[index] !== ',' && tokens[index] !== '}') index++;
+        }
+        return false;
+      };
+      const expressionDeclarationContext = (index) => {
+        let previous = tokens[index - 1];
+        let before = tokens[index - 2];
+        if (previous === 'async') { previous = before; before = tokens[index - 3]; }
+        return new Set(['=', '(', '[', ',', ':', '=>', 'return', 'throw', 'case', 'new', 'void', 'typeof', 'delete', 'yield', 'await', '+', '-', '*', '/']).has(previous);
+      };
+
+      for (let i = 0; i < tokens.length; i++) {
+        const token = tokens[i];
+        const topLevel = scopes[i].braces === 0 && scopes[i].parens === 0;
+        if (token === 'function' || token === 'class') {
+          if (!topLevel || expressionDeclarationContext(i)) continue;
+          let j = i + 1;
+          if (token === 'function' && tokens[j] === '*') j++;
+          if (tokens[j] === 'ihtml') return true;
+          continue;
+        }
+        if (token === 'import' && tokens[i + 1] !== '(' && tokens[i + 1] !== '.') {
+          if (!topLevel) continue;
+          if (importBinds(i)) return true;
+          continue;
+        }
+        if (token !== 'const' && token !== 'let' && token !== 'var') continue;
+        // const/let 只有模块顶层才与注入声明冲突；var 即使位于裸块中
+        // 也可能提升到模块作用域，所以保持保守。for(let ...) 有自己的
+        // 词法作用域，不应被当作顶层声明。
+        if (token === 'var' ? scopes[i].barriers > 0 : !topLevel) continue;
+        if (variableDeclarationBinds(i)) return true;
+      }
+      return false;
+    }
+    function classicItemScript(code, apiExpression, itemId, privateName) {
+      code = String(code || '');
+      apiExpression = String(apiExpression || 'null');
+      privateName = /^[A-Za-z_$][\w$]*$/.test(String(privateName || '')) ? String(privateName) : '__ihtmlInstanceAPI';
+      if (privateName === 'ihtml') privateName = '__ihtmlInstanceAPI';
+      // Classic Item 源码位于内部块中，因此自己的 const/let/class/function
+      // ihtml 可以自然 shadow；外层始终把当前实例作为 ihtml 形参注入。
+      // 报错捕获留在外层，避免源码里的 var ihtml 覆盖错误上报对象。
+      return '(function(' + privateName + '){try{(function(ihtml){\n{\n' + code +
+        '\n}\n})(' + privateName + ');}catch(__e){' + privateName + '.errors.report(' + JSON.stringify(String(itemId || '')) +
+        ', __e && __e.message || __e, __e && __e.stack);}})(' + apiExpression + ');';
+    }
+    function moduleItemScript(code, apiExpression) {
+      code = String(code || '');
+      if (hasIHTMLBinding(code)) return code;
+      return 'const ihtml = ' + String(apiExpression || 'null') + ';\n' + code;
+    }
+    function rectVisible(rect, viewport, clips) {
+      if (!rect || !(rect.right > rect.left) || !(rect.bottom > rect.top)) return false;
+      let left = rect.left; let right = rect.right; let top = rect.top; let bottom = rect.bottom;
+      const apply = (clip) => {
+        if (!clip) return;
+        if (clip.clipX !== false) { left = Math.max(left, clip.left); right = Math.min(right, clip.right); }
+        if (clip.clipY !== false) { top = Math.max(top, clip.top); bottom = Math.min(bottom, clip.bottom); }
+      };
+      apply({ left: 0, top: 0, right: Number(viewport && viewport.width) || 0, bottom: Number(viewport && viewport.height) || 0 });
+      for (const clip of clips || []) apply(clip);
+      return right > left && bottom > top;
+    }
+    return Object.freeze({
+      storageHash, storageKey, migrateLegacyStorage, selectPrimary, itemLifecycleRecord, itemFacadeExpression, normalizeMountOptions, scopeCSS, inspectRange,
+      hasIHTMLBinding, classicItemScript, moduleItemScript, rectVisible,
+    });
+  })();
+
+  window.__ihtmlLib = { makeT, fmt, util, chart, template, chatAgent, chatTrace, itemLayout, runtime };
 })();

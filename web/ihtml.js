@@ -11,7 +11,8 @@
  *   chatEntry, menu(元素|选择器), locale, strings(文案覆写), safe(安全模式),
  *   auth(() => REST header token), connectionAuth(() => 短期连接票据),
  *   messageOrigins(postMessage 白名单, 默认同源),
- *   scopeStyles(嵌入时默认 true), allowExternalAssets(默认 false),
+ *   scopeStyles(嵌入时默认 true), storageKey(稳定实例缓存键),
+ *   allowExternalAssets(默认 false),
  *   captureHostErrors(嵌入时默认 false),
  *   onReady(cfg), onAuthError(), onConnection(state)
  * 实例 API 额外提供: destroy(), ready(Promise), fmt/util/chart/poll/listen/panel。 */
@@ -20,6 +21,91 @@
   const doc = document;
   const lib = window.__ihtmlLib || { makeT: () => (k) => k, fmt: {}, util: {}, chart: {} };
   let instanceSeq = 0;
+  let runtimeSymbolName = 'ihtml.runtime.v1';
+  let runtimeSymbol = Symbol.for(runtimeSymbolName);
+
+  // Dynamic Item scripts execute as document scripts rather than inside this
+  // closure.  Keep their instance APIs in a shared, reclaimable bridge and
+  // mark every script with its owner.  The bridge exposes lookup only; the map
+  // itself stays private so destroying an instance can reliably revoke it.
+  function createRuntimeBridge() {
+    const apis = new Map();
+    return Object.freeze({
+      register(key, api) { if (key && api) apis.set(String(key), api); },
+      unregister(key, api) { if (apis.get(String(key)) === api) apis.delete(String(key)); },
+      get(key) { return apis.get(String(key)) || null; },
+      current() {
+        const script = doc.currentScript;
+        return script && script.dataset ? apis.get(script.dataset.ihtmlInstance || '') || null : null;
+      },
+    });
+  }
+  function compatibleRuntimeBridge(value) {
+    try {
+      return !!value &&
+        typeof value.register === 'function' &&
+        typeof value.unregister === 'function' &&
+        typeof value.get === 'function' &&
+        typeof value.current === 'function';
+    } catch { return false; }
+  }
+  function readRuntimeBridge(symbol) {
+    try { return window[symbol]; } catch { return null; }
+  }
+  function publishRuntimeBridge(symbol, value) {
+    try {
+      const descriptor = Object.getOwnPropertyDescriptor(window, symbol);
+      if (!descriptor || descriptor.configurable) {
+        Object.defineProperty(window, symbol, { value, configurable: true });
+      } else if ('value' in descriptor && descriptor.writable) {
+        window[symbol] = value;
+      } else {
+        return false;
+      }
+      return window[symbol] === value;
+    } catch { return false; }
+  }
+  let runtimeBridge = readRuntimeBridge(runtimeSymbol);
+  if (!compatibleRuntimeBridge(runtimeBridge)) {
+    runtimeBridge = createRuntimeBridge();
+    let published = publishRuntimeBridge(runtimeSymbol, runtimeBridge);
+    if (!published) {
+      // A host may have reserved the public Symbol with a non-configurable,
+      // incompatible value. Use a deterministic fallback slot rather than
+      // crashing or later calling missing get/unregister methods.
+      for (let suffix = 1; suffix <= 16; suffix++) {
+        runtimeSymbolName = 'ihtml.runtime.v1.fallback.' + suffix;
+        runtimeSymbol = Symbol.for(runtimeSymbolName);
+        const existing = readRuntimeBridge(runtimeSymbol);
+        if (compatibleRuntimeBridge(existing)) {
+          runtimeBridge = existing;
+          published = true;
+          break;
+        }
+        if (publishRuntimeBridge(runtimeSymbol, runtimeBridge)) { published = true; break; }
+      }
+    }
+    if (!published) {
+      // All deterministic slots can also be host-reserved. A per-load random
+      // Symbol makes collision practically impossible; if window itself is
+      // non-extensible, fail here instead of generating scripts that later
+      // dereference an unpublished/incompatible bridge.
+      runtimeSymbolName = 'ihtml.runtime.v1.fallback.' + Date.now().toString(36) + '.' + Math.random().toString(36).slice(2);
+      runtimeSymbol = Symbol.for(runtimeSymbolName);
+      published = publishRuntimeBridge(runtimeSymbol, runtimeBridge);
+    }
+    if (!published) throw new Error('ihtml: unable to publish the runtime bridge');
+  }
+
+  function newInstanceKey(seq) {
+    let nonce = '';
+    try {
+      const words = new Uint32Array(2);
+      crypto.getRandomValues(words);
+      nonce = words[0].toString(36) + words[1].toString(36);
+    } catch { nonce = Date.now().toString(36) + Math.random().toString(36).slice(2); }
+    return 'i' + seq.toString(36) + '-' + nonce;
+  }
 
   function el(tag, cls, text) {
     const node = doc.createElement(tag);
@@ -35,6 +121,7 @@
 
   function createInstance(hostEl, opts) {
     const instanceID = ++instanceSeq;
+    const instanceKey = newInstanceKey(instanceID);
     const standalone = !!opts.standalone;
     const T = lib.makeT(opts.locale || navigator.language, opts.strings);
     const templateCore = lib.template;
@@ -60,6 +147,7 @@
 
     /* ---------- 容器 ---------- */
     const rootEl = el('div', 'ihtml-root');
+    rootEl.dataset.ihtmlInstance = instanceKey;
     rootEl.classList.toggle('ihtml-standalone-root', standalone);
     const appEl = el('div', 'ihtml-app');
     rootEl.appendChild(appEl);
@@ -105,6 +193,80 @@
       ? new URLSearchParams(location.search)
       : new URLSearchParams(opts.params || {});
     pageParams.delete('auth'); // 长期凭据不得从页面 URL 复制到每个 API/连接日志
+    function stableHostIdentity() {
+      const explicit = String(opts.storageKey || hostEl.getAttribute('data-ihtml-storage-key') || hostEl.id || '').trim();
+      if (explicit) return 'named:' + explicit;
+      const parts = [];
+      for (let node = hostEl; node && node.nodeType === 1 && node !== doc.documentElement; node = node.parentElement) {
+        const siblings = node.parentElement ? Array.from(node.parentElement.children) : [];
+        parts.push(node.localName + ':' + Math.max(0, siblings.indexOf(node)));
+        if (node === doc.body) break;
+      }
+      return 'path:' + parts.reverse().join('/');
+    }
+    const storageHost = stableHostIdentity();
+    const storageBase = baseURL.origin + baseURL.pathname;
+    function storageHash(value) {
+      if (lib.runtime && typeof lib.runtime.storageHash === 'function') return lib.runtime.storageHash(value);
+      let hash = 0x811c9dc5;
+      for (let i = 0; i < value.length; i++) {
+        hash ^= value.charCodeAt(i);
+        hash = Math.imul(hash, 0x01000193) >>> 0;
+      }
+      return hash.toString(36);
+    }
+    function storageNamespace(user) {
+      const identity = String(user || pageParams.get('uid') || pageParams.get('user') || 'anonymous');
+      return storageHash([storageBase, storageHost, identity].join('\u001f'));
+    }
+    function storageKey(kind, user) {
+      return 'ihtml.' + kind + '.' + storageNamespace(user == null ? resolvedUser : user);
+    }
+    const legacyLocalMarker = 'ihtml.storage_migration.v1.local';
+    const legacySessionMarker = 'ihtml.storage_migration.v1.session';
+    // Every instance may attempt after its identity is resolved; the
+    // synchronous per-storage marker makes the first successful config the
+    // sole claimant, even if an earlier mount was destroyed or stayed offline.
+    let legacyLocalMigrationDone = false;
+    let legacySessionMigrationDone = false;
+    function migrateLegacyStore(storage, marker, pairs) {
+      if (lib.runtime && typeof lib.runtime.migrateLegacyStorage === 'function') {
+        return lib.runtime.migrateLegacyStorage(storage, marker, pairs);
+      }
+      try {
+        if (storage.getItem(marker) != null) return false;
+        for (const pair of pairs) {
+          if (storage.getItem(pair.scoped) == null) {
+            const value = storage.getItem(pair.legacy);
+            if (value != null) storage.setItem(pair.scoped, value);
+          }
+        }
+        storage.setItem(marker, '1');
+        return true;
+      } catch { return false; }
+    }
+    function migrateLegacyStorageOnce() {
+      let localClaimed = false;
+      if (!legacyLocalMigrationDone) {
+        try {
+          localClaimed = migrateLegacyStore(localStorage, legacyLocalMarker, [
+            { legacy: 'ihtml.theme', scoped: storageKey('theme') },
+            { legacy: 'ihtml.model', scoped: storageKey('model') },
+            { legacy: 'ihtml.agent_mode', scoped: storageKey('agent_mode') },
+          ]);
+          legacyLocalMigrationDone = localStorage.getItem(legacyLocalMarker) != null;
+        } catch { /* storage disabled */ }
+      }
+      if (!legacySessionMigrationDone) {
+        try {
+          migrateLegacyStore(sessionStorage, legacySessionMarker, [
+            { legacy: 'ihtml.csid', scoped: storageKey('csid') },
+          ]);
+          legacySessionMigrationDone = sessionStorage.getItem(legacySessionMarker) != null;
+        } catch { /* storage disabled */ }
+      }
+      return localClaimed;
+    }
     const hostParams = new URLSearchParams(location.search);
     const SAFE_MODE = !!opts.safe || (standalone && pageParams.get('safe') === '1') || hostParams.get('ihtml-safe') === '1';
     const routing = opts.routing || (standalone ? 'hash' : 'memory');
@@ -275,12 +437,16 @@
     };
 
     /* ---------- 错误收集 ---------- */
+    const registry = new Map(); // id → { item, page, nodes, teardowns }
     const errorLog = [];
+    // errorLog 是审计历史；currentItemErrors 只表示当前这一版 Item
+    // 自上次 apply 以来的错误，inspect 不得把已修复的旧错误当成现状。
+    const currentItemErrors = new Map();
     let errQueue = [];
     let errTimer = 0;
     const errors = {
       list: () => errorLog.slice(),
-      report(itemId, message, stack) {
+      report(itemId, message, stack, lifecycle) {
         const entry = {
           item_id: String(itemId || ''),
           message: clip(String(message || 'unknown error'), 2000),
@@ -290,6 +456,8 @@
         };
         errorLog.push(entry);
         if (errorLog.length > 100) errorLog.shift();
+        const current = entry.item_id ? registry.get(entry.item_id) : null;
+        if (current && (lifecycle == null || current.lifecycle === lifecycle)) currentItemErrors.set(entry.item_id, entry.message);
         console.warn('[ihtml]', entry.item_id || '(page)', entry.message);
         errQueue.push(entry);
         clearTimeout(errTimer);
@@ -350,7 +518,6 @@
     }
 
     /* ---------- 主题 ---------- */
-    const THEME_KEY = 'ihtml.theme';
     const themeDefaults = {
       mode: 'auto', primary: '', contrast: '', radius: 0, gap: 0, font: '',
       bg: '', surface: '', text: '', muted: '', border: '',
@@ -433,7 +600,7 @@
         themeRevision++;
         themeApply();
         if (hostTheme) return; // 宿主控制主题时不持久化
-        try { localStorage.setItem(THEME_KEY, JSON.stringify(themeValue)); } catch { /* 忽略 */ }
+        try { localStorage.setItem(storageKey('theme'), JSON.stringify(themeValue)); } catch { /* 忽略 */ }
         if (o.persist === false) return;
         clearTimeout(themePushTimer);
         const snapshot = { ...themeValue };
@@ -453,8 +620,11 @@
         themeApply();
         return;
       }
+      // Namespace changes must never inherit fields from the previous user.
+      // A missing/invalid cache is the default theme, not the old snapshot.
+      themeValue = { ...themeDefaults };
       try {
-        const saved = JSON.parse(localStorage.getItem(THEME_KEY) || 'null');
+        const saved = JSON.parse(localStorage.getItem(storageKey('theme')) || 'null');
         if (saved) themeValue = { ...themeDefaults, ...normalizeThemePatch(saved) };
       } catch { /* 忽略 */ }
       themeApply();
@@ -468,7 +638,7 @@
           themeValue = { ...themeDefaults, ...normalizeThemePatch(remote) };
           themeRevision++;
           themeApply();
-          try { localStorage.setItem(THEME_KEY, JSON.stringify(themeValue)); } catch { /* 忽略 */ }
+          try { localStorage.setItem(storageKey('theme'), JSON.stringify(themeValue)); } catch { /* 忽略 */ }
         }
       } catch { /* 未配置或离线 */ }
     }
@@ -525,7 +695,7 @@
         const mask = el('div', 'ihtml-modal-mask');
         const modal = el('div', 'ihtml-modal');
         const previousFocus = doc.activeElement;
-        const dialogID = 'ihtml-dialog-' + (++dialogSeq);
+        const dialogID = 'ihtml-dialog-' + instanceID + '-' + (++dialogSeq);
         modal.setAttribute('role', 'dialog');
         modal.setAttribute('aria-modal', 'true');
         if (width) modal.style.width = 'min(' + width + 'px, 94vw)';
@@ -625,7 +795,7 @@
         rootEl.classList.add('ihtml-has-shell');
         const header = el('header', 'ihtml-slot-header');
         const sidebar = el('aside', 'ihtml-slot-sidebar');
-        sidebar.id = 'ihtml-sidebar-' + (++dialogSeq);
+        sidebar.id = 'ihtml-sidebar-' + instanceID + '-' + (++dialogSeq);
         sidebar.tabIndex = -1;
         const main = el('div', 'ihtml-slot-main');
         const footer = el('footer', 'ihtml-slot-footer');
@@ -993,8 +1163,8 @@
     };
 
     /* ---------- Item 执行引擎 ---------- */
-    const registry = new Map(); // id → { item, page, nodes, teardowns }
     let applyGeneration = 0;
+    let itemLifecycleSeq = 0;
     function staleApplyError() {
       const err = new Error('ihtml: stale item batch');
       err.staleApply = true;
@@ -1029,10 +1199,72 @@
     }
     function itemCSS(content) {
       const css = String(content || '');
+      if (lib.runtime && typeof lib.runtime.scopeCSS === 'function') {
+        return lib.runtime.scopeCSS(css, standalone, opts.scopeStyles, instanceKey);
+      }
       if (standalone || opts.scopeStyles === false) return css;
-      return '@scope (.ihtml-root) {\n' + css + '\n}';
+      // A stylesheet applies document-wide regardless of which root contains
+      // its <style> node.  Scope to this exact root, never every .ihtml-root.
+      return '@scope (.ihtml-root[data-ihtml-instance="' + instanceKey + '"]) {\n' + css + '\n}';
     }
-    async function activateScripts(container, itemId, generation, signal) {
+    const runtimeAPIExpression = 'window[Symbol.for(' + JSON.stringify(runtimeSymbolName) + ')].get(' + JSON.stringify(instanceKey) + ')';
+    const privateRuntimeAPIName = '__ihtmlAPI_' + instanceKey.replace(/\W/g, '_');
+    function hasIHTMLBinding(code) {
+      if (lib.runtime && typeof lib.runtime.hasIHTMLBinding === 'function') return lib.runtime.hasIHTMLBinding(code);
+      // 旧 ihtml-lib 兼容路径：只做保守的冲突判断，永远不改写 Item 源码。
+      const source = String(code || '').replace(/(['"`])(?:\\.|(?!\1)[\s\S])*\1|\/\*[\s\S]*?\*\/|\/\/[^\r\n]*/g, ' ');
+      return /\b(?:const|let|var)\b[^;]{0,512}\bihtml\b/m.test(source) ||
+        /\b(?:function|class)\s+ihtml\b/m.test(source) || /\bimport\b[^;]{0,512}\bihtml\b/m.test(source);
+    }
+    function classicItemScript(code, itemId) {
+      if (lib.runtime && typeof lib.runtime.classicItemScript === 'function') {
+        return lib.runtime.classicItemScript(code, runtimeAPIExpression, itemId, privateRuntimeAPIName);
+      }
+      code = String(code || '');
+      return '(function(' + privateRuntimeAPIName + '){try{(function(ihtml){\n{\n' + code +
+        '\n}\n})(' + privateRuntimeAPIName + ');}catch(__e){' + privateRuntimeAPIName + '.errors.report(' + JSON.stringify(itemId) +
+        ', __e && __e.message || __e, __e && __e.stack);}})(' + runtimeAPIExpression + ');';
+    }
+    function moduleItemScript(code, itemId, lifecycle) {
+      const boundExpression = lib.runtime && typeof lib.runtime.itemFacadeExpression === 'function'
+        ? lib.runtime.itemFacadeExpression(runtimeAPIExpression, itemId, lifecycle)
+        : '(' + runtimeAPIExpression + ').__itemFacade(' + JSON.stringify(String(itemId || '')) + ',' + JSON.stringify(lifecycle) + ')';
+      if (lib.runtime && typeof lib.runtime.moduleItemScript === 'function') {
+        return lib.runtime.moduleItemScript(code, boundExpression);
+      }
+      code = String(code || '');
+      return (hasIHTMLBinding(code) ? '' : 'const ihtml = ' + boundExpression + ';\n') + code;
+    }
+    function reportScriptElementError(itemId, source, ev, lifecycle) {
+      const detail = ev && (ev.error || ev.message);
+      errors.report(itemId, detail && (detail.message || detail) || 'script execution failed: ' + (source || 'inline'), detail && detail.stack, lifecycle);
+    }
+    function waitForScript(script, generation, signal) {
+      return new Promise((resolve) => {
+        let settled = false;
+        let timer = 0;
+        let watcher = 0;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          clearInterval(watcher);
+          script.removeEventListener('load', finish);
+          script.removeEventListener('error', finish);
+          if (signal) signal.removeEventListener('abort', finish);
+          resolve();
+        };
+        script.addEventListener('load', finish, { once: true });
+        script.addEventListener('error', finish, { once: true });
+        timer = setTimeout(finish, 10000);
+        watcher = setInterval(() => {
+          if (destroyed || generation !== applyGeneration) finish();
+        }, 50);
+        if (signal && signal.aborted) finish();
+        else if (signal) signal.addEventListener('abort', finish, { once: true });
+      });
+    }
+    async function activateScripts(container, itemId, lifecycle, generation, signal) {
       for (const old of Array.from(container.querySelectorAll('script'))) {
         if (destroyed || generation !== applyGeneration || (signal && signal.aborted)) throw staleApplyError();
         if (old.src && opts.allowExternalAssets !== true) {
@@ -1042,34 +1274,17 @@
         }
         const script = doc.createElement('script');
         for (const attr of old.attributes) script.setAttribute(attr.name, attr.value);
-        script.text = old.text || '';
-        const wait = old.src
-          ? new Promise((res) => {
-              let settled = false;
-              let timer = 0;
-              let watcher = 0;
-              const finish = () => {
-                if (settled) return;
-                settled = true;
-                clearTimeout(timer);
-                clearInterval(watcher);
-                if (signal) signal.removeEventListener('abort', finish);
-                res();
-              };
-              script.onload = finish;
-              script.onerror = () => { errors.report(itemId, 'script load failed: ' + old.src); finish(); };
-              timer = setTimeout(finish, 10000);
-              watcher = setInterval(() => {
-                if (destroyed || generation !== applyGeneration) finish();
-              }, 50);
-              if (signal && signal.aborted) finish();
-              else if (signal) signal.addEventListener('abort', finish, { once: true });
-            })
-          : null;
+        script.dataset.ihtmlInstance = instanceKey;
+        script.dataset.ihtmlItem = itemId;
+        const module = String(script.type || '').trim().toLowerCase() === 'module';
+        if (!old.src) {
+          script.text = module ? moduleItemScript(old.text || '', itemId, lifecycle) : classicItemScript(old.text || '', itemId);
+        }
+        script.addEventListener('error', (ev) => reportScriptElementError(itemId, old.src || 'inline', ev, lifecycle), { once: true });
+        const wait = old.src || module ? waitForScript(script, generation, signal) : null;
         if (destroyed || generation !== applyGeneration || (signal && signal.aborted)) throw staleApplyError();
         runningItem = itemId;
-        old.replaceWith(script);
-        runningItem = '';
+        try { old.replaceWith(script); } finally { runningItem = ''; }
         if (wait) {
           await wait;
           if (destroyed || generation !== applyGeneration || (signal && signal.aborted)) throw staleApplyError();
@@ -1084,7 +1299,10 @@
       errorState.hide();
       runTeardowns(id);
       removeItemNodes(id);
-      const rec = { item, page: item.page || '', nodes: [], teardowns: [] };
+      // teardown 属于旧版 Item；它在清理中报错也只进历史日志，
+      // 不能污染即将应用的新版当前状态。
+      currentItemErrors.delete(id);
+      const rec = { item, page: item.page || '', nodes: [], teardowns: [], lifecycle: ++itemLifecycleSeq };
       registry.set(id, rec);
       try {
         if (item.type === 'css') {
@@ -1109,7 +1327,7 @@
           if (!templateRuntime.place(container, item)) insertContainer(container, item.order || 0, shell.parentFor(slot));
           rec.nodes.push(container);
           setTimeout(() => container.classList.remove('ihtml-enter'), 300);
-          await activateScripts(container, id, generation, signal);
+          await activateScripts(container, id, rec.lifecycle, generation, signal);
           if (destroyed || generation !== applyGeneration || (signal && signal.aborted)) {
             if (registry.get(id) === rec) removeItem(id);
             throw staleApplyError();
@@ -1117,6 +1335,8 @@
         } else if (item.type === 'js') {
           const script = el('script');
           script.dataset.ihtmlId = id;
+          script.dataset.ihtmlInstance = instanceKey;
+          script.dataset.ihtmlItem = id;
           // 容错: 模型习惯性把 <script> 标签写进 js Item, 剥掉标签取内部代码
           let code = item.content;
           if (/^\s*<script[\s>]/i.test(code)) {
@@ -1127,16 +1347,28 @@
           const isModule = item.meta && item.meta.module === 'true';
           if (isModule) {
             script.type = 'module';
-            script.text = code;
+            script.text = moduleItemScript(code, id, rec.lifecycle);
           } else {
-            script.text = 'try{\n' + code + '\n}catch(__e){window.ihtml.errors.report(' + JSON.stringify(id) + ', __e && __e.message || __e, __e && __e.stack);}';
+            script.text = classicItemScript(code, id);
           }
-          runningItem = id;
-          doc.body.appendChild(script);
-          runningItem = '';
+          script.addEventListener('error', (ev) => reportScriptElementError(id, 'js Item', ev, rec.lifecycle), { once: true });
+          const wait = isModule ? waitForScript(script, generation, signal) : null;
           rec.nodes.push(script);
+          runningItem = id;
+          try { doc.body.appendChild(script); } finally { runningItem = ''; }
+          if (registry.get(id) !== rec || destroyed || generation !== applyGeneration || (signal && signal.aborted)) throw staleApplyError();
+          if (wait) {
+            await wait;
+            if (registry.get(id) !== rec || destroyed || generation !== applyGeneration || (signal && signal.aborted)) throw staleApplyError();
+          }
         } else {
           throw new Error('unknown item type: ' + item.type);
+        }
+        // Item code can synchronously remove or replace itself while its
+        // script is inserted. Never publish an applied event for that dead
+        // lifecycle (or let it reconcile the replacement record).
+        if (registry.get(id) !== rec || destroyed || generation !== applyGeneration || (signal && signal.aborted)) {
+          throw staleApplyError();
         }
         bus.emit('ihtml:item-applied', { id, type: item.type, page: rec.page });
         shell.reconcile();
@@ -1162,6 +1394,7 @@
       runTeardowns(id);
       removeItemNodes(id);
       registry.delete(id);
+      currentItemErrors.delete(id);
       shell.reconcile();
       if (typeof templateStudio !== 'undefined') templateStudio.updateUnassigned();
       bus.emit('ihtml:item-removed', { id });
@@ -1210,6 +1443,102 @@
       if (rec) rec.teardowns.push(off);
       else addDisposer(off);
       return off;
+    }
+
+    function lifecycleItemRec(id, lifecycle) {
+      if (lib.runtime && typeof lib.runtime.itemLifecycleRecord === 'function') {
+        return lib.runtime.itemLifecycleRecord(registry, id, lifecycle);
+      }
+      const rec = registry.get(String(id || ''));
+      return rec && rec.lifecycle === lifecycle ? rec : null;
+    }
+    function lifecyclePoll(id, lifecycle, fn, ms) {
+      const rec = lifecycleItemRec(id, lifecycle);
+      if (!rec || typeof fn !== 'function') return () => {};
+      let active = true;
+      const off = () => {
+        if (!active) return;
+        active = false;
+        clearInterval(timer);
+      };
+      const invoke = () => {
+        if (!lifecycleItemRec(id, lifecycle)) { off(); return; }
+        try { fn(); } catch (e) { errors.report(id, 'poll: ' + e, e && e.stack, lifecycle); }
+      };
+      const timer = setInterval(invoke, Math.max(250, ms || 30000));
+      rec.teardowns.push(off);
+      invoke();
+      return off;
+    }
+    function lifecycleListen(id, lifecycle, target, ev, fn) {
+      const rec = lifecycleItemRec(id, lifecycle);
+      if (!rec || !target || typeof target.addEventListener !== 'function' || typeof fn !== 'function') return () => {};
+      let active = true;
+      const guarded = (...args) => {
+        if (!lifecycleItemRec(id, lifecycle)) { off(); return; }
+        return fn.apply(target, args);
+      };
+      const off = () => {
+        if (!active) return;
+        active = false;
+        target.removeEventListener(ev, guarded);
+      };
+      target.addEventListener(ev, guarded);
+      rec.teardowns.push(off);
+      return off;
+    }
+    function lifecycleTeardown(id, lifecycle, fn) {
+      if (typeof fn !== 'function') return false;
+      const rec = lifecycleItemRec(id, lifecycle);
+      if (!rec) {
+        // A top-level-await module can resume after replacement. Its cleanup
+        // belongs to the dead record, never the new same-ID Item.
+        try { fn(); } catch (e) { console.warn('[ihtml] stale module teardown:', e); }
+        return false;
+      }
+      let active = true;
+      const run = () => {
+        if (!active) return;
+        active = false;
+        fn();
+      };
+      rec.teardowns.push(run);
+      return true;
+    }
+    function createItemFacade(id, lifecycle) {
+      id = String(id || '');
+      const itemMethods = Object.create(items);
+      const errorMethods = Object.create(errors);
+      Object.defineProperty(itemMethods, 'onTeardown', {
+        configurable: true,
+        enumerable: true,
+        value: (idOrFn, maybeFn) => lifecycleTeardown(id, lifecycle, typeof idOrFn === 'function' ? idOrFn : maybeFn),
+      });
+      Object.defineProperties(itemMethods, {
+        list: { configurable: true, enumerable: true, value: () => lifecycleItemRec(id, lifecycle) ? items.list() : [] },
+        apply: { configurable: true, enumerable: true, value: (...args) => lifecycleItemRec(id, lifecycle) ? items.apply(...args) : Promise.resolve([]) },
+        remove: { configurable: true, enumerable: true, value: (...args) => lifecycleItemRec(id, lifecycle) ? items.remove(...args) : false },
+        refresh: { configurable: true, enumerable: true, value: (...args) => lifecycleItemRec(id, lifecycle) ? items.refresh(...args) : Promise.resolve([]) },
+        save: { configurable: true, enumerable: true, value: (...args) => lifecycleItemRec(id, lifecycle) ? items.save(...args) : Promise.resolve(null) },
+        delete: { configurable: true, enumerable: true, value: (...args) => lifecycleItemRec(id, lifecycle) ? items.delete(...args) : Promise.resolve(null) },
+      });
+      Object.defineProperty(errorMethods, 'report', {
+        configurable: true,
+        enumerable: true,
+        value: (...args) => {
+          const explicit = args.length > 1;
+          errors.report(id, explicit ? args[1] : args[0], explicit ? args[2] : undefined, lifecycle);
+        },
+      });
+      const facade = Object.create(api);
+      Object.defineProperties(facade, {
+        poll: { configurable: true, enumerable: true, value: (fn, ms) => lifecyclePoll(id, lifecycle, fn, ms) },
+        listen: { configurable: true, enumerable: true, value: (target, ev, fn) => lifecycleListen(id, lifecycle, target, ev, fn) },
+        onTeardown: { configurable: true, enumerable: true, value: (fn) => lifecycleTeardown(id, lifecycle, fn) },
+        items: { configurable: true, enumerable: true, value: itemMethods },
+        errors: { configurable: true, enumerable: true, value: errorMethods },
+      });
+      return facade;
     }
 
     const items = {
@@ -3471,6 +3800,9 @@
       const menuHost = typeof opts.menu === 'string' ? doc.querySelector(opts.menu) : opts.menu;
       if (menuHost) {
         const menuRoot = el('div', 'ihtml-root ihtml-menu-root');
+        // 菜单是该 mount 的第二个根；与主根共用实例标识，
+        // 让精确 @scope 既不泄漏到别的 mount，也不会丢掉本实例菜单样式。
+        menuRoot.dataset.ihtmlInstance = instanceKey;
         const menuNav = el('nav', 'ihtml-hostmenu');
         menuRoot.appendChild(menuNav);
         menuHost.appendChild(menuRoot);
@@ -3649,16 +3981,17 @@
         body.append(row, el('p', 'ui-muted ihtml-layout-entry-note', T('item_editor_template_hint')));
       },
       build() {
+        const panelID = 'ihtml-panel-' + instanceID + '-' + (++dialogSeq);
         const mask = el('div', 'ihtml-chat-mask');
         mask.onclick = () => this.close();
         const box = el('div', 'ihtml-panel');
         box.setAttribute('role', 'dialog');
         box.setAttribute('aria-modal', 'true');
-        box.setAttribute('aria-labelledby', 'ihtml-panel-title');
+        box.setAttribute('aria-labelledby', panelID + '-title');
         box.addEventListener('keydown', (ev) => handleDialogKey(ev, box, () => this.close()));
         const head = el('div', 'head');
         const heading = el('h2', 'title', T('panel_title'));
-        heading.id = 'ihtml-panel-title';
+        heading.id = panelID + '-title';
         head.appendChild(heading);
         const closeBtn = el('button', 'close', T('close'));
         closeBtn.type = 'button';
@@ -3674,9 +4007,9 @@
           const b = el('button', '', label);
           b.type = 'button';
           b.dataset.tab = key;
-          b.id = 'ihtml-panel-tab-' + key;
+          b.id = panelID + '-tab-' + key;
           b.setAttribute('role', 'tab');
-          b.setAttribute('aria-controls', 'ihtml-panel-body');
+          b.setAttribute('aria-controls', panelID + '-body');
           b.onclick = () => this.switch(key);
           tabBar.appendChild(b);
           tabs.push(b);
@@ -3692,7 +4025,7 @@
           if (tabs[next]) { this.switch(tabs[next].dataset.tab); tabs[next].focus(); }
         });
         const body = el('div', 'pbody');
-        body.id = 'ihtml-panel-body';
+        body.id = panelID + '-body';
         body.setAttribute('role', 'tabpanel');
         box.append(head, tabBar, body);
         rootEl.append(mask, box);
@@ -4057,10 +4390,11 @@
     // 稳定会话号: 存 sessionStorage, 断线/刷新重连恢复上下文; 新会话=换号
     function chatSessionID(renew) {
       let id = '';
-      try { id = sessionStorage.getItem('ihtml.csid') || ''; } catch { /* 忽略 */ }
+      const key = storageKey('csid');
+      try { id = sessionStorage.getItem(key) || ''; } catch { /* 忽略 */ }
       if (!id || renew) {
         id = 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
-        try { sessionStorage.setItem('ihtml.csid', id); } catch { /* 忽略 */ }
+        try { sessionStorage.setItem(key, id); } catch { /* 忽略 */ }
       }
       return id;
     }
@@ -4349,7 +4683,7 @@
           this.dom.modeHint.textContent = manual ? T('agent_deep_manual') : T(this.agentMode === 'deep' ? 'agent_deep_hint' : 'agent_fast_hint');
         }
         if (persist) {
-          try { localStorage.setItem('ihtml.agent_mode', this.agentMode); } catch { /* 忽略 */ }
+          try { localStorage.setItem(storageKey('agent_mode'), this.agentMode); } catch { /* 忽略 */ }
         }
       },
       resizeComposer() {
@@ -4422,7 +4756,7 @@
           }
           let saved = '';
           if (info.model_select) {
-            try { saved = localStorage.getItem('ihtml.model') || ''; } catch { /* 忽略 */ }
+            try { saved = localStorage.getItem(storageKey('model')) || ''; } catch { /* 忽略 */ }
           }
           const preferred = saved && (!models.length || models.includes(saved))
             ? saved
@@ -4430,7 +4764,7 @@
           modelInput.value = preferred || '';
           this.saveModel(modelInput.value.trim());
           let savedMode = '';
-          try { savedMode = localStorage.getItem('ihtml.agent_mode') || ''; } catch { /* 忽略 */ }
+          try { savedMode = localStorage.getItem(storageKey('agent_mode')) || ''; } catch { /* 忽略 */ }
           this.setAgentMode(chatAgentCore.selectMode(this.agentModes, savedMode || this.agentMode), true);
           this.setAvailabilityNote(info.model_ready === false);
           this.syncChatControls();
@@ -4448,7 +4782,7 @@
       },
       saveModel(m) {
         this.model = m || '';
-        try { localStorage.setItem('ihtml.model', this.model); } catch { /* 忽略 */ }
+        try { localStorage.setItem(storageKey('model'), this.model); } catch { /* 忽略 */ }
       },
 
       scroll(force) {
@@ -4619,34 +4953,97 @@
       // 回传每个 Item 的实时渲染状态, 让 AI 基于真实屏幕自检而不是猜测。
       sendInspectResult(ev) {
         if (!ev || !ev.inspect_id || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+        // v1 旧服务端只发 inspect_id。对这种请求保留旧的“一次全量”
+        // 应答（服务端旧上限 200），不能默认切成 20 项后让旧端误以为已完整。
+        const legacyInspect = ev.inspect_offset == null && ev.inspect_limit == null && ev.inspect_ids == null;
+        const requested = !legacyInspect && Array.isArray(ev.inspect_ids)
+          ? Array.from(new Set(ev.inspect_ids.map((id) => String(id || '').trim()).filter(Boolean))).slice(0, 20)
+          : [];
+        const source = requested.length
+          ? requested.map((id) => [id, registry.get(id) || null])
+          : Array.from(registry.entries());
+        const total = source.length;
+        const range = lib.runtime && typeof lib.runtime.inspectRange === 'function'
+          ? lib.runtime.inspectRange(total, ev.inspect_offset, ev.inspect_limit, legacyInspect)
+          : legacyInspect
+            ? { offset: 0, limit: 200 }
+            : { offset: Math.max(0, Math.min(total, Math.floor(Number(ev.inspect_offset) || 0))), limit: Math.max(1, Math.min(20, Math.floor(Number(ev.inspect_limit) || 20))) };
+        const { offset, limit } = range;
         const items = [];
-        const lastErrorFor = (id) => {
-          for (let i = errorLog.length - 1; i >= 0; i--) {
-            if (errorLog[i].item_id === id) return clip(errorLog[i].message, 300);
-          }
-          return '';
+        const lastErrorFor = (id) => clip(currentItemErrors.get(id) || '', 300);
+        const visualRect = (node) => {
+          let rect = node && node.getBoundingClientRect ? node.getBoundingClientRect() : null;
+          if (rect && rect.width > 0 && rect.height > 0) return rect;
+          // display:contents 自身没有 box，但其文本/子元素仍可能真正显示。
+          // Range 可在不扫描整棵子树的情况下给出内容外接矩形。
+          try {
+            const range = doc.createRange();
+            range.selectNodeContents(node);
+            const contentRect = range.getBoundingClientRect();
+            if (contentRect && contentRect.width > 0 && contentRect.height > 0) rect = contentRect;
+          } catch { /* 无可选内容 */ }
+          return rect;
         };
-        for (const [id, rec] of registry) {
-          const node = (rec.nodes || []).find((n) => n && n.isConnected);
+        const actuallyVisible = (node, rect) => {
+          const viewport = {
+            width: doc.documentElement.clientWidth || innerWidth,
+            height: doc.documentElement.clientHeight || innerHeight,
+          };
+          const clips = [];
+          const clipping = new Set(['hidden', 'clip', 'scroll', 'auto']);
+          for (let current = node; current && current.nodeType === 1; current = current.parentElement) {
+            const style = getComputedStyle(current);
+            const opacity = Number.parseFloat(style.opacity);
+            if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' ||
+                style.contentVisibility === 'hidden' || (Number.isFinite(opacity) && opacity <= 0)) return false;
+            if (current !== node) {
+              const clipX = clipping.has(style.overflowX);
+              const clipY = clipping.has(style.overflowY);
+              if ((clipX || clipY) && current.getBoundingClientRect) {
+                const outer = current.getBoundingClientRect();
+                const left = outer.left + (current.clientLeft || 0);
+                const top = outer.top + (current.clientTop || 0);
+                const width = current.clientWidth;
+                const height = current.clientHeight;
+                if (style.display !== 'contents') {
+                  clips.push({
+                    left, top, right: left + Math.max(0, width), bottom: top + Math.max(0, height),
+                    clipX, clipY,
+                  });
+                }
+              }
+            }
+            if (current === doc.documentElement) break;
+          }
+          if (lib.runtime && typeof lib.runtime.rectVisible === 'function') return lib.runtime.rectVisible(rect, viewport, clips);
+          if (!rect || rect.right <= 0 || rect.bottom <= 0 || rect.left >= viewport.width || rect.top >= viewport.height) return false;
+          return clips.every((clipRect) =>
+            (!clipRect.clipX || (rect.right > clipRect.left && rect.left < clipRect.right)) &&
+            (!clipRect.clipY || (rect.bottom > clipRect.top && rect.top < clipRect.bottom)));
+        };
+        for (const [id, rec] of source.slice(offset, offset + limit)) {
+          const node = ((rec && rec.nodes) || []).find((n) => n && n.isConnected);
           const view = {
             id,
-            type: (rec.item && rec.item.type) || '',
-            page: rec.page || '',
-            slot: (rec.item && rec.item.meta && rec.item.meta.slot) || '',
+            type: (rec && rec.item && rec.item.type) || '',
+            page: (rec && rec.page) || '',
+            slot: (rec && rec.item && rec.item.meta && rec.item.meta.slot) || '',
             present: !!node,
           };
           if (node && node.getBoundingClientRect) {
-            const rect = node.getBoundingClientRect();
+            const rect = visualRect(node);
             view.width = Math.round(rect.width);
             view.height = Math.round(rect.height);
-            view.visible = rect.width > 0 && rect.height > 0;
+            view.visible = actuallyVisible(node, rect);
             view.text = clip((node.innerText || '').trim(), 200);
           }
           const err = lastErrorFor(id);
           if (err) view.error = err;
           items.push(view);
         }
+        const nextOffset = offset + items.length < total ? offset + items.length : 0;
         const recent = errorLog.slice(-8).map((e) => clip((e.item_id ? e.item_id + ': ' : '') + e.message, 300));
+        const currentTheme = theme.get();
         try {
           this.ws.send(JSON.stringify({
             type: 'inspect_result',
@@ -4654,10 +5051,15 @@
             inspect: {
               page: nav.currentPage,
               viewport: { width: env.width, height: env.height, mode: env.mode },
-              theme_mode: theme.get().mode || '',
+              theme_mode: currentTheme.dark ? 'dark' : 'light',
+              total,
+              offset,
+              limit,
+              next_offset: nextOffset,
+              truncated: nextOffset > 0,
               items,
               errors: recent,
-              visible_text: clip((appEl.innerText || '').trim(), 2000),
+              visible_text: offset === 0 ? clip((appEl.innerText || '').trim(), 1200) : '',
             },
           }));
         } catch (e) { /* 连接瞬断: 服务端工具会按离线超时返回 */ }
@@ -5482,9 +5884,16 @@
     let readOnly = false;
     let resolvedUser = '';
     async function loadConfig() {
+      const epoch = requestEpoch;
       const cfg = await http.get('api/config');
+      if (destroyed || epoch !== requestEpoch) throw staleRequestError();
+      const previousStorageNamespace = storageNamespace(resolvedUser);
       resolvedUser = String((cfg && cfg.user) || '');
       api.user = resolvedUser;
+      const migratedLegacyLocal = migrateLegacyStorageOnce();
+      // Cookie/header based resolvers may not expose a user hint before config.
+      // Once identity is known, switch to that user's instance-local cache.
+      if (!hostTheme && (migratedLegacyLocal || previousStorageNamespace !== storageNamespace(resolvedUser))) themeLoadLocal();
       if (Array.isArray(cfg && cfg.message_origins)) messageOrigins = cfg.message_origins.slice();
       api.config = (cfg && cfg.params) || {};
       readOnly = !!(cfg && cfg.read_only);
@@ -5550,6 +5959,7 @@
       clearTimeout(errTimer);
       errQueue = [];
       errorLog.length = 0;
+      currentItemErrors.clear();
       emptyState.hide();
       errorState.hide();
       if (safeModeNode) { safeModeNode.remove(); safeModeNode = null; }
@@ -5775,6 +6185,7 @@
       destroy() {
         if (destroyed) return;
         destroyed = true;
+        runtimeBridge.unregister(instanceKey, api);
         invalidateRequests();
         clearTimeout(errTimer);
         clearTimeout(envTimer);
@@ -5802,6 +6213,11 @@
         readyResolve({ destroyed: true });
       },
     };
+    Object.defineProperty(api, '__itemFacade', {
+      value: (id, lifecycle) => createItemFacade(id, lifecycle),
+      enumerable: false,
+    });
+    runtimeBridge.register(instanceKey, api);
     boot();
     return api;
   }
@@ -5838,44 +6254,129 @@
 
   /* ---------- 全局入口 ----------
    * 同一页面支持多个相互隔离的实例(内核状态全部在 createInstance 闭包内)。
-   * 兼容层: 第一个实例的 API 仍合并到 window.ihtml, 既有单实例宿主代码不变;
+   * 兼容层: 当前主实例的 API 由 window.ihtml 动态代理, 既有单实例宿主代码不变;
    * 多实例宿主请使用 mount() 的返回值操作各自实例。 */
   const liveInstances = new Set();
+  const mountedHosts = new WeakMap();
+  const mountingHosts = new WeakSet();
+  const compatibilityProxyKeys = new Set();
+  const compatibilityReservedKeys = new Set(['version', 'mounted', 'instances', 'mount', '__primary']);
   const globalAPI = {
     version: '0.6.0',
     mounted: false,
+    __primary: null,
     instances: () => Array.from(liveInstances),
     mount(hostEl, opts = {}) {
       if (typeof hostEl === 'string') hostEl = doc.querySelector(hostEl);
-      if (!hostEl || !hostEl.appendChild) throw new Error('ihtml.mount: container element required');
-      if (hostEl.__ihtmlMounted) throw new Error('ihtml: this element is already mounted (destroy() it first)');
-      if (opts.routing === 'hash' && liveInstances.size > 0) {
-        // location.hash 是页面级单资源, 第二个 hash 路由实例会互相踩踏。
-        console.warn('[ihtml] multiple instances should use the default memory routing; hash routing is page-global');
+      if (!hostEl || hostEl.nodeType !== 1 || typeof hostEl.getAttribute !== 'function' || typeof hostEl.appendChild !== 'function') {
+        throw new Error('ihtml.mount: container element required');
       }
-      const inst = createInstance(hostEl, opts);
-      hostEl.__ihtmlMounted = true;
-      liveInstances.add(inst);
-      const primary = !globalAPI.mounted;
-      const instDestroy = inst.destroy;
-      inst.destroy = () => {
-        instDestroy();
-        liveInstances.delete(inst);
-        delete hostEl.__ihtmlMounted;
-        if (globalAPI.__primary === inst) {
-          globalAPI.mounted = false;
-          globalAPI.__primary = null;
+      if (mountedHosts.has(hostEl)) throw new Error('ihtml: this element is already mounted (destroy() it first)');
+      if (mountingHosts.has(hostEl)) throw new Error('ihtml: this element is already being mounted');
+
+      // Reserve before reading options. A getter (or future synchronous hook)
+      // must not be able to re-enter mount() for the same host and create two
+      // roots. All validation remains before createInstance mutates the DOM.
+      mountingHosts.add(hostEl);
+      let inst = null;
+      try {
+        if (lib.runtime && typeof lib.runtime.normalizeMountOptions === 'function') {
+          opts = lib.runtime.normalizeMountOptions(opts, location.href, !!(opts && opts.standalone));
+        } else {
+          if (opts == null) opts = {};
+          if (typeof opts !== 'object') throw new TypeError('ihtml.mount: options must be an object');
+          opts = { ...opts };
+          const base = opts.base ? new URL(String(opts.base), location.href) : new URL('.', location.href);
+          if (base.protocol !== 'http:' && base.protocol !== 'https:') throw new TypeError('ihtml.mount: base must use http: or https:');
+          if (base.username || base.password) throw new TypeError('ihtml.mount: base must not contain credentials');
+          base.search = '';
+          base.hash = '';
+          if (!base.pathname.endsWith('/')) base.pathname += '/';
+          opts.base = base.href;
+          if (!opts.standalone) opts.params = new URLSearchParams(opts.params || {});
+          if (opts.storageKey != null) opts.storageKey = String(opts.storageKey);
+          if (Array.isArray(opts.messageOrigins)) opts.messageOrigins = opts.messageOrigins.slice();
+          opts.routing = opts.routing || (opts.standalone ? 'hash' : 'memory');
+          if (opts.routing !== 'memory' && opts.routing !== 'hash') throw new TypeError('ihtml.mount: routing must be "memory" or "hash"');
         }
-      };
-      if (primary) {
-        globalAPI.mounted = true;
-        globalAPI.__primary = inst;
-        Object.assign(globalAPI, inst);
+        if (typeof opts.menu === 'string') doc.querySelector(opts.menu); // validate selector before createInstance mutates DOM
+        else if (opts.menu && (opts.menu.nodeType !== 1 || typeof opts.menu.appendChild !== 'function')) {
+          throw new TypeError('ihtml.mount: menu must be an element or selector');
+        }
+        if (opts.theme === 'inherit') opts.theme = probeHostTheme(hostEl);
+        if (opts.routing === 'hash' && liveInstances.size > 0) {
+          // location.hash 是页面级单资源, 第二个 hash 路由实例会互相踩踏。
+          console.warn('[ihtml] multiple instances should use the default memory routing; hash routing is page-global');
+        }
+        inst = createInstance(hostEl, opts);
+        mountedHosts.set(hostEl, inst);
+        liveInstances.add(inst);
+        const instDestroy = inst.destroy;
+        let instanceDestroyed = false;
+        inst.destroy = () => {
+          if (instanceDestroyed) return;
+          instanceDestroyed = true;
+          const wasPrimary = globalAPI.__primary === inst;
+          try {
+            instDestroy();
+          } finally {
+            liveInstances.delete(inst);
+            if (mountedHosts.get(hostEl) === inst) mountedHosts.delete(hostEl);
+            if (wasPrimary || !globalAPI.__primary) syncGlobalPrimary(selectLivePrimary());
+          }
+        };
+        syncGlobalPrimary(selectLivePrimary());
+        return inst;
+      } catch (error) {
+        // A failure after createInstance returned still rolls back its DOM and
+        // listeners. Preflight failures simply release the reservation so the
+        // caller can correct the options and retry the same element.
+        if (inst) {
+          try { inst.destroy(); } catch { /* preserve the original mount error */ }
+          liveInstances.delete(inst);
+          if (mountedHosts.get(hostEl) === inst) mountedHosts.delete(hostEl);
+        }
+        throw error;
+      } finally {
+        mountingHosts.delete(hostEl);
       }
-      return inst;
     },
   };
-  window.ihtml = globalAPI;
+  function selectLivePrimary() {
+    if (lib.runtime && typeof lib.runtime.selectPrimary === 'function') {
+      return lib.runtime.selectPrimary(globalAPI.__primary, liveInstances);
+    }
+    return globalAPI.__primary && liveInstances.has(globalAPI.__primary)
+      ? globalAPI.__primary
+      : liveInstances.values().next().value || null;
+  }
+  function syncGlobalPrimary(primary) {
+    if (primary) {
+      for (const key of Object.keys(primary)) {
+        if (compatibilityReservedKeys.has(key) || compatibilityProxyKeys.has(key)) continue;
+        Object.defineProperty(globalAPI, key, {
+          configurable: true,
+          enumerable: true,
+          get: () => globalAPI.__primary ? globalAPI.__primary[key] : undefined,
+          set: (value) => { if (globalAPI.__primary) globalAPI.__primary[key] = value; },
+        });
+        compatibilityProxyKeys.add(key);
+      }
+    }
+    globalAPI.__primary = primary || null;
+    globalAPI.mounted = !!primary;
+  }
+  // Outside Item execution this remains the backward-compatible primary API.
+  // While a marked classic script is synchronously evaluating, window.ihtml
+  // resolves to its owner. Conflict-free inline code additionally gets a
+  // lexical ihtml binding; external/explicit window.ihtml users must capture
+  // that synchronous value rather than re-reading the global in a callback.
+  try {
+    Object.defineProperty(window, 'ihtml', {
+      configurable: true,
+      get: () => runtimeBridge.current() || globalAPI,
+    });
+  } catch { window.ihtml = globalAPI; }
 
   function declarativeOptions(d) {
     const o = {};
@@ -5885,6 +6386,7 @@
     if (d.chat === '0') o.chatEntry = false;
     if (d.locale) o.locale = d.locale;
     if (d.safe === '1') o.safe = true;
+    if (d.storageKey) o.storageKey = d.storageKey;
     const params = {};
     if (d.uid) params.uid = d.uid;
     if (d.params) { try { Object.assign(params, JSON.parse(d.params)); } catch { /* 忽略 */ } }
@@ -5904,7 +6406,7 @@
       return;
     }
     doc.querySelectorAll('[data-ihtml]').forEach((target) => {
-      if (target.__ihtmlMounted) return;
+      if (mountedHosts.has(target) || mountingHosts.has(target)) return;
       globalAPI.mount(target, declarativeOptions(target.dataset));
     });
   }

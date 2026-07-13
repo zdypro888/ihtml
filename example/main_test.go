@@ -67,6 +67,21 @@ func TestExampleChatConfigKeepsDeepExplicitAndBudgetsBounded(t *testing.T) {
 	}
 }
 
+func TestDemoInspectionNeverClaimsMissingItemLoadedBecauseOfOldError(t *testing.T) {
+	note := demoInspectionNote(&ihtml.ChatClientInspection{Items: []ihtml.ChatClientInspectionItem{{
+		ID: "ai-note", Present: false, Error: "historical error",
+	}}})
+	if !strings.Contains(note, "还没有找到") || strings.Contains(note, "已加载") {
+		t.Fatalf("missing Item was described as loaded: %q", note)
+	}
+	visible := demoInspectionNote(&ihtml.ChatClientInspection{Items: []ihtml.ChatClientInspectionItem{{
+		ID: "ai-note", Present: true, Visible: true,
+	}}})
+	if !strings.Contains(visible, "当前视口可见") {
+		t.Fatalf("visible Item was not accepted: %q", visible)
+	}
+}
+
 func TestExampleChatConfigAcceptsAnthropicEnvironment(t *testing.T) {
 	for _, key := range []string{
 		"IHTML_AI_BASE_URL", "IHTML_AI_PROVIDER", "IHTML_AI_API_KEY", "IHTML_AI_AUTH_TOKEN", "IHTML_AI_MODEL",

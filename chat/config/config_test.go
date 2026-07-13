@@ -42,6 +42,18 @@ func staticSecrets(value string) chatconfig.SecretResolver {
 	})
 }
 
+type typedNilSecretResolver struct{ value string }
+
+func (r *typedNilSecretResolver) ResolveSecret(context.Context, chatconfig.SecretRef) ([]byte, error) {
+	return []byte(r.value), nil // dereference proves the loader must reject/normalize first.
+}
+
+type typedNilReader struct{ data []byte }
+
+func (r *typedNilReader) Read(p []byte) (int, error) {
+	return copy(p, r.data), nil
+}
+
 func ExampleLoader() {
 	loader := chatconfig.NewLoader(chatconfig.Options{
 		Secrets: chatconfig.SecretResolverFunc(func(_ context.Context, ref chatconfig.SecretRef) ([]byte, error) {
@@ -108,6 +120,49 @@ func TestNoImplicitEnvironmentOrResolverFallback(t *testing.T) {
 	var typed *chatconfig.Error
 	if !errors.As(err, &typed) || typed.Kind != chatconfig.ErrorSecretUnavailable || typed.Path != "ai.auth" {
 		t.Fatalf("typed error = %#v", typed)
+	}
+}
+
+func TestTypedNilSecretResolverIsRejectedWithoutPanic(t *testing.T) {
+	var pointerResolver *typedNilSecretResolver
+	var functionResolver chatconfig.SecretResolverFunc
+	for name, resolver := range map[string]chatconfig.SecretResolver{
+		"pointer":  pointerResolver,
+		"function": functionResolver,
+	} {
+		t.Run(name, func(t *testing.T) {
+			opts := chatconfig.Options{Secrets: resolver}
+			err := opts.Validate()
+			if !errors.Is(err, chatconfig.ErrInvalidConfig) || !errors.Is(err, chatconfig.ErrSecretUnavailable) {
+				t.Fatalf("Options.Validate error = %v", err)
+			}
+			var typed *chatconfig.Error
+			if !errors.As(err, &typed) || typed.Kind != chatconfig.ErrorSecretUnavailable || typed.Path != "options.secrets" {
+				t.Fatalf("typed options error = %#v", typed)
+			}
+			if loader, err := chatconfig.NewLoaderChecked(opts); err == nil || loader != nil {
+				t.Fatalf("NewLoaderChecked loader=%v err=%v", loader, err)
+			}
+
+			// Source-compatible NewLoader treats typed nil exactly like plain nil;
+			// a credential-bearing document receives the established typed error.
+			loader := chatconfig.NewLoader(opts)
+			_, err = loader.Decode(context.Background(), strings.NewReader(
+				claudeConfig(`{"type":"auth_token","ref":"typed-nil"}`),
+			))
+			if !errors.Is(err, chatconfig.ErrSecretUnavailable) {
+				t.Fatalf("legacy NewLoader Decode error = %v", err)
+			}
+		})
+	}
+}
+
+func TestDecodeRejectsTypedNilReaderWithoutPanic(t *testing.T) {
+	var reader *typedNilReader
+	_, err := chatconfig.NewLoader(chatconfig.Options{}).Decode(context.Background(), reader)
+	var typed *chatconfig.Error
+	if !errors.As(err, &typed) || typed.Kind != chatconfig.ErrorSyntax || typed.Path != "$" {
+		t.Fatalf("typed-nil reader error = %#v (%v)", typed, err)
 	}
 }
 

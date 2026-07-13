@@ -43,11 +43,12 @@ type RevisionService interface {
 
 // KVService is the per-user JSON key/value capability.
 type KVService interface {
-	// KVGet 读取用户级 KV, 不存在返回 ErrNotFound。
+	// KVGet 读取用户级 KV, 不存在返回 ErrNotFound。ReservedKVPrefix 下的
+	// 内核键不属于公共 KV 能力，返回 ErrReservedKVKey。
 	KVGet(ctx context.Context, user, key string) (json.RawMessage, error)
-	// KVSet 写入用户级 KV 并广播变更事件。
+	// KVSet 写入用户级 KV 并广播变更事件；保留键返回 ErrReservedKVKey。
 	KVSet(ctx context.Context, user, key string, value json.RawMessage) error
-	// KVDelete 删除用户级 KV 并广播变更事件。
+	// KVDelete 删除用户级 KV 并广播变更事件；保留键返回 ErrReservedKVKey。
 	KVDelete(ctx context.Context, user, key string) error
 }
 
@@ -114,8 +115,16 @@ const (
 	maxRevisionByBytes     = 128
 )
 
-// reservedKVPrefix 下的键由内核/服务端内部使用, 拒绝通过公开 KV API 写入。
-const reservedKVPrefix = "__ihtml"
+// ReservedKVPrefix identifies kernel-owned keys that are intentionally hidden
+// from the public KVService. Use the dedicated Page, Template, Error, and
+// layout APIs instead of reading or mutating these records directly.
+const ReservedKVPrefix = "__ihtml"
+
+const reservedKVPrefix = ReservedKVPrefix
+
+// ErrReservedKVKey is returned by the public KVService when a caller attempts
+// to read, write, or delete a kernel-owned key.
+var ErrReservedKVKey = errors.New("ihtml: reserved kv key")
 
 var kvKeyPattern = regexp.MustCompile(`^[A-Za-z0-9._\-]{1,64}$`)
 
@@ -123,7 +132,8 @@ var kvKeyPattern = regexp.MustCompile(`^[A-Za-z0-9._\-]{1,64}$`)
 const MaxKVValueBytes = 64 << 10
 
 // userLock 返回该用户的互斥锁(固定分桶, 无内存泄漏), 用于串行化"读-改-写"。
-// 注意: 锁是进程内的, 多副本部署需保证同一用户路由到同一副本(见 README 部署章节)。
+// 它只覆盖当前 Handler；VersionedUserStateStore 通过 CAS+重试处理跨副本
+// 交错。只有 legacy/non-versioned Store 才仍需 sticky routing 或外部互斥。
 func (h *Handler) userLock(user string) *sync.Mutex {
 	f := fnv.New32a()
 	_, _ = f.Write([]byte(user))
@@ -132,8 +142,34 @@ func (h *Handler) userLock(user string) *sync.Mutex {
 
 // publish 统一出口: 计数 + 交给 Broadcaster。
 func (h *Handler) publish(user string, ev Event) {
+	h.publishEvents(user, ev)
+}
+
+// publishEvents 发布同一次权威提交产生的事件。内置 hub（或宿主
+// 显式声明为同序的 Broadcaster）保留每个增量；安全默认的外部
+// Broadcaster 将同一提交合并为一条 resync，避免客户端对一次变更
+// 连续执行多次完整刷新。
+func (h *Handler) publishEvents(user string, events ...Event) {
+	if len(events) == 0 {
+		return
+	}
+	if _, ordered := h.opts.broadcaster.(orderedIncrementalBroadcaster); ordered {
+		for _, ev := range events {
+			h.metric("events_published", 1)
+			h.opts.broadcaster.Publish(user, ev)
+		}
+		return
+	}
+
+	// Store 提交和外部消息发布不可能在同一个原子边界内。若 A 先提交
+	// 却晚于 B 发布，转发 A 的增量载荷会把客户端回滚到旧状态。
+	// 外部 Broadcaster 只发权威 resync，由客户端串行重读已提交状态。
+	reason := ResyncExternal
+	if len(events) == 1 && events[0].Type == EventResync && events[0].Reason != "" {
+		reason = events[0].Reason
+	}
 	h.metric("events_published", 1)
-	h.opts.broadcaster.Publish(user, ev)
+	h.opts.broadcaster.Publish(user, Event{Type: EventResync, Reason: reason})
 }
 
 // audit 同步调用宿主审计回调(未注册则忽略)。
@@ -483,13 +519,14 @@ func (h *Handler) Rollback(ctx context.Context, user, revisionID, by string) err
 		return err
 	}
 	h.metric("writes", 1)
-	h.publish(user, Event{Type: "items", Op: "rollback", By: by})
+	events := []Event{{Type: "items", Op: "rollback", By: by}}
 	if restorePages {
-		h.publish(user, Event{Type: "pages"})
+		events = append(events, Event{Type: "pages"})
 	}
 	if restoreTemplates {
-		h.publish(user, Event{Type: "templates", Op: "rollback", By: by})
+		events = append(events, Event{Type: "templates", Op: "rollback", By: by})
 	}
+	h.publishEvents(user, events...)
 	h.audit(ctx, user, "items.rollback", by, "rollback to "+revisionID, nil)
 	return nil
 }
@@ -501,9 +538,19 @@ func validateKVKey(key string) error {
 	return nil
 }
 
+func validatePublicKVKey(key string) error {
+	if err := validateKVKey(key); err != nil {
+		return err
+	}
+	if strings.HasPrefix(key, reservedKVPrefix) {
+		return fmt.Errorf("%w: %q", ErrReservedKVKey, key)
+	}
+	return nil
+}
+
 // KVGet 实现 Service。
 func (h *Handler) KVGet(ctx context.Context, user, key string) (json.RawMessage, error) {
-	if err := validateKVKey(key); err != nil {
+	if err := validatePublicKVKey(key); err != nil {
 		return nil, err
 	}
 	value, err := h.store.KVGet(ctx, user, key)
@@ -515,7 +562,7 @@ func (h *Handler) KVGet(ctx context.Context, user, key string) (json.RawMessage,
 
 // KVSet 实现 Service。
 func (h *Handler) KVSet(ctx context.Context, user, key string, value json.RawMessage) error {
-	if err := validateKVKey(key); err != nil {
+	if err := validatePublicKVKey(key); err != nil {
 		return err
 	}
 	if len(value) > MaxKVValueBytes {
@@ -527,28 +574,28 @@ func (h *Handler) KVSet(ctx context.Context, user, key string, value json.RawMes
 	lock := h.userLock(user)
 	lock.Lock()
 	defer lock.Unlock()
-	// 新键受数量配额约束(排除内核保留键), 防止 Item 脚本无限膨胀存储
-	if !strings.HasPrefix(key, reservedKVPrefix) {
-		if _, err := h.store.KVGet(ctx, user, key); errors.Is(err, ErrNotFound) {
-			keys, err := h.store.KVKeys(ctx, user)
-			if err != nil {
-				return err
+
+	if _, versioned := h.store.(VersionedUserStateStore); versioned {
+		// 配额判定与新键写入必须基于同一个版本并条件提交；
+		// 否则两个 Handler 都可能在上限前读到相同键数并各自写入。
+		if err := h.updateUserStateLocked(ctx, user, func(before UserState) (UserState, error) {
+			if err := checkKVQuota(before.KV, key, h.opts.limits.MaxKVKeysPerUser); err != nil {
+				return UserState{}, err
 			}
-			n := 0
-			for _, k := range keys {
-				if !strings.HasPrefix(k, reservedKVPrefix) {
-					n++
-				}
-			}
-			if limit := h.opts.limits.MaxKVKeysPerUser; limit > 0 && n >= limit {
-				return fmt.Errorf("kv keys quota exceeded (%d); 请清理不再使用的键", limit)
-			}
-		} else if err != nil {
+			next := cloneUserState(before)
+			next.KV[key] = append(json.RawMessage(nil), value...)
+			return next, nil
+		}); err != nil {
 			return err
 		}
-	}
-	if err := h.store.KVSet(ctx, user, key, value); err != nil {
-		return err
+	} else {
+		// 旧 Store 无条件写能力，保留历史路径和进程内 userLock 语义。
+		if err := h.checkLegacyKVQuota(ctx, user, key); err != nil {
+			return err
+		}
+		if err := h.store.KVSet(ctx, user, key, value); err != nil {
+			return err
+		}
 	}
 	h.metric("writes", 1)
 	h.publish(user, Event{Type: "kv", Key: key})
@@ -556,9 +603,54 @@ func (h *Handler) KVSet(ctx context.Context, user, key string, value json.RawMes
 	return nil
 }
 
+// checkKVQuota 在一个已读取的完整状态上判定新键配额。
+func checkKVQuota(kv map[string]json.RawMessage, key string, limit int) error {
+	if limit <= 0 || strings.HasPrefix(key, reservedKVPrefix) {
+		return nil
+	}
+	if _, exists := kv[key]; exists {
+		return nil
+	}
+	n := 0
+	for existing := range kv {
+		if !strings.HasPrefix(existing, reservedKVPrefix) {
+			n++
+		}
+	}
+	if n >= limit {
+		return fmt.Errorf("kv keys quota exceeded (%d); 请清理不再使用的键", limit)
+	}
+	return nil
+}
+
+func (h *Handler) checkLegacyKVQuota(ctx context.Context, user, key string) error {
+	if strings.HasPrefix(key, reservedKVPrefix) {
+		return nil
+	}
+	if _, err := h.store.KVGet(ctx, user, key); err == nil {
+		return nil
+	} else if !errors.Is(err, ErrNotFound) {
+		return err
+	}
+	keys, err := h.store.KVKeys(ctx, user)
+	if err != nil {
+		return err
+	}
+	n := 0
+	for _, existing := range keys {
+		if !strings.HasPrefix(existing, reservedKVPrefix) {
+			n++
+		}
+	}
+	if limit := h.opts.limits.MaxKVKeysPerUser; limit > 0 && n >= limit {
+		return fmt.Errorf("kv keys quota exceeded (%d); 请清理不再使用的键", limit)
+	}
+	return nil
+}
+
 // KVDelete 实现 Service。
 func (h *Handler) KVDelete(ctx context.Context, user, key string) error {
-	if err := validateKVKey(key); err != nil {
+	if err := validatePublicKVKey(key); err != nil {
 		return err
 	}
 	lock := h.userLock(user)
@@ -567,6 +659,7 @@ func (h *Handler) KVDelete(ctx context.Context, user, key string) error {
 	if err := h.store.KVDelete(ctx, user, key); err != nil {
 		return err
 	}
+	h.metric("writes", 1)
 	h.publish(user, Event{Type: "kv", Key: key})
 	h.audit(ctx, user, "kv.delete", "", "", map[string]any{"key": key})
 	return nil
@@ -581,6 +674,13 @@ func (h *Handler) PageErrors(ctx context.Context, user string) ([]PageError, err
 	if err != nil {
 		return nil, err
 	}
+	return decodePageErrors(raw)
+}
+
+func decodePageErrors(raw json.RawMessage) ([]PageError, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
 	var out []PageError
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return nil, fmt.Errorf("corrupt page error log: %w", err)
@@ -588,38 +688,75 @@ func (h *Handler) PageErrors(ctx context.Context, user string) ([]PageError, err
 	return out, nil
 }
 
+func (h *Handler) recordReportedErrors(count int) {
+	h.metric("errors_reported", int64(count))
+	h.metric("writes", 1)
+}
+
 // ReportErrors 实现 Service。
 func (h *Handler) ReportErrors(ctx context.Context, user string, errs []PageError) error {
 	if len(errs) == 0 {
 		return nil
 	}
+	// 不修改调用方切片；CAS 冲突重试也始终使用同一份规范化输入。
+	normalized := append([]PageError(nil), errs...)
+	now := time.Now()
+	for i := range normalized {
+		if normalized[i].Time.IsZero() {
+			normalized[i].Time = now
+		}
+		normalized[i].Message = clip(normalized[i].Message, 2048)
+		normalized[i].Stack = clip(normalized[i].Stack, 4096)
+		normalized[i].URL = clip(normalized[i].URL, 512)
+		normalized[i].ItemID = clip(normalized[i].ItemID, 128)
+	}
+
 	lock := h.userLock(user)
 	lock.Lock()
 	defer lock.Unlock()
 
+	merge := func(current []PageError) (json.RawMessage, error) {
+		merged := append(append([]PageError(nil), normalized...), current...)
+		if len(merged) > MaxPageErrors {
+			merged = merged[:MaxPageErrors]
+		}
+		return json.Marshal(merged)
+	}
+
+	if _, versioned := h.store.(VersionedUserStateStore); versioned {
+		if err := h.updateUserStateLocked(ctx, user, func(before UserState) (UserState, error) {
+			current, err := decodePageErrors(before.KV[errorsKVKey])
+			if err != nil {
+				return UserState{}, err
+			}
+			raw, err := merge(current)
+			if err != nil {
+				return UserState{}, err
+			}
+			next := cloneUserState(before)
+			next.KV[errorsKVKey] = raw
+			return next, nil
+		}); err != nil {
+			return err
+		}
+		h.recordReportedErrors(len(normalized))
+		return nil
+	}
+
+	// 旧 Store 仍用进程内锁保护历史读改写路径。
 	current, err := h.PageErrors(ctx, user)
 	if err != nil {
 		return err
 	}
-	now := time.Now()
-	for i := range errs {
-		if errs[i].Time.IsZero() {
-			errs[i].Time = now
-		}
-		errs[i].Message = clip(errs[i].Message, 2048)
-		errs[i].Stack = clip(errs[i].Stack, 4096)
-		errs[i].URL = clip(errs[i].URL, 512)
-		errs[i].ItemID = clip(errs[i].ItemID, 128)
-	}
-	merged := append(errs, current...)
-	if len(merged) > MaxPageErrors {
-		merged = merged[:MaxPageErrors]
-	}
-	raw, err := json.Marshal(merged)
+	raw, err := merge(current)
 	if err != nil {
 		return err
 	}
-	return h.store.KVSet(ctx, user, errorsKVKey, raw)
+	if err := h.store.KVSet(ctx, user, errorsKVKey, raw); err != nil {
+		return err
+	}
+	h.recordReportedErrors(len(normalized))
+	return nil
 }
 
 func clip(s string, max int) string {
@@ -1003,15 +1140,17 @@ func (h *Handler) DeletePage(ctx context.Context, user, name, by string) ([]stri
 		return nil, nil
 	}
 	// 所有广播都在原子提交成功后发生，客户端不会观察到半删除状态。
+	events := make([]Event, 0, 2+len(layoutKeys))
 	if pageFound {
-		h.publish(user, Event{Type: "pages"})
+		events = append(events, Event{Type: "pages"})
 	}
 	if len(ids) > 0 {
-		h.publish(user, Event{Type: "items", Op: "delete", IDs: ids, By: by})
+		events = append(events, Event{Type: "items", Op: "delete", IDs: ids, By: by})
 	}
 	for _, key := range layoutKeys {
-		h.publish(user, Event{Type: "kv", Key: key})
+		events = append(events, Event{Type: "kv", Key: key})
 	}
+	h.publishEvents(user, events...)
 	h.metric("writes", 1)
 	h.audit(ctx, user, "page.delete", by, "", map[string]any{"page": name, "ids": ids, "layout_keys": layoutKeys})
 	return ids, nil
@@ -1237,15 +1376,20 @@ func (h *Handler) ImportUser(ctx context.Context, user string, export *UserExpor
 	if err != nil {
 		return err
 	}
-	h.publish(user, Event{Type: "items", Op: "import", By: "import"})
-	h.publish(user, Event{Type: "pages"})
-	h.publish(user, Event{Type: "templates", Op: "import", By: "import"})
+	h.publishEvents(user,
+		Event{Type: "items", Op: "import", By: "import"},
+		Event{Type: "pages"},
+		Event{Type: "templates", Op: "import", By: "import"},
+	)
 	h.metric("writes", 1)
 	h.audit(ctx, user, "user.import", "import", "", map[string]any{"items": len(export.Items), "pages": len(export.Pages)})
 	return nil
 }
 
-// PurgeUser 删除该用户全部数据(注销/GDPR)。
+// PurgeUser 清空该用户的全部业务载荷。VersionedUserStateStore 会保留一个
+// 递增版本墓碑以阻止旧 CAS 复活数据；SQL 实现因此仍保留版本表中的用户键。
+// 需要物理抹除身份标识时，宿主必须先停止该用户的全部 writer，再按自己的
+// 保留策略清理墓碑；不能把本方法单独当作完整的 GDPR 擦除流程。
 func (h *Handler) PurgeUser(ctx context.Context, user string) error {
 	lock := h.userLock(user)
 	lock.Lock()
@@ -1253,9 +1397,12 @@ func (h *Handler) PurgeUser(ctx context.Context, user string) error {
 	if err := h.store.EraseUser(ctx, user); err != nil {
 		return err
 	}
-	h.publish(user, Event{Type: "items", Op: "purge", By: "api"})
-	h.publish(user, Event{Type: "pages"})
-	h.publish(user, Event{Type: "templates", Op: "purge", By: "api"})
+	h.metric("writes", 1)
+	h.publishEvents(user,
+		Event{Type: "items", Op: "purge", By: "api"},
+		Event{Type: "pages"},
+		Event{Type: "templates", Op: "purge", By: "api"},
+	)
 	h.audit(ctx, user, "user.purge", "api", "", nil)
 	return nil
 }

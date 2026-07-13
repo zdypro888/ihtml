@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/zdypro888/ihtml"
+	"github.com/zdypro888/ihtml/internal/nilcheck"
 )
 
 const confirmationTTL = 15 * time.Minute
@@ -54,7 +55,7 @@ func pickConfirmNonceStore(nonceStores []ConfirmNonceStore) ConfirmNonceStore {
 	if len(nonceStores) > 0 {
 		nonceStore = nonceStores[0]
 	}
-	if nonceStore == nil {
+	if nilcheck.IsNil(nonceStore) {
 		nonceStore = newMemoryConfirmNonceStore()
 	}
 	return nonceStore

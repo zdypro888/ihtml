@@ -16,6 +16,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/zdypro888/ihtml/internal/nilcheck"
 )
 
 // Only production assets belong in downstream binaries. Tests and design
@@ -89,7 +91,7 @@ func New(store Store, opts ...Option) *Handler {
 
 // NewHandler validates dependencies and options, then creates a Handler.
 func NewHandler(store Store, opts ...Option) (*Handler, error) {
-	if store == nil {
+	if nilcheck.IsNil(store) {
 		return nil, &HandlerConfigError{Field: "Store", Problem: "is required"}
 	}
 	o := options{
@@ -110,6 +112,20 @@ func NewHandler(store Store, opts ...Option) (*Handler, error) {
 	}
 	if o.maxRevisions < 0 {
 		return nil, &HandlerConfigError{Field: "MaxRevisions", Problem: "cannot be negative"}
+	}
+	for _, dependency := range []struct {
+		field string
+		value any
+	}{
+		{field: "ChatBackend", value: o.chat},
+		{field: "Metrics", value: o.metrics},
+		{field: "Broadcaster", value: o.broadcaster},
+	} {
+		// A plain nil means the optional capability was not configured. A typed
+		// nil is non-nil at the interface level and must be reported explicitly.
+		if dependency.value != nil && nilcheck.IsNil(dependency.value) {
+			return nil, &HandlerConfigError{Field: dependency.field, Problem: "is a typed nil"}
+		}
 	}
 	if o.broadcaster == nil {
 		o.broadcaster = newHub()
@@ -741,9 +757,16 @@ func (h *Handler) handleRollback(w http.ResponseWriter, r *http.Request, user st
 }
 
 func (h *Handler) handleKVGet(w http.ResponseWriter, r *http.Request, user string) {
-	value, err := h.KVGet(r.Context(), user, r.PathValue("key"))
+	key := r.PathValue("key")
+	value, err := h.KVGet(r.Context(), user, key)
 	if err != nil {
-		h.writeError(w, http.StatusBadRequest, err)
+		status := http.StatusBadRequest
+		if errors.Is(err, ErrReservedKVKey) {
+			status = http.StatusForbidden
+		} else if errors.Is(err, ErrNotFound) {
+			status = http.StatusNotFound
+		}
+		h.writeError(w, status, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"value": value})
@@ -751,10 +774,6 @@ func (h *Handler) handleKVGet(w http.ResponseWriter, r *http.Request, user strin
 
 func (h *Handler) handleKVSet(w http.ResponseWriter, r *http.Request, user string) {
 	key := r.PathValue("key")
-	if strings.HasPrefix(key, reservedKVPrefix) {
-		h.writeError(w, http.StatusForbidden, fmt.Errorf("kv key %q is reserved", key))
-		return
-	}
 	var payload struct {
 		Value json.RawMessage `json:"value"`
 	}
@@ -763,7 +782,11 @@ func (h *Handler) handleKVSet(w http.ResponseWriter, r *http.Request, user strin
 		return
 	}
 	if err := h.KVSet(r.Context(), user, key, payload.Value); err != nil {
-		h.writeError(w, http.StatusBadRequest, err)
+		status := http.StatusBadRequest
+		if errors.Is(err, ErrReservedKVKey) {
+			status = http.StatusForbidden
+		}
+		h.writeError(w, status, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -771,12 +794,12 @@ func (h *Handler) handleKVSet(w http.ResponseWriter, r *http.Request, user strin
 
 func (h *Handler) handleKVDelete(w http.ResponseWriter, r *http.Request, user string) {
 	key := r.PathValue("key")
-	if strings.HasPrefix(key, reservedKVPrefix) {
-		h.writeError(w, http.StatusForbidden, fmt.Errorf("kv key %q is reserved", key))
-		return
-	}
 	if err := h.KVDelete(r.Context(), user, key); err != nil {
-		h.writeError(w, http.StatusBadRequest, err)
+		status := http.StatusBadRequest
+		if errors.Is(err, ErrReservedKVKey) {
+			status = http.StatusForbidden
+		}
+		h.writeError(w, status, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})

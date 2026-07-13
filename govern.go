@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/zdypro888/ihtml/internal/nilcheck"
 )
 
 // AuditEvent 是一次数据变更的审计记录, 经 WithAudit 同步交给宿主留痕。
@@ -125,8 +127,32 @@ func WithMetrics(m Metrics) Option {
 }
 
 // WithBroadcaster 替换事件广播通道(多副本部署必须, 见 Broadcaster 文档)。
+// 为了避免数据库提交与消息发布反序，该安全默认只向外部通道
+// 发送不携带状态载荷的 resync。Handler.Close 不接管外部 Broadcaster
+// 的生命周期；宿主仍须关闭它及其客户端。
 func WithBroadcaster(b Broadcaster) Option {
 	return func(o *options) { o.broadcaster = b }
+}
+
+// WithOrderedBroadcaster 显式声明宿主能保证同一用户的所有 Store 写入
+// （跨全部 Handler/副本）从提交前到 Publish 返回都处于一个全局串行
+// 边界内，因而允许 Handler 保留 items/templates/kv/pages 增量载荷。
+//
+// 这是一个需要宿主主动选择的危险能力：Broadcaster 自己按到达顺序
+// Publish 并不能修复两个副本“先提交、后发布”的反序。普通 Redis
+// Pub/Sub、NATS 或“数据库提交后再 publish”的实现都不满足条件，应继续
+// 使用 WithBroadcaster。典型安全场景是每个用户只有一个全局 writer，或宿主
+// 的分布式锁覆盖完整 Handler 写调用。Handler 无法验证该前提。
+func WithOrderedBroadcaster(b Broadcaster) Option {
+	return func(o *options) {
+		if nilcheck.IsNil(b) {
+			// Preserve a typed nil so NewHandler can identify the invalid explicit
+			// dependency instead of hiding it inside a non-nil ordered wrapper.
+			o.broadcaster = b
+			return
+		}
+		o.broadcaster = wrapOrderedBroadcaster(b)
+	}
 }
 
 var (

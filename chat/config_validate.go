@@ -6,6 +6,8 @@ import (
 	"net"
 	"net/url"
 	"strings"
+
+	"github.com/zdypro888/ihtml/internal/nilcheck"
 )
 
 // ErrInvalidConfig is returned by Config.Validate and NewChecked when a
@@ -107,6 +109,12 @@ func (c Config) Validate() error {
 	if len(c.ConfirmSecret) > 0 && len(c.ConfirmSecret) < 32 {
 		return configError("ConfirmSecret", "must contain at least 32 bytes")
 	}
+	if c.ConfirmNonceStore != nil && nilcheck.IsNil(c.ConfirmNonceStore) {
+		return configError("ConfirmNonceStore", "must not contain a typed nil implementation")
+	}
+	if c.SessionStore != nil && nilcheck.IsNil(c.SessionStore) {
+		return configError("SessionStore", "must not contain a typed nil implementation")
+	}
 	if c.WritesPerMinute < -1 {
 		return configError("WritesPerMinute", "must be -1, 0, or a positive value")
 	}
@@ -114,6 +122,14 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(c.ProbeBaseURL) != "" {
 		if _, _, err := validateProviderBaseURL(c.ProbeBaseURL); err != nil {
 			return configError("ProbeBaseURL", err.Error())
+		}
+	}
+	if c.ProbeHTTPClient != nil {
+		if c.ProbeHTTPClient.Transport != nil && nilcheck.IsNil(c.ProbeHTTPClient.Transport) {
+			return configError("ProbeHTTPClient.Transport", "must not contain a typed nil implementation")
+		}
+		if c.ProbeHTTPClient.Jar != nil && nilcheck.IsNil(c.ProbeHTTPClient.Jar) {
+			return configError("ProbeHTTPClient.Jar", "must not contain a typed nil implementation")
 		}
 	}
 	return nil

@@ -145,7 +145,7 @@ func TestCrossReplicaMixedWritesConverge(t *testing.T) {
 	}
 }
 
-// Store 级条件写语义: 版本单调、过期 expected 拒绝、EraseUser 归零。
+// Store 级条件写语义: 版本单调、过期 expected 拒绝、EraseUser 留下新 tombstone。
 func TestVersionedStoreSemantics(t *testing.T) {
 	ctx := context.Background()
 	for name, factory := range map[string]func(t *testing.T) VersionedUserStateStore{
@@ -191,16 +191,23 @@ func TestVersionedStoreSemantics(t *testing.T) {
 				t.Fatalf("replace after interleaved kv write must conflict, got %v", err)
 			}
 
-			// EraseUser 归零, expected=0 重新可用。
+			// EraseUser 保留更新的空 tombstone，旧 expected 不得复用。
+			beforeErase, err := store.UserState(ctx, "u")
+			if err != nil {
+				t.Fatal(err)
+			}
 			if err := store.(Store).EraseUser(ctx, "u"); err != nil {
 				t.Fatal(err)
 			}
 			erased, err := store.UserState(ctx, "u")
-			if err != nil || erased.Version != 0 {
-				t.Fatalf("erase must reset version: %d err=%v", erased.Version, err)
+			if err != nil || erased.Version <= beforeErase.Version || len(erased.Items) != 0 || len(erased.KV) != 0 || len(erased.Revisions) != 0 {
+				t.Fatalf("erase must preserve a newer empty tombstone: %+v err=%v", erased, err)
+			}
+			if err := store.ReplaceUserStateVersioned(ctx, "u", beforeErase, beforeErase.Version); !errors.Is(err, ErrVersionConflict) {
+				t.Fatalf("pre-erase expected version was reused: %v", err)
 			}
 			erased.Items = []Item{{ID: "c", Type: ItemHTML, Content: "<c/>"}}
-			if err := store.ReplaceUserStateVersioned(ctx, "u", erased, 0); err != nil {
+			if err := store.ReplaceUserStateVersioned(ctx, "u", erased, erased.Version); err != nil {
 				t.Fatal(err)
 			}
 		})

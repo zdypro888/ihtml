@@ -28,7 +28,7 @@
 | `ihtml/chat` | 内置 Eino AI 后端；程序化入口是 `chat.Config` + `chat.NewChecked` |
 | `ihtml/chat/config` | 严格、版本化、可嵌入宿主配置的 AI JSON loader；SecretResolver 显式注入 |
 | `ihtml/sqlstore` | `database/sql` 持久化实现；驱动与 `*sql.DB` 生命周期由宿主拥有 |
-| `ihtml/redisbroadcast` | 多副本实时事件：Redis Pub/Sub Broadcaster + 用户级全局单调版本；`*redis.Client` 由宿主拥有 |
+| `ihtml/redisbroadcast` | 多副本实时事件：非阻塞 Redis Pub/Sub + 用户级全局单调版本；`*redis.Client` 与 Broadcaster 生命周期均由宿主关闭 |
 | `ihtml/storetest` | 第三方 `Store` 实现的官方一致性验收套件（`storetest.Run`），内置 Store 同样由它验收 |
 
 旧的 `ihtml.New` / `chat.New` 为兼容保留；新集成推荐 `NewHandler` / `NewChecked`，让所有配置错误在开始监听前返回。公共协议字符串均有导出常量，模型能力响应带 `protocol_version`。当前仍处于 pre-v1 阶段；发布 v1 前会继续保持新增优先、破坏性调整集中并提供迁移说明。
@@ -44,20 +44,23 @@
 <script src="https://ui.example.com/ihtml.js"></script>
 
 <div id="their-nav"><!-- 宿主自己的侧栏里留给 ihtml 菜单的位置 --></div>
-<div data-ihtml
+<div id="customer-ui" data-ihtml
      data-base="https://ui.example.com/"  
      data-uid="alice"
+     data-ihtml-storage-key="customer-ui"
      data-theme="inherit"
      data-menu="#their-nav"></div>
 ```
 
 - `data-theme="inherit"`：挂载时探测宿主计算样式（背景亮度→明暗、正文色、字体、链接色→主色）自动融入宿主观感；也可显式 `data-theme='{"primary":"var(--brand-600)","mode":"dark"}'` 直接映射宿主设计变量
 - `data-menu`：多页时菜单渲染进宿主指定容器（单页/无页面时自动隐藏）；嵌入默认**内存路由**，不占宿主 `location.hash`
-- 内核样式全部收在 `.ihtml-root` 作用域内；嵌入时 Item CSS 也默认用 `@scope (.ihtml-root)` 隔离。跨域部署时服务端加 `ihtml.WithCORS("https://host.example.com")`
-- 等价的编程式：`ihtml.mount(el, {base, auth, connectionAuth, theme, routing, menu, chatEntry})`；宿主随时可调 `ihtml.theme.set/nav.go/chat.open`
-- **同页多实例**：`mount` 可多次调用（或写多个 `data-ihtml` 声明），实例间完全隔离，各自 `destroy()`；返回值即该实例 API。兼容层把第一个实例仍合并到 `window.ihtml`，既有单实例代码不用改。多实例请保持默认内存路由（hash 是页面级单资源）
+- 内核样式全部收在 `.ihtml-root` 作用域内；嵌入时 Item 的普通选择器默认精确限定到所属实例的 `data-ihtml-instance`。`@keyframes` / `@property` 等文档级命名仍需 Item 自行使用唯一前缀；跨域部署时服务端加 `ihtml.WithCORS("https://host.example.com")`
+- 等价的编程式：`ihtml.mount(el, {base, auth, connectionAuth, theme, routing, menu, chatEntry, storageKey})`；宿主随时可调 `ihtml.theme.set/nav.go/chat.open`
+- `base` 在挂载前严格解析，只接受不含用户名/密码的 HTTP(S) 目录 URL；其中 query/hash 属于页面状态，会被丢弃，身份参数请放入 `params`，凭据请放入 `auth` / `connectionAuth`
+- **同页多实例**：`mount` 可多次调用（或写多个 `data-ihtml` 声明），内核生成的 CSS 选择器边界、Item 词法 `ihtml` API、主题/模型/Agent 模式/对话会话缓存和内核 ARIA ID 均按实例隔离，各自 `destroy()`。Item 正文自带的 `id` 不会被重写，操作 Item DOM 必须从返回 API 的 `root` 开始查询。兼容层的 `window.ihtml` 动态指向当前主实例，主实例销毁后自动提升仍存活的第一个实例；多实例宿主仍必须保留每次 `mount()` 的返回值，并保持默认内存路由（hash 是页面级单资源）
+- `storageKey` / `data-ihtml-storage-key` 为实例提供跨刷新稳定的本地缓存身份；宿主元素有稳定 `id` 时可省略，否则建议显式设置。键还会按 `base` 和已解析用户隔离，切换身份不会复用上一用户的对话。升级时，首个成功解析身份的实例会一次性复制旧的无作用域主题、模型、Agent 模式和会话键；旧键保留供回滚，但不会再被第二个实例认领
 - 也支持 iframe 嵌入独立页。跨域父页面必须用 `WithMessageOrigins("https://host.example.com")` 显式放行 postMessage 与 CSP `frame-ancestors`
-- Item 中声明式的外部 `<script src>` / `<link rel=stylesheet>` 默认拒绝；只有受控宿主可显式设置 `allowExternalAssets:true`。这不是沙箱：Item 是可信可执行代码，仍可通过 JS、图片或 CSS 发起网络请求。兼容旧 CSS 时可临时设置 `scopeStyles:false`
+- Item 中声明式的外部 `<script src>` / `<link rel=stylesheet>` 默认拒绝；只有受控宿主可显式设置 `allowExternalAssets:true`。外链 stylesheet 是文档级资源，不能被内核 `@scope` 重写；外链 classic Item 脚本若需异步使用实例 API，必须在脚本同步顶层先捕获 `const instance = window.ihtml`，回调只使用 `instance`。外链 ES Module 没有可靠的 `document.currentScript`；多实例宿主应由自己的初始化函数显式传入 `mount()` 返回 API，或使用能注入词法 `ihtml` 的内联 module Item。这不是沙箱：Item 是可信可执行代码，仍可通过 JS、图片或 CSS 发起网络请求。兼容旧 CSS 时可临时设置 `scopeStyles:false`
 
 ## 快速开始
 
@@ -143,10 +146,13 @@ go run ./example -config example/ihtml.local.json
 这套加载能力不是 example 私有代码。第三方宿主可直接导入 `github.com/zdypro888/ihtml/chat/config`：
 
 ```go
-loader := chatconfig.NewLoader(chatconfig.Options{
+loader, err := chatconfig.NewLoaderChecked(chatconfig.Options{
     // 必须显式注入；nil 时 loader 绝不会偷偷读取 ANTHROPIC_* / IHTML_*。
     Secrets: chatconfig.NewOSSecretResolver(),
 })
+if err != nil {
+    return err // 包括 typed-nil SecretResolver 等宿主依赖错误
+}
 result, err := loader.DecodeSection(ctx, appConfig.AI) // appConfig.AI 是 json.RawMessage
 if err != nil {
     // errors.Is(err, chatconfig.ErrInvalidConfig / ErrSecretUnavailable)
@@ -227,12 +233,13 @@ go run ./example
 
 宿主用 `WithAPIs(...)` 声明业务接口（路径+参数/返回说明），目录进入 AI 系统提示。AI 的 `api_probe` 默认禁用；只有同时配置 `chat.Config.ProbeBaseURL` 后才能探测目录白名单内的 GET 路径。身份不会隐式转发，可用 `ProbeForwardHeaders`、`ProbeForwardQuery` 或 `ProbeRequest` 显式注入。Item 的 JS 直接 `fetch` 同源接口；配合 `WithPageConfig` 可注入每用户动态参数（`ihtml.config`）。
 
-### 页面运行时 `window.ihtml`
+### 页面运行时 `ihtml`
 
-Item 代码的"标准库"（也是 AI system prompt 里的 API 文档）：
+Item 内联代码会在无同名声明冲突时获得指向所属实例的词法 `ihtml`；内核不会用正则改写 Item 源码。内联 classic 脚本在 Item 局部函数作用域执行，若确实要导出全局能力，须显式写成 `window.foo = foo`，不要依赖顶层 `var`/函数声明。下表是 Item 的"标准库"（也是 AI system prompt 里的 API 文档）：
 
 | API | 用途 |
 |---|---|
+| `ihtml.root` | 当前实例根元素；用 `ihtml.root.querySelector(...)` 查 Item，不要从全局 `document` 查同名 Item |
 | `ihtml.nav.go/current/pages/onChange` | 路由：切页、当前页、页面列表（=菜单数据源）、监听 |
 | `ihtml.env` / `env.onChange(fn)` | `{mode:'pc'|'mobile', width, touch}` 设备感知 |
 | `ihtml.config` | 宿主经 `WithPageConfig` 注入的动态参数（只读） |
@@ -273,7 +280,7 @@ Item 样式引用 CSS 变量即可自动适配换肤与明暗模式：
 | `GET /api/revisions` · `GET /api/revisions/{id}` | 快照列表 / 内容 |
 | `POST /api/revisions/{id}/rollback` | 回滚（回滚前自动再存一份快照） |
 | `GET /api/export` | 导出该用户全量数据（v3 备份契约，与 `ExportUser` 一致） |
-| `GET/PUT/DELETE /api/kv/{key}` | 用户级 KV（体：`{"value":…}`；`__ihtml` 前缀保留） |
+| `GET/PUT/DELETE /api/kv/{key}` | 用户级 KV（体：`{"value":…}`；缺失读取返回 404；`__ihtml` 前缀的读/写/删统一拒绝） |
 | `GET /api/events` | SSE：带单调 `version` 的变更事件；订阅、溢出或周期校准会发送 `resync` |
 | `GET/POST /api/errors` | 页面错误查看 / 上报 |
 | `GET /api/config` | `{"user":"…","chat":true}` |
@@ -294,7 +301,7 @@ Template 只定义可复用结构。新业务 Item 通过 `Item.Meta["slot"] == 
 - 有界执行：`MaxModelCallsPerTurn`（默认 24）、`MaxSubtasksPerTurn`（默认 3）与 `MaxTurnDuration`（默认 2 分钟）由根/子 Agent 共享；前端可消费结构化 `assistant_plan`、`assistant_agent`、`assistant_budget` 事件展示计划、子任务和预算，而不必解析自然语言
 - 过程事件：`assistant_thinking` 是增量流，不是一次性快照；同一次模型输出共享 `thinking_id`，最后一条带 `thinking_done:true`。客户端应按 ID 追加并在 done 后折叠。`assistant_done.message` 是权威最终快照，可覆盖此前的流式草稿；工具按 `tool_call.id` 原位更新，`tool_result.tool_summary` 是面向用户的结果，`tool_result` / `tool_debug` 只适合放在折叠技术详情中
 - 确认后恢复：当前 Deep 能力值为 `manual_tool_only`——确认卡只执行卡片中的单个工具调用，整体计划保持暂停，不会在用户不知情时自动续跑；需要继续时由客户端发起新的用户轮次。未来接入 checkpoint 后再通过能力字段升级
-- 工具：`ui_item_list/get/put/delete`、`ui_items_replace`、`ui_page_list/set/delete`、`ui_theme_get/set`、`ui_kv_get/set`、`ui_revision_list/rollback`、`ui_page_errors`、`ui_page_inspect`（经会话 WS 请求内核回传实时渲染状态：每个 Item 是否渲染/可见/尺寸/文本摘要/报错；页面离线时数秒超时返回）、`api_probe`（只读探测业务 API）、`ui_plan_update`（Deep 模式的结构化计划工具），以及结构专用的 `ui_template_get/put_current/publish/slot_delete`
+- 工具：`ui_item_list/get/put/delete`、`ui_items_replace`、`ui_page_list/set/delete`、`ui_theme_get/set`、`ui_kv_get/set`、`ui_revision_list/rollback`、`ui_page_errors`、`ui_page_inspect`（经会话 WS 请求内核回传实时渲染状态：按视口交集、祖先计算样式与 overflow 裁剪估算每个 Item 的可见性，并返回尺寸、文本摘要与报错；支持 `ids` 精确过滤及 `offset`/`limit` 分页，每页最多 20 项，按 `next_offset` 继续；页面离线时数秒超时返回）、`api_probe`（只读探测业务 API）、`ui_plan_update`（Deep 模式的结构化计划工具），以及结构专用的 `ui_template_get/put_current/publish/slot_delete`
 - Template 工具契约：`ui_template_get(page)` 只返回 Draft/Published 结构和 CAS revision，不读取 Item content；`put_current` 只接受完整结构 Draft（服务端严格拒绝未知字段、业务正文、HTML/CSS/JS/URL），保存后不会改变运行时；`publish` 才把 Draft 上线；`slot_delete` 保留 Item 并把引用迁入 Root fallback。所有 Template 写入都必须带 `expected_revision` 并确认
 - 风险控制：读操作直接执行；安装 HTML/JS/CSS 的 Item 写入、全部 Template 写入及所有高风险操作默认必须点确认卡（HMAC 签名 + 原子一次性 nonce + 15 分钟 TTL）。只有完全受控环境可用 `AllowUnconfirmedItemWrites=true` 放开普通 Item 写；`ConfirmWrites=true` 会进一步确认其余写操作
 - 多轮历史默认在 Backend 级内存中按 csid 恢复，并受会话数、每会话事件数、字节数与 TTL 四重上限约束；生产可注入持久化 `SessionStore`
@@ -304,22 +311,22 @@ Template 只定义可复用结构。新业务 Item 通过 `Item.Meta["slot"] == 
 
 | 能力 | 用法 |
 |---|---|
-| 数据库存储 | `sqlstore.New(db, sqlstore.Postgres/MySQL/SQLite)`（纯 database/sql，`Init()` 建表；已对真实 Postgres 测试） |
+| 数据库存储 | `sqlstore.New(db, sqlstore.Postgres/MySQL/SQLite)`（纯 database/sql，`Init()` 建表；PostgreSQL/MySQL 的整状态读取使用一致性快照。旧库迁移前仍可读，写入会返回明确错误，升级后须先运行一次 `Init()`） |
 | 审计留痕 | `WithAudit(fn)` —— 全部写操作（含 AI 发起）同步回调 `AuditEvent{User,Action,By,Note,Detail}` |
 | 访问策略 | `WithAccessPolicy(fn) → Access{ReadOnly, ChatDisabled}` —— 只读视图/按用户禁 AI，HTTP 与 AI 工具双层拦截 |
 | 宿主直调 | `Handler.ServiceForRequest(r)` 返回已绑定用户的 `ScopedService`，复用身份重验、访问策略和写限流；`Handler` 自身的 Service 方法是受信任管理 API |
 | 限流配额 | `WithLimits{MaxSSEPerUser:8, MaxWSPerUser:4, ChatTurnsPerMinute:20, WritesPerMinute:240, MaxKVKeysPerUser:256}`（默认即生效；对话轮次=真金白银） |
 | 指标 | `WithMetrics(m)` 或零依赖 `Handler.Stats()`：sse_connections/ws_sessions/chat_turns/writes/rate_limited… |
-| 备份迁移 | `ExportUser/ImportUser/PurgeUser`（Go API）+ `GET /api/export`；v3 契约完整包含 Items/Pages/Templates/KV/Revisions，导入先全量校验并原子替换 |
+| 备份迁移 | `ExportUser/ImportUser/PurgeUser`（Go API）+ `GET /api/export`；v3 契约完整包含 Items/Pages/Templates/KV/Revisions，导入先全量校验并原子替换。`PurgeUser` 清空业务载荷但为防旧 CAS 复活会保留版本墓碑；SQL 版本表仍含用户键，不等同于完整物理擦除/GDPR 流程 |
 | 优雅停机 | `Handler.Close()`（断 SSE/WS）；SSE 55 分钟强制到期配合 LB 排空；资源 ETag 304 协商缓存 |
-| 多副本 | 写一致性：`VersionedUserStateStore` 条件写（内置三种 Store 均实现，含 Template `expected_revision` 的跨副本真 CAS），冲突自动重读重试，无需 sticky 路由；实时事件：`ihtml/redisbroadcast` 提供 Redis Pub/Sub 广播与用户级全局单调版本（`WithBroadcaster` 注入）。sqlstore 升级后需重跑 `Init()` 建 `ihtml_user_version` 表 |
+| 多副本 | 写一致性：`VersionedUserStateStore` 条件写（内置三种 Store 均实现，含配额、错误日志和 Template `expected_revision` 的跨副本真 CAS），冲突自动重读重试，无需 sticky 路由；`EraseUser` 清空数据但保留递增版本墓碑。实时事件：外部 Broadcaster 默认只发送权威 `resync`，避免提交与发布反序回滚页面；`ihtml/redisbroadcast` 使用非阻塞有界发布队列、Redis Cluster 同槽键和哈希用户标识。它的新 Redis namespace 与旧版不互通；滚动升级时仅在过渡窗口显式开 `redisbroadcast.Options{LegacyNamespaceMigration:true}` 双发/双订阅，旧实例退完立即关闭并清理旧 `<prefix>:ver:<user>` 键。只有宿主把同一用户的完整写调用跨副本全局串行化时才可用 `WithOrderedBroadcaster` 保留增量；Broadcaster 自身排序不够 |
 | 对话治理 | `chat.Config{ConfirmSecret, ConfirmNonceStore, SessionStore, TurnInterceptor, WriteInterceptor, WritesPerMinute, AllowModelSelect, EnableDeepAgent, MaxModelCallsPerTurn, MaxSubtasksPerTurn, MaxTurnDuration}`；Fast 默认启用，Deep 显式开放；会话经 csid 跨断线恢复上下文 |
 
 ## 前端内核能力（v0.6）
 
 - **SPA 生命周期**：`ihtml.destroy()` 回收监听、请求、定时器、SSE、WS 与 DOM，支持 mount→destroy→mount 与**同页多实例并存**（`ihtml.instances()` 枚举）；`ready()` Promise 与 `onReady/onAuthError/onConnection` 回调
 - **鉴权刷新**：`auth()` 只在每次 REST 请求时求值并写入 `X-Ihtml-User` header；原生 EventSource/WebSocket 无法设置自定义 header，可选 `connectionAuth()` 只返回一次性或短期连接票据并放入连接 query（同源 cookie 场景无需提供）。不要返回会进入 URL 的长期 bearer；票据的签发与校验由宿主负责。`refreshAuth()` 会清理旧用户 UI 与对话状态，再按新身份完整重载
-- **实时一致性**：首帧 `resync` 建立基线，事件版本缺口、队列溢出与页面注册表变化自动触发全量同步
+- **实时一致性**：首帧 `resync` 建立基线，事件版本缺口、队列溢出、外部副本通知与页面注册表变化自动触发全量同步；单进程内置 hub 仍保留低延迟增量更新
 - **管理与 AI**：桌面为紧凑浮动操作组，移动端为安全区底部操作栏；AI 处理记录采用原生可折叠时间线，折叠后与正式回复保持紧凑间距
 - **AI 标准库**（prompt 已教，AI 生成质量的地基）：`ihtml.chart.line/bars/spark` 零依赖 SVG 图表（tokens 配色、自动重绘、随 Item 回收）、`ihtml.fmt.num/money/date/ago/pct`、`ihtml.util.esc/debounce/throttle`、`ihtml.poll/listen`（自动绑定 Item 生命周期）、`ihtml.ui.modal/paginate`
 - **i18n**：内核文案 zh/en 随 `locale` 自动切换，`mount({strings:{...}})` 逐条覆写
@@ -350,3 +357,5 @@ type ItemService / KVService / PageService / TemplateService interface { … }
 type Service interface { … }      // 完整受信任管理 API；*Handler 实现
 type ScopedService interface { … } // 已绑定一个用户；请求路由优先用 ServiceForRequest
 ```
+
+`VersionedUserStateStore` 的版本 0 只表示“从未写入”。每个成功写操作（含删除不存在的 KV）都必须推进版本；`EraseUser` 也必须留下更新后的空状态墓碑，不能重置或复用版本。公共 KV 遇到 `ReservedKVPrefix` 会返回可用 `errors.Is(err, ErrReservedKVKey)` 判断的错误。第三方 Store 应运行 `storetest.Run`，它会同时验证并发 CAS、RawMessage 字节保真、输入/输出所有权和删除后的版本语义。`FileStore` 用可响应 `context` 取消的进程级 gate 与系统文件锁支持同目录多句柄/协作进程 CAS，新数据文件为 `0600`，v2 文件同时写精确 `kv_bytes` 和旧版可读的语义 `kv`；它适合小规模单版本部署，升级/回滚应停写切换，不能让不识别锁协议的旧二进制与新版并行写。生产数据库仍优先使用 `sqlstore`。

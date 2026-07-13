@@ -31,7 +31,9 @@ type Store interface {
 	// ReplaceItems 用 items 整体替换该用户的 Item 全集。
 	ReplaceItems(ctx context.Context, user string, items []Item) error
 
-	// KVGet 读取用户级键值, 键不存在时返回 ErrNotFound。
+	// KVGet 读取用户级键值, 键不存在时返回 ErrNotFound。KVSet/KVGet
+	// 必须逐字节保留有效 JSON（包括无意义空白与 HTML 字符），不得规范化、
+	// compact 或重新编码 RawMessage。
 	KVGet(ctx context.Context, user, key string) (json.RawMessage, error)
 	KVSet(ctx context.Context, user, key string, value json.RawMessage) error
 	// KVDelete 删除键, 键不存在时不报错。
@@ -47,7 +49,8 @@ type Store interface {
 	// AddRevision 追加一条快照。keep 是保留上限, 实现应删除最旧的超额快照。
 	AddRevision(ctx context.Context, user string, rev Revision, keep int) error
 
-	// EraseUser 删除该用户的全部数据(Item/KV/快照), 用于注销与导入前清场。
+	// EraseUser 清空该用户的业务数据(Item/KV/快照), 用于注销与导入前清场。
+	// VersionedUserStateStore 必须额外保留一个不可见的递增版本墓碑。
 	EraseUser(ctx context.Context, user string) error
 }
 
@@ -82,10 +85,12 @@ type UserStateStore interface {
 // 必须同时覆写 ReplaceUserState 与 ReplaceUserStateVersioned，否则包装逻辑会被绕过。
 //
 // 实现要求：
-//   - 用户状态版本从 0 开始（用户不存在或从未写入时为 0）；
+//   - 用户状态版本从 0 开始（0 仅表示该用户从未被任何写操作触及）；
 //   - 每个成功的写方法（ReplaceItems/KVSet/KVDelete/AddRevision/ReplaceUserState
 //     等）都必须单调推进该用户的版本，使并发的整状态条件写能察觉任何交错写入；
-//   - EraseUser 清除版本（回到 0）。
+//   - EraseUser 必须清空 Items/KV/Revisions，但仍单调推进并持久化版本。
+//     不得把版本重置为 0 或复用旧值，否则 purge 前的过期 CAS 可通过
+//     ABA 覆盖 purge 后重建的新状态。
 type VersionedUserStateStore interface {
 	UserStateStore
 	// ReplaceUserStateVersioned 仅当该用户当前版本等于 expected 时原子替换完整
@@ -103,7 +108,7 @@ func cloneItems(items []Item) []Item {
 	out := make([]Item, len(items))
 	copy(out, items)
 	for i := range out {
-		if len(items[i].Meta) > 0 {
+		if items[i].Meta != nil {
 			meta := make(map[string]string, len(items[i].Meta))
 			maps.Copy(meta, items[i].Meta)
 			out[i].Meta = meta

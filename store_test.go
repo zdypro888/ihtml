@@ -67,5 +67,18 @@ func TestHandlerDefensivelyCopiesThirdPartyStoreReads(t *testing.T) {
 	}
 }
 
+func TestCloneItemsCopiesNonNilEmptyMeta(t *testing.T) {
+	input := []Item{{ID: "empty-meta", Meta: map[string]string{}}}
+	cloned := cloneItems(input)
+	input[0].Meta["input"] = "mutated"
+	if cloned[0].Meta == nil || len(cloned[0].Meta) != 0 {
+		t.Fatalf("empty Meta input alias leaked into clone: %#v", cloned[0].Meta)
+	}
+	cloned[0].Meta["output"] = "mutated"
+	if _, ok := input[0].Meta["output"]; ok {
+		t.Fatalf("empty Meta clone aliases its input: %#v", input[0].Meta)
+	}
+}
+
 // 内置 Store 的契约验收统一走公开的 storetest 套件,
 // 见 store_conformance_test.go(外部测试包, 避免 storetest→ihtml 循环导入)。

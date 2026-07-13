@@ -6,7 +6,219 @@ const assert = require('node:assert/strict');
 global.window = {};
 require('./ihtml-lib.js');
 
-const { fmt, util, makeT, template, chatAgent, chatTrace, itemLayout } = global.window.__ihtmlLib;
+const { fmt, util, makeT, template, chatAgent, chatTrace, itemLayout, runtime } = global.window.__ihtmlLib;
+
+test('runtime isolates embedded CSS by exact instance while preserving standalone compatibility', () => {
+  const css = '.ui-card{display:none}';
+  const a = runtime.scopeCSS(css, false, true, 'instance-a');
+  const b = runtime.scopeCSS(css, false, true, 'instance-b');
+  assert.match(a, /data-ihtml-instance="instance-a"/);
+  assert.doesNotMatch(a, /instance-b/);
+  assert.notEqual(a, b);
+  assert.equal(runtime.scopeCSS(css, true, true, 'standalone'), css);
+  assert.equal(runtime.scopeCSS(css, false, false, 'unsafe'), css);
+});
+
+test('runtime persistence keys separate host, base, user, and value kind', () => {
+  const key = runtime.storageKey('csid', 'https://ui.test/app/', '#left', 'alice');
+  assert.equal(key, runtime.storageKey('csid', 'https://ui.test/app/', '#left', 'alice'));
+  assert.notEqual(key, runtime.storageKey('csid', 'https://ui.test/app/', '#right', 'alice'));
+  assert.notEqual(key, runtime.storageKey('csid', 'https://ui.test/app/', '#left', 'bob'));
+  assert.notEqual(key, runtime.storageKey('model', 'https://ui.test/app/', '#left', 'alice'));
+});
+
+test('runtime validates mount options before browser-side effects', () => {
+  const input = { base: '/sdk', params: { uid: 'alice' }, routing: 'memory' };
+  const normalized = runtime.normalizeMountOptions(input, 'https://host.test/app/page', false);
+  assert.equal(normalized.base, 'https://host.test/sdk/');
+  assert.equal(normalized.routing, 'memory');
+  assert.equal(normalized.params.get('uid'), 'alice');
+  assert.deepEqual(input, { base: '/sdk', params: { uid: 'alice' }, routing: 'memory' }, 'preflight must not mutate host options');
+  assert.equal(
+    runtime.normalizeMountOptions({ base: 'https://api.test/root?token=secret#page' }, 'https://host.test/', false).base,
+    'https://api.test/root/',
+    'page query/hash state must not leak into API path resolution',
+  );
+  assert.throws(() => runtime.normalizeMountOptions({ base: 'http://[' }, 'https://host.test/', false));
+  assert.throws(() => runtime.normalizeMountOptions({ base: 'javascript:alert(1)' }, 'https://host.test/', false), /http/);
+  assert.throws(() => runtime.normalizeMountOptions({ base: 'data:text/plain,nope' }, 'https://host.test/', false), /http/);
+  assert.throws(() => runtime.normalizeMountOptions({ base: 'https://user:pass@api.test/' }, 'https://host.test/', false), /credentials/);
+  assert.throws(() => runtime.normalizeMountOptions({ routing: 'absolute' }, 'https://host.test/', false), /routing/);
+  assert.throws(() => runtime.normalizeMountOptions('bad-options', 'https://host.test/', false), /options/);
+});
+
+test('runtime migrates legacy storage once without overwriting scoped data or deleting rollback keys', () => {
+  const makeStorage = (initial) => {
+    const values = new Map(Object.entries(initial || {}));
+    return {
+      getItem: (key) => values.has(key) ? values.get(key) : null,
+      setItem: (key, value) => values.set(String(key), String(value)),
+      values,
+    };
+  };
+  const local = makeStorage({
+    'ihtml.theme': '{"mode":"dark"}',
+    'ihtml.model': 'legacy-model',
+    'ihtml.theme.scoped': '{"mode":"light"}',
+  });
+  assert.equal(runtime.migrateLegacyStorage(local, 'migration.local', [
+    { legacy: 'ihtml.theme', scoped: 'ihtml.theme.scoped' },
+    { legacy: 'ihtml.model', scoped: 'ihtml.model.scoped' },
+  ]), true);
+  assert.equal(local.getItem('ihtml.theme.scoped'), '{"mode":"light"}', 'a scoped value wins over the legacy value');
+  assert.equal(local.getItem('ihtml.model.scoped'), 'legacy-model');
+  assert.equal(local.getItem('ihtml.model'), 'legacy-model', 'legacy keys remain available for rollback');
+  local.setItem('ihtml.model', 'changed-after-claim');
+  assert.equal(runtime.migrateLegacyStorage(local, 'migration.local', [
+    { legacy: 'ihtml.model', scoped: 'ihtml.model.scoped' },
+  ]), false);
+  assert.equal(local.getItem('ihtml.model.scoped'), 'legacy-model', 'the marker prevents another mount/user from claiming again');
+
+  const a = { id: 'a' };
+  const b = { id: 'b' };
+  assert.equal(runtime.selectPrimary(a, [a, b]), a);
+  assert.equal(runtime.selectPrimary(a, [b]), b, 'destroying the primary promotes the first remaining live instance');
+  assert.equal(runtime.selectPrimary(a, []), null);
+});
+
+test('runtime inspect range clamps offsets and exposes an explicit next page', () => {
+  assert.deepEqual(runtime.inspectRange(512, 0, 99), { total: 512, offset: 0, limit: 20, end: 20, nextOffset: 20, truncated: true });
+  assert.deepEqual(runtime.inspectRange(10, 100, 20), { total: 10, offset: 10, limit: 20, end: 10, nextOffset: 0, truncated: false });
+  assert.deepEqual(runtime.inspectRange(250, undefined, undefined, true), { total: 250, offset: 0, limit: 200, end: 200, nextOffset: 200, truncated: true });
+});
+
+test('runtime module facade captures the exact Item lifecycle instead of a same-ID replacement', () => {
+  const oldRecord = { lifecycle: 7 };
+  const replacement = { lifecycle: 8 };
+  const registry = new Map([['weather', oldRecord]]);
+  assert.equal(runtime.itemLifecycleRecord(registry, 'weather', 7), oldRecord);
+  registry.set('weather', replacement);
+  assert.equal(runtime.itemLifecycleRecord(registry, 'weather', 7), null,
+    'a resumed old module cannot attach resources to the replacement record');
+  assert.equal(runtime.itemLifecycleRecord(registry, 'weather', 8), replacement);
+
+  const expression = runtime.itemFacadeExpression('window.__instanceAPI', 'weather', 7);
+  assert.equal(expression, '(window.__instanceAPI).__itemFacade("weather",7)');
+  const source = 'await Promise.resolve();\nihtml.poll(refresh, 1000);';
+  assert.equal(runtime.moduleItemScript(source, expression), 'const ihtml = ' + expression + ';\n' + source);
+});
+
+test('runtime Item script binding never rewrites source strings or conflicting module declarations', () => {
+  const api = 'window.__instanceAPI';
+  const source = 'console.log("const ihtml = window.ihtml")';
+  assert.equal(runtime.hasIHTMLBinding(source), false);
+  const classic = runtime.classicItemScript(source, api, 'code-card', '__private_api');
+  assert.match(classic, /function\(ihtml\)/);
+  assert.ok(classic.includes(source), 'valid source text must be embedded byte-for-byte');
+  assert.doesNotThrow(() => new Function(classic));
+  assert.equal(runtime.hasIHTMLBinding('const sample = `export const ihtml = window.ihtml`;\nihtml.bus.emit("ok")'), false,
+    'declaration-looking template text is not a binding');
+
+  for (const moduleSource of [
+    'import ihtml from "./runtime.js";\nexport default ihtml;',
+    'export const ihtml = {};',
+    'const ihtml = window.ihtml;\nexport { ihtml };',
+  ]) {
+    assert.equal(runtime.hasIHTMLBinding(moduleSource), true);
+    assert.equal(runtime.moduleItemScript(moduleSource, api), moduleSource, 'conflicting module source must be untouched');
+  }
+  assert.equal(runtime.moduleItemScript('export const answer = ihtml.config.answer;', api),
+    'const ihtml = ' + api + ';\nexport const answer = ihtml.config.answer;');
+
+  const regexSource = 'const matcher = /export\\s+const\\s+ihtml[\\/]/giu;\nexport const answer = ihtml.config.answer;';
+  assert.equal(runtime.hasIHTMLBinding(regexSource), false, 'declaration text inside a RegExp literal is not a binding');
+  assert.equal(runtime.moduleItemScript(regexSource, api), 'const ihtml = ' + api + ';\n' + regexSource);
+  const leadingRegex = '/export const ihtml/.test(source);\nexport const answer = ihtml.config.answer;';
+  assert.equal(runtime.hasIHTMLBinding(leadingRegex), false);
+  assert.equal(runtime.hasIHTMLBinding('const ratio = total / count;\nexport const answer = ihtml.config.answer;'), false,
+    'division must not be consumed as a RegExp literal');
+
+  const escapedIdentifier = 'const \\u0069html = window.ihtml;\nexport { \\u0069html };';
+  assert.equal(runtime.hasIHTMLBinding(escapedIdentifier), true,
+    'Unicode escapes that decode to ihtml must prevent a duplicate injected declaration');
+  assert.equal(runtime.moduleItemScript(escapedIdentifier, api), escapedIdentifier);
+  const escapedTail = 'let ihtm\\u006c = window.ihtml;\nexport { ihtm\\u006c };';
+  assert.equal(runtime.hasIHTMLBinding(escapedTail), true);
+  assert.equal(runtime.moduleItemScript(escapedTail, api), escapedTail);
+
+  const nestedVar = 'function localOnly() { var ihtml = {}; return ihtml; }\nsetTimeout(() => ihtml.bus.emit("outer"), 0);';
+  assert.equal(runtime.hasIHTMLBinding(nestedVar), false, 'function-scoped var does not bind the module scope');
+  assert.equal(runtime.moduleItemScript(nestedVar, api), 'const ihtml = ' + api + ';\n' + nestedVar);
+  assert.equal(runtime.hasIHTMLBinding('const helper = { run() { var ihtml = {}; return ihtml; } };\nihtml.bus.emit("outer");'), false,
+    'var inside an object method remains function-scoped');
+  assert.equal(runtime.hasIHTMLBinding('{ var ihtml = {}; }'), true,
+    'var in an ordinary module block still hoists and conflicts with the injected binding');
+  assert.equal(runtime.hasIHTMLBinding('foo()\n{ var ihtml = {}; }'), true,
+    'a call followed by an ASI-separated bare block is not a method body');
+  assert.equal(runtime.hasIHTMLBinding('(foo)\n{ var ihtml = {}; }'), true);
+  for (const propertyKeywordBeforeBlock of [
+    'obj.class()\n{ var ihtml = {}; }',
+    'obj.class\n{ var ihtml = {}; }',
+    'const o = { class: 1 };\n{ var ihtml = {}; }',
+    'obj.function()\n{ var ihtml = {}; }',
+  ]) {
+    assert.equal(runtime.hasIHTMLBinding(propertyKeywordBeforeBlock), true,
+      'property names that happen to be keywords must not hide a later module-scoped var');
+  }
+
+  const aliasedImport = 'import { ihtml as localAlias } from "./dep.js";\nsetTimeout(() => ihtml.bus.emit("outer"), 0);';
+  assert.equal(runtime.hasIHTMLBinding(aliasedImport), false, 'an imported property name is not the local binding');
+  assert.equal(runtime.hasIHTMLBinding('import { localAlias as ihtml } from "./dep.js";'), true);
+  assert.equal(runtime.hasIHTMLBinding('import { "x" as ihtml } from "./dep.js";\nexport { ihtml };'), true,
+    'a string-named import can still bind the local name ihtml');
+  assert.equal(runtime.hasIHTMLBinding('import { "ihtml" as localAlias } from "./dep.js";\nihtml.bus.emit("outer");'), false);
+  const aliasedProperty = 'const { ihtml: localAlias } = source;\nsetTimeout(() => ihtml.bus.emit("outer"), 0);';
+  assert.equal(runtime.hasIHTMLBinding(aliasedProperty), false, 'a destructured property key is not the local binding');
+  assert.equal(runtime.hasIHTMLBinding('const { localAlias: ihtml } = source;'), true);
+  assert.equal(runtime.hasIHTMLBinding('const { ihtml } = source;'), true);
+
+  const regexAfterBlock = 'if (ready) {} /export const ihtml/.test(source);\nexport const answer = ihtml.config.answer;';
+  assert.equal(runtime.hasIHTMLBinding(regexAfterBlock), false, 'a RegExp statement after a control block is masked');
+  assert.equal(runtime.moduleItemScript(regexAfterBlock, api), 'const ihtml = ' + api + ';\n' + regexAfterBlock);
+  assert.equal(runtime.hasIHTMLBinding('class C {} /export const ihtml/.test(source);\nexport const answer = ihtml.config.answer;'), false,
+    'a RegExp statement after a class body is masked');
+  assert.equal(runtime.hasIHTMLBinding('export default class {} /export const ihtml/.test(source);\nexport const answer = ihtml.config.answer;'), false);
+  assert.equal(runtime.hasIHTMLBinding('debugger\n/const ihtml/.test(source);\nexport const answer = ihtml.config.answer;'), false);
+  assert.equal(runtime.hasIHTMLBinding('while (ready) { continue\n/var ihtml/.test(source); }\nexport const answer = ihtml.config.answer;'), false);
+  assert.equal(runtime.hasIHTMLBinding('label: {} /const ihtml/.test(source);\nexport const answer = ihtml.config.answer;'), false,
+    'a RegExp statement after a labeled block must stay masked');
+
+  const nestedShadow = [
+    'function localOnly() { const ihtml = { local: true }; return ihtml; }',
+    '{ let ihtml = { block: true }; void ihtml; }',
+    'setTimeout(() => ihtml.bus.emit("outer-instance"), 0);',
+  ].join('\n');
+  assert.equal(runtime.hasIHTMLBinding(nestedShadow), false,
+    'nested lexical shadows do not conflict with a module-level instance binding');
+  assert.equal(runtime.moduleItemScript(nestedShadow, api), 'const ihtml = ' + api + ';\n' + nestedShadow);
+  const nestedClassic = runtime.classicItemScript(nestedShadow, api, 'nested-shadow', '__private_api');
+  assert.match(nestedClassic, /function\(ihtml\)/,
+    'a nested shadow must not make the rest of a classic Item fall back to the primary global instance');
+  assert.ok(nestedClassic.includes(nestedShadow));
+  assert.doesNotThrow(() => new Function(nestedClassic));
+
+  const ownTopLevelBinding = 'const ihtml = { own: true }; void ihtml;';
+  assert.equal(runtime.hasIHTMLBinding(ownTopLevelBinding), true);
+  const classicWithOwnBinding = runtime.classicItemScript(ownTopLevelBinding, api, 'own-binding', '__private_api');
+  assert.match(classicWithOwnBinding, /function\(ihtml\)/);
+  assert.ok(classicWithOwnBinding.includes(ownTopLevelBinding));
+  assert.doesNotThrow(() => new Function(classicWithOwnBinding));
+});
+
+test('runtime visibility intersects viewport and every clipping ancestor', () => {
+  const rect = { left: 50, top: 50, right: 150, bottom: 150 };
+  assert.equal(runtime.rectVisible(rect, { width: 200, height: 200 }, []), true);
+  assert.equal(runtime.rectVisible(rect, { width: 200, height: 200 }, [
+    { left: 0, top: 0, right: 40, bottom: 200, clipX: true, clipY: false },
+  ]), false);
+  assert.equal(runtime.rectVisible(rect, { width: 200, height: 200 }, [
+    { left: 0, top: 75, right: 200, bottom: 125, clipX: true, clipY: true },
+  ]), true);
+  assert.equal(runtime.rectVisible(rect, { width: 200, height: 200 }, [
+    { left: 50, top: 0, right: 50, bottom: 200, clipX: true, clipY: false },
+  ]), false, 'a zero-width overflow clip hides all horizontal content');
+  assert.equal(runtime.rectVisible({ left: 210, top: 0, right: 250, bottom: 40 }, { width: 200, height: 200 }, []), false);
+});
 
 test('fmt.num clamps hostile precision values', () => {
   assert.equal(fmt.num(12.6, -8), '13');

@@ -22,6 +22,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 
 	"github.com/zdypro888/ihtml"
+	"github.com/zdypro888/ihtml/internal/nilcheck"
 )
 
 // Provider 取值。openai 指一切 OpenAI 兼容端点(含各类网关/Ollama),
@@ -144,6 +145,25 @@ type Backend struct {
 
 // New 创建对话后端。
 func New(cfg Config) *Backend {
+	// New is retained as the source-compatible unchecked constructor. Normalize
+	// typed-nil optional dependencies to the same safe defaults as plain nil;
+	// NewChecked/Config.Validate report them as configuration errors instead.
+	if nilcheck.IsNil(cfg.SessionStore) {
+		cfg.SessionStore = nil
+	}
+	if nilcheck.IsNil(cfg.ConfirmNonceStore) {
+		cfg.ConfirmNonceStore = nil
+	}
+	if cfg.ProbeHTTPClient != nil {
+		client := *cfg.ProbeHTTPClient
+		if nilcheck.IsNil(client.Transport) {
+			client.Transport = nil
+		}
+		if nilcheck.IsNil(client.Jar) {
+			client.Jar = nil
+		}
+		cfg.ProbeHTTPClient = &client
+	}
 	if cfg.MaxIterations <= 0 {
 		cfg.MaxIterations = 16
 	}
@@ -184,8 +204,11 @@ func (b *Backend) NewSession(_ context.Context, sctx *ihtml.ChatSessionContext) 
 	if sctx == nil {
 		return nil, errors.New("chat session context is required")
 	}
-	if strings.TrimSpace(sctx.User) == "" || sctx.Service == nil || sctx.Emit == nil {
+	if strings.TrimSpace(sctx.User) == "" || nilcheck.IsNil(sctx.Service) || sctx.Emit == nil {
 		return nil, errors.New("chat session requires user, service and emitter")
+	}
+	if sctx.ScopedService != nil && nilcheck.IsNil(sctx.ScopedService) {
+		return nil, errors.New("chat session scoped service must not contain a typed nil implementation")
 	}
 	csid := ""
 	inboundHeaders := make(http.Header)

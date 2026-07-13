@@ -170,10 +170,22 @@ func TestHandlerKVAndErrors(t *testing.T) {
 	if status != 200 || out["value"].(map[string]any)["mode"] != "dark" {
 		t.Fatalf("kv get: %d %v", status, out)
 	}
-	// 保留前缀拒绝写
+	status, _ = doJSON(t, "GET", base+"/kv/missing?uid=u", "")
+	if status != http.StatusNotFound {
+		t.Fatalf("missing kv read should 404, got %d", status)
+	}
+	// 保留前缀对读写删除统一返回 403，不能通过公共 KV API 暴露内核状态。
+	status, _ = doJSON(t, "GET", base+"/kv/__ihtml.errors?uid=u", "")
+	if status != http.StatusForbidden {
+		t.Fatalf("reserved kv read should 403, got %d", status)
+	}
 	status, _ = doJSON(t, "PUT", base+"/kv/__ihtml.errors?uid=u", `{"value":1}`)
 	if status != http.StatusForbidden {
-		t.Fatalf("reserved kv should 403, got %d", status)
+		t.Fatalf("reserved kv write should 403, got %d", status)
+	}
+	status, _ = doJSON(t, "DELETE", base+"/kv/__ihtml.errors?uid=u", "")
+	if status != http.StatusForbidden {
+		t.Fatalf("reserved kv delete should 403, got %d", status)
 	}
 	// 错误上报与读取
 	status, _ = doJSON(t, "POST", base+"/errors?uid=u", `{"errors":[{"item_id":"clock","message":"boom"}]}`)

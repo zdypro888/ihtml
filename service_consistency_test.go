@@ -90,6 +90,302 @@ func TestKVQuotaIsAtomicWithinHandler(t *testing.T) {
 	}
 }
 
+func TestKVQuotaIsAtomicAcrossHandlers(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	replicaA := New(store, WithLimits(Limits{MaxKVKeysPerUser: 1}))
+	replicaB := New(store, WithLimits(Limits{MaxKVKeysPerUser: 1}))
+	defer replicaA.Close()
+	defer replicaB.Close()
+
+	const writers = 32
+	var wg sync.WaitGroup
+	results := make(chan error, writers)
+	for i := range writers {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			replica := replicaA
+			if i%2 != 0 {
+				replica = replicaB
+			}
+			results <- replica.KVSet(ctx, "u", fmt.Sprintf("cross%d", i), json.RawMessage(`1`))
+		}(i)
+	}
+	wg.Wait()
+	close(results)
+
+	successes := 0
+	for err := range results {
+		if err == nil {
+			successes++
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("cross-handler quota race allowed %d successful new keys", successes)
+	}
+	keys, err := store.KVKeys(ctx, "u")
+	if err != nil || len(keys) != 1 {
+		t.Fatalf("stored keys = %v, err=%v; want exactly one", keys, err)
+	}
+}
+
+func TestReportErrorsMergesAcrossHandlers(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	replicaA, replicaB := New(store), New(store)
+	defer replicaA.Close()
+	defer replicaB.Close()
+
+	const reports = 40 // 低于 MaxPageErrors，所有并发记录都必须保留。
+	var wg sync.WaitGroup
+	errs := make(chan error, reports)
+	for i := range reports {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			replica := replicaA
+			if i%2 != 0 {
+				replica = replicaB
+			}
+			errs <- replica.ReportErrors(ctx, "u", []PageError{{
+				ItemID: "item", Message: fmt.Sprintf("error-%02d", i),
+			}})
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent ReportErrors: %v", err)
+		}
+	}
+
+	got, err := replicaA.PageErrors(ctx, "u")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != reports {
+		t.Fatalf("lost concurrent error reports: got %d, want %d", len(got), reports)
+	}
+	if metric := replicaA.Stats()["errors_reported"] + replicaB.Stats()["errors_reported"]; metric != reports {
+		t.Fatalf("versioned errors_reported metric = %d, want %d", metric, reports)
+	}
+	if metric := replicaA.Stats()["writes"] + replicaB.Stats()["writes"]; metric != reports {
+		t.Fatalf("versioned ReportErrors writes metric = %d, want %d", metric, reports)
+	}
+	seen := make(map[string]bool, reports)
+	for _, pageErr := range got {
+		seen[pageErr.Message] = true
+	}
+	for i := range reports {
+		message := fmt.Sprintf("error-%02d", i)
+		if !seen[message] {
+			t.Fatalf("missing concurrent report %q", message)
+		}
+	}
+}
+
+type legacyStoreView struct{ Store }
+
+func TestKVAndErrorsRemainCompatibleWithLegacyStore(t *testing.T) {
+	ctx := context.Background()
+	legacy := &legacyStoreView{Store: NewMemoryStore()}
+	h := New(legacy, WithLimits(Limits{MaxKVKeysPerUser: 2}))
+	defer h.Close()
+
+	if err := h.KVSet(ctx, "u", "one", json.RawMessage(`1`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.ReportErrors(ctx, "u", []PageError{{Message: "legacy"}}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := h.PageErrors(ctx, "u")
+	if err != nil || len(got) != 1 || got[0].Message != "legacy" {
+		t.Fatalf("legacy ReportErrors roundtrip: %+v err=%v", got, err)
+	}
+}
+
+func TestPublicKVRejectsReservedKeysAtServiceBoundary(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	if err := store.KVSet(ctx, "u", errorsKVKey, json.RawMessage(`[{"message":"internal"}]`)); err != nil {
+		t.Fatal(err)
+	}
+	h := New(store)
+	defer h.Close()
+
+	for _, key := range []string{errorsKVKey, pagesKVKey, reservedKVPrefix + ".custom"} {
+		if _, err := h.KVGet(ctx, "u", key); !errors.Is(err, ErrReservedKVKey) {
+			t.Fatalf("KVGet(%q) did not reject reserved key: %v", key, err)
+		}
+		if err := h.KVSet(ctx, "u", key, json.RawMessage(`true`)); !errors.Is(err, ErrReservedKVKey) {
+			t.Fatalf("KVSet(%q) did not reject reserved key: %v", key, err)
+		}
+		if err := h.KVDelete(ctx, "u", key); !errors.Is(err, ErrReservedKVKey) {
+			t.Fatalf("KVDelete(%q) did not reject reserved key: %v", key, err)
+		}
+	}
+	raw, err := store.KVGet(ctx, "u", errorsKVKey)
+	if err != nil || !strings.Contains(string(raw), "internal") {
+		t.Fatalf("reserved value changed through public KV API: %s, %v", raw, err)
+	}
+	if err := h.KVSet(ctx, "u", "public", json.RawMessage(`1`)); err != nil {
+		t.Fatalf("ordinary KV key was rejected: %v", err)
+	}
+}
+
+type captureBroadcaster struct {
+	mu     sync.Mutex
+	events []Event
+}
+
+type captureVersionedBroadcaster struct {
+	*captureBroadcaster
+	version uint64
+}
+
+func (b *captureVersionedBroadcaster) CurrentVersion(string) uint64 { return b.version }
+
+func (b *captureBroadcaster) snapshot() []Event {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]Event(nil), b.events...)
+}
+
+func (b *captureBroadcaster) reset() {
+	b.mu.Lock()
+	b.events = nil
+	b.mu.Unlock()
+}
+
+func (b *captureBroadcaster) Publish(_ string, ev Event) {
+	b.mu.Lock()
+	b.events = append(b.events, ev)
+	b.mu.Unlock()
+}
+
+func (*captureBroadcaster) Subscribe(string) (<-chan Event, func()) {
+	ch := make(chan Event)
+	return ch, func() { close(ch) }
+}
+
+func TestExternalPublishReorderingCannotCarryStalePayload(t *testing.T) {
+	b := &captureBroadcaster{}
+	h := New(NewMemoryStore(), WithBroadcaster(b))
+	defer h.Close()
+
+	// 模拟跨副本反序：较新的 delete 先发布，较旧的 put 后发布。
+	// 外部通道若保留 put 载荷，客户端就会在最后恢复已删除内容。
+	h.publish("u", Event{Type: EventItems, Op: EventOpDelete, IDs: []string{"old"}})
+	h.publish("u", Event{Type: EventItems, Op: EventOpPut, Items: []Item{{ID: "old", Type: ItemHTML, Content: "stale"}}})
+
+	b.mu.Lock()
+	events := append([]Event(nil), b.events...)
+	b.mu.Unlock()
+	if len(events) != 2 {
+		t.Fatalf("captured %d events, want 2", len(events))
+	}
+	for i, ev := range events {
+		if ev.Type != EventResync || ev.Reason != ResyncExternal {
+			t.Fatalf("external event %d retained incremental payload: %+v", i, ev)
+		}
+		if ev.Op != "" || len(ev.Items) != 0 || len(ev.IDs) != 0 {
+			t.Fatalf("external resync %d leaked stale payload: %+v", i, ev)
+		}
+	}
+}
+
+func TestDefaultHubKeepsLowLatencyIncrementalPayload(t *testing.T) {
+	h := New(NewMemoryStore())
+	defer h.Close()
+	ch, cancel := h.opts.broadcaster.Subscribe("u")
+	defer cancel()
+
+	want := Item{ID: "fresh", Type: ItemHTML, Content: "<p>fresh</p>"}
+	h.publish("u", Event{Type: EventItems, Op: EventOpPut, Items: []Item{want}})
+	ev := <-ch
+	if ev.Type != EventItems || ev.Op != EventOpPut || len(ev.Items) != 1 || ev.Items[0].ID != want.ID {
+		t.Fatalf("default hub lost incremental fast path: %+v", ev)
+	}
+}
+
+func TestBusinessCommitCoalescesOnlyForSafeExternalBroadcaster(t *testing.T) {
+	ctx := context.Background()
+
+	external := &captureBroadcaster{}
+	externalHandler := New(NewMemoryStore(), WithBroadcaster(external))
+	defer externalHandler.Close()
+	if err := externalHandler.PurgeUser(ctx, "u"); err != nil {
+		t.Fatal(err)
+	}
+	events := external.snapshot()
+	if len(events) != 1 || events[0].Type != EventResync || events[0].Reason != ResyncExternal {
+		t.Fatalf("one external commit must emit one authoritative resync: %+v", events)
+	}
+	if got := externalHandler.Stats()["events_published"]; got != 1 {
+		t.Fatalf("external delivered-event metric = %d, want 1", got)
+	}
+
+	ordered := &captureBroadcaster{}
+	orderedHandler := New(NewMemoryStore(), WithOrderedBroadcaster(ordered))
+	defer orderedHandler.Close()
+	if err := orderedHandler.PurgeUser(ctx, "u"); err != nil {
+		t.Fatal(err)
+	}
+	events = ordered.snapshot()
+	if len(events) != 3 || events[0].Type != EventItems || events[0].Op != EventOpPurge ||
+		events[1].Type != EventPages || events[2].Type != EventTemplates || events[2].Op != EventOpPurge {
+		t.Fatalf("explicit ordered broadcaster lost incremental payloads: %+v", events)
+	}
+	if got := orderedHandler.Stats()["events_published"]; got != 3 {
+		t.Fatalf("ordered delivered-event metric = %d, want 3", got)
+	}
+}
+
+func TestWithOrderedBroadcasterPreservesVersionCapability(t *testing.T) {
+	b := &captureVersionedBroadcaster{captureBroadcaster: &captureBroadcaster{}, version: 42}
+	h := New(NewMemoryStore(), WithOrderedBroadcaster(b))
+	defer h.Close()
+	if _, ok := h.opts.broadcaster.(VersionedBroadcaster); !ok {
+		t.Fatal("WithOrderedBroadcaster hid VersionedBroadcaster capability")
+	}
+	if ev := h.resyncEvent("u", ResyncSubscribe); ev.Version != 42 {
+		t.Fatalf("wrapped CurrentVersion = %d, want 42", ev.Version)
+	}
+}
+
+func TestTemplateCommitAlsoCoalescesExternalNotifications(t *testing.T) {
+	ctx := context.Background()
+	b := &captureBroadcaster{}
+	h := New(NewMemoryStore(), WithBroadcaster(b))
+	defer h.Close()
+	if err := h.SetPage(ctx, "u", Page{Name: "dash", Title: "Dashboard"}); err != nil {
+		t.Fatal(err)
+	}
+	current, err := h.GetCurrentTemplate(ctx, "u", "dash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := editableTemplate(current.Template.ID)
+	input.Name = current.Template.Name
+	b.reset()
+	saved, err := h.PutCurrentTemplate(ctx, "u", "dash", input, 0, "api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if events := b.snapshot(); len(events) != 1 || events[0].Type != EventResync {
+		t.Fatalf("template+page binding commit emitted duplicate external refreshes: %+v", events)
+	}
+	b.reset()
+	if err := h.DeleteTemplate(ctx, "u", saved.ID, saved.Revision, "api"); err != nil {
+		t.Fatal(err)
+	}
+	if events := b.snapshot(); len(events) != 1 || events[0].Type != EventResync {
+		t.Fatalf("template delete+unbind commit emitted duplicate external refreshes: %+v", events)
+	}
+}
+
 func TestPageSnapshotsRollbackSetAndDelete(t *testing.T) {
 	ctx := context.Background()
 	h := New(NewMemoryStore())
@@ -244,6 +540,8 @@ type faultLegacyStore struct {
 	failKVOnce string
 	readKVFail string
 	revReadErr bool
+	failDelete bool
+	failErase  bool
 }
 
 func (s *faultLegacyStore) KVSet(ctx context.Context, user, key string, value json.RawMessage) error {
@@ -261,11 +559,83 @@ func (s *faultLegacyStore) KVGet(ctx context.Context, user, key string) (json.Ra
 	return s.Store.KVGet(ctx, user, key)
 }
 
+func (s *faultLegacyStore) KVDelete(ctx context.Context, user, key string) error {
+	if s.failDelete {
+		return errors.New("injected kv delete failure")
+	}
+	return s.Store.KVDelete(ctx, user, key)
+}
+
+func (s *faultLegacyStore) EraseUser(ctx context.Context, user string) error {
+	if s.failErase {
+		return errors.New("injected erase failure")
+	}
+	return s.Store.EraseUser(ctx, user)
+}
+
 func (s *faultLegacyStore) RevisionItems(ctx context.Context, user, id string) ([]Item, error) {
 	if s.revReadErr {
 		return nil, errors.New("injected revision read failure")
 	}
 	return s.Store.RevisionItems(ctx, user, id)
+}
+
+func TestMutationMetricsCountOnlySuccessfulOperations(t *testing.T) {
+	ctx := context.Background()
+	legacy := &faultLegacyStore{Store: NewMemoryStore()}
+	h := New(legacy)
+	defer h.Close()
+
+	if err := h.ReportErrors(ctx, "u", []PageError{{Message: "one"}, {Message: "two"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.Stats()["errors_reported"]; got != 2 {
+		t.Fatalf("errors_reported = %d, want 2", got)
+	}
+	if got := h.Stats()["writes"]; got != 1 {
+		t.Fatalf("ReportErrors writes = %d, want 1", got)
+	}
+	if err := h.KVSet(ctx, "u", "delete-me", json.RawMessage(`1`)); err != nil {
+		t.Fatal(err)
+	}
+	writesBeforeDelete := h.Stats()["writes"]
+	if err := h.KVDelete(ctx, "u", "delete-me"); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.Stats()["writes"]; got != writesBeforeDelete+1 {
+		t.Fatalf("successful KVDelete writes = %d, want %d", got, writesBeforeDelete+1)
+	}
+	writesBeforePurge := h.Stats()["writes"]
+	if err := h.PurgeUser(ctx, "u"); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.Stats()["writes"]; got != writesBeforePurge+1 {
+		t.Fatalf("successful PurgeUser writes = %d, want %d", got, writesBeforePurge+1)
+	}
+
+	legacy.failKVOnce = errorsKVKey
+	writesBeforeFailures := h.Stats()["writes"]
+	if err := h.ReportErrors(ctx, "u", []PageError{{Message: "failed"}}); err == nil {
+		t.Fatal("expected ReportErrors failure")
+	}
+	if got := h.Stats()["errors_reported"]; got != 2 {
+		t.Fatalf("failed ReportErrors changed metric to %d", got)
+	}
+	if got := h.Stats()["writes"]; got != writesBeforeFailures {
+		t.Fatalf("failed ReportErrors changed writes metric: %d -> %d", writesBeforeFailures, got)
+	}
+	legacy.failDelete = true
+	if err := h.KVDelete(ctx, "u", "missing"); err == nil {
+		t.Fatal("expected KVDelete failure")
+	}
+	writesAfterDeleteFailure := h.Stats()["writes"]
+	legacy.failErase = true
+	if err := h.PurgeUser(ctx, "u"); err == nil {
+		t.Fatal("expected PurgeUser failure")
+	}
+	if got := h.Stats()["writes"]; got != writesAfterDeleteFailure {
+		t.Fatalf("failed mutations changed writes metric: %d -> %d", writesAfterDeleteFailure, got)
+	}
 }
 
 func TestImportLegacyStoreCompensatesOnFailure(t *testing.T) {

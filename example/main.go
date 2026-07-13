@@ -810,25 +810,43 @@ func (s *demoSession) demoInspect(ctx context.Context, generation uint64) string
 		delete(s.inspects, inspectID)
 		s.inspectMu.Unlock()
 	}()
-	if !s.emitRun(ctx, generation, ihtml.ChatStreamEvent{Type: ihtml.ChatStreamInspectRequest, InspectID: inspectID, ModelReady: true}) {
+	if !s.emitRun(ctx, generation, ihtml.ChatStreamEvent{
+		Type: ihtml.ChatStreamInspectRequest, InspectID: inspectID,
+		InspectLimit: 1, InspectIDs: []string{"ai-note"}, ModelReady: true,
+	}) {
 		return ""
 	}
 	timer := time.NewTimer(2 * time.Second)
 	defer timer.Stop()
 	select {
 	case inspect := <-ch:
-		rendered := 0
-		for _, item := range inspect.Items {
-			if item.Present {
-				rendered++
-			}
-		}
-		return fmt.Sprintf("我又用 ui_page_inspect 自检了一次: 页面上 %d 个 Item 正在渲染, 刚写入的卡片确实在屏幕上。", rendered)
+		return demoInspectionNote(inspect)
 	case <-ctx.Done():
 		return ""
 	case <-timer.C:
 		return ""
 	}
+}
+
+func demoInspectionNote(inspect *ihtml.ChatClientInspection) string {
+	if inspect != nil {
+		for _, item := range inspect.Items {
+			if item.ID != "ai-note" {
+				continue
+			}
+			if !item.Present {
+				return "我又用 ui_page_inspect 自检了一次: 还没有找到 ai-note 的已连接 DOM。"
+			}
+			if strings.TrimSpace(item.Error) != "" {
+				return "我又用 ui_page_inspect 自检了一次: ai-note 已加载, 但检测到运行错误。"
+			}
+			if item.Visible {
+				return "我又用 ui_page_inspect 自检了一次: ai-note 已渲染、在当前视口可见且没有运行错误。"
+			}
+			return "我又用 ui_page_inspect 自检了一次: ai-note 已加载, 但当前视口中不可见。"
+		}
+	}
+	return "我又用 ui_page_inspect 自检了一次: 内核未返回 ai-note, 暂时不能声称它已正常显示。"
 }
 
 /* ---------- 预置演示数据: 单页默认形态(不建页面/菜单, 用内核组件类) ---------- */

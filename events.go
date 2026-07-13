@@ -39,6 +39,10 @@ const (
 	ResyncOverflow = "overflow"
 	// ResyncPeriodic: 周期性校准(兜底不能报告丢包的外部 Broadcaster)。
 	ResyncPeriodic = "periodic"
+	// ResyncExternal: 外部/跨副本 Broadcaster 收到变更通知后要求全量刷新。
+	// 持久化提交与消息发布不在同一事务内，因此外部通道不携带可能
+	// 因发布反序而过期的增量载荷，客户端改为重读已提交的权威状态。
+	ResyncExternal = "external"
 )
 
 // Event 是推送给页面内核的实时事件(经 SSE 下发)。
@@ -63,7 +67,7 @@ type Event struct {
 	// Version 是某用户事件流的单调版本。默认 hub 总会填充；
 	// 外部 Broadcaster 若能提供全局单调版本也应填充。
 	Version uint64 `json:"version,omitempty"`
-	// Reason 说明 resync 原因: subscribe / overflow / periodic。
+	// Reason 说明 resync 原因: subscribe / overflow / periodic / external。
 	Reason string `json:"reason,omitempty"`
 }
 
@@ -71,6 +75,13 @@ type Event struct {
 // 默认实现是进程内 hub(单副本); 多副本部署时用 WithBroadcaster 接入
 // Redis Pub/Sub / NATS 等跨节点通道, 否则副本 A 的写入无法推到
 // 连接在副本 B 上的页面。
+//
+// Handler 只在内置进程内 hub 上发送低延迟增量。通过
+// WithBroadcaster 注入的外部 Broadcaster 收到 reason=external 的
+// resync 通知：Store 提交顺序与外部消息发布顺序可能相反，
+// 全量重读才能保证客户端不应用过期载荷。只有宿主把同一用户在所有
+// 副本上的完整写调用（含提交到 Publish）全局串行化时，才可显式使用
+// WithOrderedBroadcaster 保留增量载荷；Broadcaster 内部排序本身不够。
 type Broadcaster interface {
 	// Publish 向该用户的所有订阅者投递事件。实现应保证不阻塞调用方。
 	// 若实现会丢弃积压事件，必须改为投递 Type="resync" 以显式
@@ -95,6 +106,30 @@ type hub struct {
 	subs     map[string]map[chan Event]struct{}
 	versions map[string]uint64
 	closed   bool
+}
+
+// orderedIncrementalBroadcaster 是包内标记。宿主不能通过偶然实现
+// 某个方法而启用危险的增量路径；必须显式选择 WithOrderedBroadcaster，
+// 该 Option 会用下面的私有 wrapper 标记它。
+type orderedIncrementalBroadcaster interface {
+	orderedIncrementalDelivery()
+}
+
+func (*hub) orderedIncrementalDelivery() {}
+
+type explicitlyOrderedBroadcaster struct{ Broadcaster }
+
+func (*explicitlyOrderedBroadcaster) orderedIncrementalDelivery() {}
+
+type explicitlyOrderedVersionedBroadcaster struct{ VersionedBroadcaster }
+
+func (*explicitlyOrderedVersionedBroadcaster) orderedIncrementalDelivery() {}
+
+func wrapOrderedBroadcaster(b Broadcaster) Broadcaster {
+	if versioned, ok := b.(VersionedBroadcaster); ok {
+		return &explicitlyOrderedVersionedBroadcaster{VersionedBroadcaster: versioned}
+	}
+	return &explicitlyOrderedBroadcaster{Broadcaster: b}
 }
 
 func newHub() *hub {

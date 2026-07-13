@@ -202,13 +202,44 @@ func (s *Store) bumpUserVersionTx(ctx context.Context, tx *sql.Tx, user string) 
 // 否则返回 ihtml.ErrVersionConflict。与 bumpUserVersionTx 一样必须最先执行。
 func (s *Store) casUserVersionTx(ctx context.Context, tx *sql.Tx, user string, expected uint64) error {
 	if expected == 0 {
-		// 版本行不存在(新用户或未迁移的旧数据)时建行为 1; 行已存在说明版本 ≥ 1,
-		// 唯一键冲突即并发写抢先——按版本冲突处理并保留底层错误细节。
-		if _, err := tx.ExecContext(ctx, s.rebind(
-			`INSERT INTO ihtml_user_version (usr, version) VALUES (?, 1)`), user); err != nil {
-			return errors.Join(ihtml.ErrVersionConflict, err)
+		exists, err := s.userVersionTableExists(ctx, tx)
+		if err != nil {
+			return fmt.Errorf("sqlstore: inspect user version table: %w", err)
 		}
-		return nil
+		if !exists {
+			return fmt.Errorf("sqlstore: ihtml_user_version is missing; run Store.Init after upgrading")
+		}
+		// 版本行不存在(新用户或未迁移的旧数据)时建行为 1。
+		// PostgreSQL/SQLite 用 DO NOTHING + RowsAffected 区分真正的唯一键
+		// 冲突，权限、I/O、触发器等其他错误必须原样上抛，不得
+		// 伪装成 ErrVersionConflict 触发上层无意义重试。
+		query := `INSERT INTO ihtml_user_version (usr, version) VALUES (?, 1)
+		          ON CONFLICT (usr) DO NOTHING`
+		if s.dialect == MySQL {
+			// 不用 INSERT IGNORE：它还会把截断/类型等非唯一键
+			// 错误降级成 warning，违反“只有真重复才是版本冲突”。
+			// CLIENT_FOUND_ROWS 会让“更新为相同值”的 RowsAffected
+			// 无法区分插入与重复。重复时暂写保留值 0，因为
+			// 合法版本行始终 >= 1，所以该 UPDATE 必然计为 2 行影响。
+			// 返回冲突后外层事务回滚，保留值不会对外可见。
+			query = `INSERT INTO ihtml_user_version (usr, version) VALUES (?, 1)
+			         ON DUPLICATE KEY UPDATE version = 0`
+		}
+		res, err := tx.ExecContext(ctx, s.rebind(query), user)
+		if err != nil {
+			return fmt.Errorf("sqlstore: create user version: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("sqlstore: inspect created user version: %w", err)
+		}
+		if n == 1 {
+			return nil
+		}
+		if n == 0 || (s.dialect == MySQL && n == 2) {
+			return ihtml.ErrVersionConflict
+		}
+		return fmt.Errorf("sqlstore: create user version returned unexpected affected rows %d", n)
 	}
 	res, err := tx.ExecContext(ctx, s.rebind(
 		`UPDATE ihtml_user_version SET version = ? WHERE usr = ? AND version = ?`),
@@ -234,11 +265,28 @@ func (s *Store) userVersion(ctx context.Context, tx *sql.Tx, user string) (uint6
 		return 0, nil
 	}
 	if err != nil {
-		// 旧库尚未建 ihtml_user_version 表时按无版本处理, 读路径保持可用;
-		// 首次写入会返回明确的迁移提示。
-		return 0, nil
+		return 0, err
 	}
 	return version, nil
+}
+
+// userVersionTableExists 使升级前的数据库仍可以读取。不能直接
+// SELECT 可能缺失的表再吞掉错误：PostgreSQL 会把整个事务标记为
+// aborted，随后 Commit 仍会失败。先通过各方言的 catalog 做无害探测。
+func (s *Store) userVersionTableExists(ctx context.Context, tx *sql.Tx) (bool, error) {
+	var count int
+	query := `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'ihtml_user_version'`
+	switch s.dialect {
+	case Postgres:
+		query = `SELECT CASE WHEN to_regclass('ihtml_user_version') IS NULL THEN 0 ELSE 1 END`
+	case MySQL:
+		query = `SELECT COUNT(*) FROM information_schema.TABLES
+		         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'ihtml_user_version'`
+	}
+	if err := tx.QueryRowContext(ctx, query).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
 func ts(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
@@ -463,16 +511,17 @@ func (s *Store) KVKeys(ctx context.Context, user string) ([]string, error) {
 	return keys, rows.Err()
 }
 
-// EraseUser 实现 ihtml.Store。
+// EraseUser 实现 ihtml.Store。数据行被清空，但版本行作为
+// tombstone 保留并继续递增，避免 purge 前的过期 CAS 出现 ABA。
 func (s *Store) EraseUser(ctx context.Context, user string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback() //nolint:errcheck
-	// 版本行最先删除(与写事务的加锁顺序一致), 用户回到"无版本"状态。
-	if _, err := tx.ExecContext(ctx, s.rebind(`DELETE FROM ihtml_user_version WHERE usr = ?`), user); err != nil {
-		return fmt.Errorf("sqlstore: erase user version (升级到含 ihtml_user_version 的版本后需重新执行 Init): %w", err)
+	// 版本行仍是第一条写语句，与其他写事务保持相同加锁顺序。
+	if err := s.bumpUserVersionTx(ctx, tx, user); err != nil {
+		return err
 	}
 	for _, table := range []string{"ihtml_items", "ihtml_kv", "ihtml_revisions"} {
 		if _, err := tx.ExecContext(ctx, s.rebind(`DELETE FROM `+table+` WHERE usr = ?`), user); err != nil {
@@ -484,13 +533,29 @@ func (s *Store) EraseUser(ctx context.Context, user string) error {
 
 // UserState 在一个事务中读取用户的完整状态。
 func (s *Store) UserState(ctx context.Context, user string) (ihtml.UserState, error) {
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	txOpts := &sql.TxOptions{ReadOnly: true}
+	if s.dialect == Postgres || s.dialect == MySQL {
+		// PostgreSQL 默认 READ COMMITTED 每条 SELECT 使用不同快照，会让
+		// UserState 返回“旧 Items + 新 Version”并使后续 CAS 丢写。
+		txOpts.Isolation = sql.LevelRepeatableRead
+	}
+	tx, err := s.db.BeginTx(ctx, txOpts)
 	if err != nil {
 		return ihtml.UserState{}, err
 	}
 	defer tx.Rollback() //nolint:errcheck
 
 	state := ihtml.UserState{KV: make(map[string]json.RawMessage)}
+	versionTableExists, err := s.userVersionTableExists(ctx, tx)
+	if err != nil {
+		return ihtml.UserState{}, fmt.Errorf("sqlstore: inspect user version table: %w", err)
+	}
+	if versionTableExists {
+		state.Version, err = s.userVersion(ctx, tx, user)
+		if err != nil {
+			return ihtml.UserState{}, fmt.Errorf("sqlstore: read user version: %w", err)
+		}
+	}
 	rows, err := tx.QueryContext(ctx, s.rebind(
 		`SELECT id, typ, title, page, ord, content, meta, updated_at FROM ihtml_items WHERE usr = ?`), user)
 	if err != nil {
@@ -580,12 +645,6 @@ func (s *Store) UserState(ctx context.Context, user string) (ihtml.UserState, er
 		}
 		return state.Revisions[i].ID > state.Revisions[j].ID
 	})
-	// 版本最后读: 若连接已坏, 前面的数据查询会先暴露错误;
-	// 走到这里仍失败基本只剩"旧库未建版本表", 按 0(无版本)处理保持读路径可用。
-	state.Version, err = s.userVersion(ctx, tx, user)
-	if err != nil {
-		return ihtml.UserState{}, err
-	}
 	if err := tx.Commit(); err != nil {
 		return ihtml.UserState{}, err
 	}
