@@ -145,6 +145,21 @@ func (e *TemplateConflictError) Error() string {
 func (e *TemplateConflictError) Unwrap() error { return ErrConflict }
 
 const (
+	// MaxTemplateVersionBytes bounds one Draft or Published structural document.
+	// The estimate counts every source string/RawMessage plus conservative JSON
+	// framing, preventing individually valid properties from multiplying into a
+	// hundreds-of-MiB template.
+	MaxTemplateVersionBytes = 1 << 20
+	// MaxTemplateCatalogBytes bounds all Draft/Published structures retained for
+	// one user. Per-document limits alone would still allow 128 maximum-sized
+	// templates to multiply every catalog load and snapshot.
+	MaxTemplateCatalogBytes = 8 << 20
+	// MaxTemplateCatalogStorageBytes bounds the encoded internal catalog record.
+	// It is intentionally larger than the logical structural budget to allow for
+	// JSON field framing and escaping, while remaining below the whole-user KV
+	// ceiling. Writers in this package disable unnecessary HTML escaping.
+	MaxTemplateCatalogStorageBytes = 16 << 20
+
 	maxTemplatesPerUser    = 128
 	maxTemplateNodes       = 512
 	maxTemplateSlots       = 512
@@ -161,6 +176,34 @@ const (
 	// the exact integer range so every valid CAS token can be sent back losslessly.
 	maxTemplateRevision = uint64(1<<53 - 1)
 )
+
+func templateVersionSize(v *TemplateVersion) int {
+	if v == nil {
+		return 0
+	}
+	// Fixed numeric/boolean JSON fields and punctuation are deliberately
+	// overestimated. Strings and RawMessages dominate the actual payload.
+	total := 128 + len(v.RootID)
+	for _, node := range v.Nodes {
+		total += 128 + len(node.ID) + len(node.ParentID) + len(node.Kind) + len(node.Name)
+		for key, value := range node.Props {
+			total += 16 + len(key) + len(value)
+		}
+	}
+	for _, slot := range v.Slots {
+		total += 96 + len(slot.ID) + len(slot.NodeID) + len(slot.Name)
+		for _, accepted := range slot.Accepts {
+			total += 8 + len(accepted)
+		}
+	}
+	for _, placement := range v.Placements {
+		total += 256 + len(placement.ItemID) + len(placement.SlotID) + len(placement.Breakpoint) + len(placement.Mode)
+	}
+	for _, breakpoint := range v.Breakpoints {
+		total += 96 + len(breakpoint.ID) + len(breakpoint.Name)
+	}
+	return total
+}
 
 func finiteRange(value, min, max float64) bool {
 	return !math.IsNaN(value) && !math.IsInf(value, 0) && value >= min && value <= max
@@ -341,6 +384,9 @@ func (v *TemplateVersion) Validate() error {
 		len(v.Placements) > maxTemplatePlacements || len(v.Breakpoints) > maxTemplateBreakpoints {
 		return fmt.Errorf("template document exceeds limits (nodes=%d slots=%d placements=%d breakpoints=%d)",
 			len(v.Nodes), len(v.Slots), len(v.Placements), len(v.Breakpoints))
+	}
+	if size := templateVersionSize(v); size > MaxTemplateVersionBytes {
+		return fmt.Errorf("template document exceeds %d bytes (estimated %d)", MaxTemplateVersionBytes, size)
 	}
 	nodes := make(map[string]TemplateNode, len(v.Nodes))
 	for _, node := range v.Nodes {

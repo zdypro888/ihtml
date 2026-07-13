@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // ItemType 是 UI Item 的种类。
@@ -81,6 +82,9 @@ func (p *Page) Validate() error {
 	if len(p.Title) > 64 || len(p.Icon) > 16 {
 		return fmt.Errorf("page %q: title/icon too long", p.Name)
 	}
+	if strings.ContainsFunc(p.Title, unicode.IsControl) || strings.ContainsFunc(p.Icon, unicode.IsControl) {
+		return fmt.Errorf("page %q: title/icon contains control characters", p.Name)
+	}
 	if p.TemplateID != "" {
 		if err := validateTemplateID(p.TemplateID); err != nil {
 			return fmt.Errorf("page %q: %w", p.Name, err)
@@ -100,6 +104,9 @@ func (it *Item) Validate() error {
 	if strings.ContainsAny(it.ID, "\"'<>`&\\/\r\n\t ") {
 		return fmt.Errorf("item %q: id contains invalid characters", it.ID)
 	}
+	if len(it.Title) > 256 || strings.ContainsFunc(it.Title, unicode.IsControl) {
+		return fmt.Errorf("item %q: title must be at most 256 bytes and contain no control characters", it.ID)
+	}
 	switch it.Type {
 	case ItemHTML, ItemJS, ItemCSS:
 	default:
@@ -113,14 +120,44 @@ func (it *Item) Validate() error {
 	if len(it.Content) > MaxItemContentBytes {
 		return fmt.Errorf("item %q: content exceeds %d bytes", it.ID, MaxItemContentBytes)
 	}
+	if len(it.Meta) > MaxItemMetaEntries {
+		return fmt.Errorf("item %q: metadata has too many entries: %d > %d", it.ID, len(it.Meta), MaxItemMetaEntries)
+	}
+	for key, value := range it.Meta {
+		if strings.TrimSpace(key) == "" || len(key) > MaxItemMetaKeyBytes || strings.ContainsFunc(key, unicode.IsControl) {
+			return fmt.Errorf("item %q: metadata key must be non-empty, contain no controls and not exceed %d bytes", it.ID, MaxItemMetaKeyBytes)
+		}
+		if len(value) > MaxItemMetaValueBytes || strings.ContainsRune(value, '\x00') {
+			return fmt.Errorf("item %q: metadata value for %q must not contain NUL or exceed %d bytes", it.ID, key, MaxItemMetaValueBytes)
+		}
+	}
 	return nil
 }
 
 const (
 	// MaxItemContentBytes 是单个 Item 内容的上限。
 	MaxItemContentBytes = 512 << 10
+	// MaxUserItemBytes bounds the aggregate serialized source carried by all
+	// Items for one user. Without an aggregate bound, repeated valid 512 KiB
+	// writes could make every list, snapshot and AI inventory operation copy
+	// hundreds of MiB at once.
+	MaxUserItemBytes = 8 << 20
+	// MaxUserRevisionBytes bounds the aggregate Item/Template source retained in
+	// automatic snapshots for one user. Count-only retention is insufficient
+	// when a few otherwise-valid snapshots are several MiB each.
+	MaxUserRevisionBytes = 64 << 20
+	// MaxRevisionsPerUser is the hard safety ceiling even when count-based
+	// retention is disabled with WithMaxRevisions(0). The byte ceiling remains
+	// the primary limit for content-heavy snapshots; this one bounds empty or
+	// nearly-empty revision metadata and third-party Store implementations.
+	MaxRevisionsPerUser = 4096
 	// MaxItemsPerUser 是单个用户 Item 数量上限。
 	MaxItemsPerUser = 512
+	// Item metadata is intended for compact runtime hints such as slot/module.
+	// Bound it separately so small/empty content cannot hide an unbounded map.
+	MaxItemMetaEntries    = 64
+	MaxItemMetaKeyBytes   = 128
+	MaxItemMetaValueBytes = 1024
 	// DefaultMaxRevisions 是默认保留的历史快照条数。
 	DefaultMaxRevisions = 50
 	// MaxPageErrors 是每个用户保留的页面错误条数。

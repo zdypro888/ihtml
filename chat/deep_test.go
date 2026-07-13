@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -39,6 +40,88 @@ func (m *stubToolCallingModel) Stream(context.Context, []*schema.Message, ...ein
 	return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("ok", nil)}), nil
 }
 
+type dynamicToolSearchModelState struct {
+	mu            sync.Mutex
+	calls         int
+	toolsPerCall  [][]string
+	sawListResult bool
+}
+
+type dynamicToolSearchModel struct {
+	state *dynamicToolSearchModelState
+	tools []*schema.ToolInfo
+}
+
+func (m *dynamicToolSearchModel) WithTools(tools []*schema.ToolInfo) (einoModel.ToolCallingChatModel, error) {
+	clone := *m
+	clone.tools = append([]*schema.ToolInfo(nil), tools...)
+	return &clone, nil
+}
+
+func (m *dynamicToolSearchModel) Generate(_ context.Context, input []*schema.Message, opts ...einoModel.Option) (*schema.Message, error) {
+	return m.respond(input, opts...)
+}
+
+func (m *dynamicToolSearchModel) Stream(_ context.Context, input []*schema.Message, opts ...einoModel.Option) (*schema.StreamReader[*schema.Message], error) {
+	response, err := m.respond(input, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{response}), nil
+}
+
+func (m *dynamicToolSearchModel) respond(input []*schema.Message, opts ...einoModel.Option) (*schema.Message, error) {
+	options := einoModel.GetCommonOptions(&einoModel.Options{
+		Tools: append([]*schema.ToolInfo(nil), m.tools...),
+	}, opts...)
+	visible := make(map[string]bool, len(options.Tools))
+	names := make([]string, 0, len(options.Tools))
+	for _, info := range options.Tools {
+		if info == nil {
+			continue
+		}
+		visible[info.Name] = true
+		names = append(names, info.Name)
+	}
+	if len(input) == 0 || input[len(input)-1] == nil {
+		return nil, errors.New("dynamic tool-search model received no input")
+	}
+	last := input[len(input)-1]
+
+	m.state.mu.Lock()
+	defer m.state.mu.Unlock()
+	m.state.calls++
+	m.state.toolsPerCall = append(m.state.toolsPerCall, names)
+
+	switch {
+	case last.Role == schema.Tool && last.ToolName == "ui_item_list":
+		if !visible["ui_item_list"] {
+			return nil, fmt.Errorf("selected tool disappeared before final response: %v", visible)
+		}
+		if !strings.Contains(last.Content, `"count":1`) || !strings.Contains(last.Content, "alpha") {
+			return nil, fmt.Errorf("ui_item_list was not executed against the test store: %s", last.Content)
+		}
+		m.state.sawListResult = true
+		return schema.AssistantMessage("<p>已读取 alpha</p>", nil), nil
+	case last.Role == schema.Tool && last.ToolName == "tool_search":
+		if !visible["tool_search"] || !visible["ui_plan_update"] || !visible["ui_item_list"] {
+			return nil, fmt.Errorf("deferred tool was not activated after tool_search: %v", visible)
+		}
+		return schema.AssistantMessage("", []schema.ToolCall{{
+			ID: "list-1", Type: "function",
+			Function: schema.FunctionCall{Name: "ui_item_list", Arguments: `{}`},
+		}}), nil
+	default:
+		if !visible["tool_search"] || !visible["ui_plan_update"] || visible["ui_item_list"] {
+			return nil, fmt.Errorf("unexpected initial Deep tools: %v", visible)
+		}
+		return schema.AssistantMessage("", []schema.ToolCall{{
+			ID: "search-1", Type: "function",
+			Function: schema.FunctionCall{Name: "tool_search", Arguments: `{"query":"select:ui_item_list"}`},
+		}}), nil
+	}
+}
+
 func TestSelectAgentModeFastDefaultAndDeepOptIn(t *testing.T) {
 	mode, err := selectAgentMode(Config{}, "")
 	if err != nil || mode != AgentModeFast {
@@ -58,8 +141,28 @@ func TestSelectAgentModeFastDefaultAndDeepOptIn(t *testing.T) {
 
 func TestNewAppliesBoundedAgentDefaults(t *testing.T) {
 	b := New(Config{})
-	if b.cfg.MaxModelCallsPerTurn != 24 || b.cfg.MaxSubtasksPerTurn != 3 || b.cfg.MaxTurnDuration != 2*time.Minute {
-		t.Fatalf("budget defaults = calls:%d subtasks:%d duration:%s", b.cfg.MaxModelCallsPerTurn, b.cfg.MaxSubtasksPerTurn, b.cfg.MaxTurnDuration)
+	if b.cfg.MaxModelCallsPerTurn != 24 || b.cfg.MaxSubtasksPerTurn != 3 ||
+		b.cfg.MaxModelRetries != 1 ||
+		b.cfg.MaxToolCallsPerTurn != defaultMaxToolCallsPerTurn ||
+		b.cfg.MaxToolCallsPerTool != defaultMaxToolCallsPerTool ||
+		b.cfg.MaxRepeatedToolCalls != defaultMaxRepeatedToolCalls ||
+		b.cfg.SummarizeAfterTokens != defaultSummarizeAfterTokens ||
+		b.cfg.SummarizeAfterMessages != defaultSummarizeAfterMessages ||
+		b.cfg.MaxProviderResponseBytes != defaultMaxProviderResponseBytes ||
+		b.cfg.MaxModelOutputBytesPerCall != defaultMaxModelOutputBytesPerCall ||
+		b.cfg.MaxModelOutputBytesPerTurn != defaultMaxModelOutputBytesPerTurn ||
+		b.cfg.MaxModelOutputEventsPerTurn != defaultMaxModelOutputEventsPerTurn ||
+		b.cfg.MaxAssistantMessageBytes != defaultMaxAssistantMessageBytes ||
+		b.cfg.MaxReasoningBytesPerTurn != defaultMaxReasoningBytesPerTurn ||
+		b.cfg.MaxTurnDuration != 2*time.Minute {
+		t.Fatalf("agent defaults = model:%d retries:%d subtasks:%d tools:%d/%d/%d summary:%d/%d output:%d/%d/%d/%d visible:%d reasoning:%d duration:%s",
+			b.cfg.MaxModelCallsPerTurn, b.cfg.MaxModelRetries, b.cfg.MaxSubtasksPerTurn,
+			b.cfg.MaxToolCallsPerTurn, b.cfg.MaxToolCallsPerTool, b.cfg.MaxRepeatedToolCalls,
+			b.cfg.SummarizeAfterTokens, b.cfg.SummarizeAfterMessages,
+			b.cfg.MaxProviderResponseBytes, b.cfg.MaxModelOutputBytesPerCall,
+			b.cfg.MaxModelOutputBytesPerTurn, b.cfg.MaxModelOutputEventsPerTurn,
+			b.cfg.MaxAssistantMessageBytes, b.cfg.MaxReasoningBytesPerTurn,
+			b.cfg.MaxTurnDuration)
 	}
 }
 
@@ -121,6 +224,75 @@ func TestBuildTurnAgentKeepsFastDefaultAndCreatesDeepAgent(t *testing.T) {
 	}
 	if _, err := buildTurnAgent(context.Background(), AgentModeDeep, "instruction", model, rt, budget, Config{MaxIterations: 2}, false); err == nil {
 		t.Fatal("deep mode silently downgraded when tools were disabled")
+	}
+}
+
+func TestDeepAgentSearchesAndExecutesDeferredSemanticTool(t *testing.T) {
+	ctx := context.Background()
+	rt, sink, svc := newTestRuntime(t)
+	if err := svc.PutItems(ctx, "t1", []ihtml.Item{{
+		ID: "alpha", Type: ihtml.ItemHTML, Content: "<p>alpha</p>",
+	}}, "test", "seed"); err != nil {
+		t.Fatal(err)
+	}
+
+	budgetCfg := Config{
+		MaxModelCallsPerTurn: 8,
+		MaxSubtasksPerTurn:   2,
+		MaxToolCallsPerTurn:  8,
+		MaxToolCallsPerTool:  4,
+		MaxRepeatedToolCalls: 2,
+		MaxTurnDuration:      -1,
+	}
+	budget := newTurnBudget(budgetCfg, AgentModeDeep, sink.emit)
+	rt.mode = AgentModeDeep
+	rt.budget = budget
+	state := &dynamicToolSearchModelState{}
+	model := withTurnBudget(&dynamicToolSearchModel{state: state}, budget)
+	agent, err := buildTurnAgent(ctx, AgentModeDeep, "完成用户要求。", model, rt, budget, Config{
+		MaxIterations:               8,
+		MaxModelRetries:             -1,
+		DisableContextSummarization: true,
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	iter := agent.Run(ctx, &adk.AgentInput{
+		Messages:        []*schema.Message{schema.UserMessage("列出当前 Item")},
+		EnableStreaming: false,
+	})
+	var final string
+	for event, ok := iter.Next(); ok; event, ok = iter.Next() {
+		if event == nil {
+			continue
+		}
+		if event.Err != nil {
+			t.Fatalf("Deep agent event: %v", event.Err)
+		}
+		if event.Output == nil || event.Output.MessageOutput == nil {
+			continue
+		}
+		message := event.Output.MessageOutput.Message
+		if message != nil && message.Role == schema.Assistant && len(message.ToolCalls) == 0 {
+			final = message.Content
+		}
+	}
+
+	state.mu.Lock()
+	calls := state.calls
+	toolsPerCall := append([][]string(nil), state.toolsPerCall...)
+	sawListResult := state.sawListResult
+	state.mu.Unlock()
+	if final != "<p>已读取 alpha</p>" || calls != 3 || !sawListResult {
+		t.Fatalf("final=%q calls=%d saw_list_result=%v tools=%v", final, calls, sawListResult, toolsPerCall)
+	}
+	if got := budget.snapshot().ToolCalls; got != 1 {
+		t.Fatalf("semantic tool calls = %d; tool_search must not consume the host tool budget", got)
+	}
+	evidence := rt.timeline.completedEvidence()
+	if len(evidence) != 1 || evidence[0].Tool != "ui_item_list" || !strings.Contains(string(evidence[0].Body), `"count":1`) {
+		t.Fatalf("completed semantic-tool evidence = %+v", evidence)
 	}
 }
 
@@ -232,7 +404,7 @@ func TestDeepPendingResponseCannotClaimCompletion(t *testing.T) {
 		Message: "页面已经全部修改并验证完成", Streamed: true,
 		ToolCalls: []ihtml.ProposedToolCall{{Name: "ui_item_put", RequiresConfirmation: true}},
 	}, tl)
-	if resp.Message != deepApprovalPausedMessage || resp.Streamed {
+	if resp.Message != deepApprovalPausedMessage || resp.Streamed || resp.ContentFormat != ihtml.ChatContentFormatText {
 		t.Fatalf("pending response was not forced to pause: %+v", resp)
 	}
 	if len(events) != 1 || events[0].Type != "assistant_plan" || events[0].Agent == nil || events[0].Agent.Status != "paused" {

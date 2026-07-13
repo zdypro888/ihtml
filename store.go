@@ -15,6 +15,27 @@ var ErrNotFound = errors.New("ihtml: not found")
 // 调用方应重读状态、重放变更后重试。
 var ErrVersionConflict = errors.New("ihtml: user state version conflict")
 
+// ErrKVConflict 表示一次带版本前置条件的 KV 写入所依据的值已经变化。
+// 调用方必须重新读取该键，并决定是重放本地修改还是让用户处理冲突。
+var ErrKVConflict = errors.New("ihtml: kv revision conflict")
+
+// KVConflictError reports both KV revisions and, when the key currently
+// exists, includes a defensive copy of its latest value so editors can offer a
+// reload/merge flow without an extra round trip.
+type KVConflictError struct {
+	Key      string
+	Expected string
+	Actual   string
+	Current  json.RawMessage
+	Exists   bool
+}
+
+func (e *KVConflictError) Error() string {
+	return "kv " + e.Key + " revision conflict: expected " + e.Expected + ", current " + e.Actual
+}
+
+func (e *KVConflictError) Unwrap() error { return errors.Join(ErrKVConflict, ErrConflict) }
+
 // Store 是持久化接口。实现只需要保证单个方法的原子性;
 // "读-改-写"的并发合并在单副本内由上层(Handler)按用户加锁串行化。
 // 多副本部署要求 Store 同时实现 VersionedUserStateStore(内置 Store 均已实现),

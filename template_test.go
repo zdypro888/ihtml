@@ -7,9 +7,118 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 )
+
+func TestTemplateVersionRejectsAggregatePropertyAmplification(t *testing.T) {
+	props := make(map[string]json.RawMessage, maxTemplateProps)
+	value := json.RawMessage(`"` + strings.Repeat("x", maxTemplatePropBytes-2) + `"`)
+	for i := 0; i < maxTemplateProps; i++ {
+		props[fmt.Sprintf("property-%02d", i)] = value
+	}
+	document := TemplateVersion{
+		RootID: "root",
+		Nodes:  []TemplateNode{{ID: "root", Kind: NodeGrid, Props: props}},
+	}
+	if err := document.Validate(); err == nil || !strings.Contains(err.Error(), "template document exceeds") {
+		t.Fatalf("aggregate template limit error = %v", err)
+	}
+}
+
+func TestTemplateCatalogRejectsAggregateDocumentAmplification(t *testing.T) {
+	props := make(map[string]json.RawMessage, maxTemplateProps/2)
+	value := json.RawMessage(`"` + strings.Repeat("x", maxTemplatePropBytes-2) + `"`)
+	for i := 0; i < maxTemplateProps/2; i++ {
+		props[fmt.Sprintf("property-%02d", i)] = value
+	}
+	now := time.Now()
+	catalog := templateCatalog{NextRevision: 1}
+	for i := 0; i < 9; i++ {
+		version := TemplateVersion{Version: 1, RootID: "root", Nodes: []TemplateNode{{ID: "root", Kind: NodeGrid, Props: props}}}
+		published := cloneTemplateVersion(version)
+		catalog.Templates = append(catalog.Templates, Template{
+			ID: fmt.Sprintf("template-%d", i), Name: "Large", Revision: 1,
+			Draft: version, Published: &published, CreatedAt: now, UpdatedAt: now, PublishedAt: &now,
+		})
+	}
+	if err := validateTemplateCatalog(catalog, nil); err == nil || !strings.Contains(err.Error(), "template catalog exceeds") {
+		t.Fatalf("aggregate catalog limit error = %v", err)
+	}
+}
+
+func TestTemplateCatalogStorageEnvelopeDoesNotReimposeLegacyOneMiBLimit(t *testing.T) {
+	props := make(map[string]json.RawMessage, maxTemplateProps/2)
+	value := json.RawMessage(`"` + strings.Repeat("<", maxTemplatePropBytes-2) + `"`)
+	for i := 0; i < maxTemplateProps/2; i++ {
+		props[fmt.Sprintf("payload-%02d", i)] = value
+	}
+	now := time.Now()
+	catalog := templateCatalog{NextRevision: 3}
+	for i := 1; i <= 3; i++ {
+		catalog.Templates = append(catalog.Templates, Template{
+			ID: fmt.Sprintf("template-%d", i), Name: "Large < layout", Revision: uint64(i),
+			Draft: TemplateVersion{
+				Version: uint64(i), RootID: "root",
+				Nodes: []TemplateNode{{ID: "root", Kind: NodeGrid, Props: props}},
+			},
+			CreatedAt: now, UpdatedAt: now,
+		})
+	}
+	state := UserState{KV: make(map[string]json.RawMessage)}
+	if err := setStateTemplateCatalog(&state, catalog, nil); err != nil {
+		t.Fatalf("valid multi-document catalog was rejected: %v", err)
+	}
+	raw := state.KV[templatesKVKey]
+	if len(raw) <= maxInternalKVValueSize || len(raw) > MaxTemplateCatalogStorageBytes {
+		t.Fatalf("encoded catalog bytes = %d, want legacy-limit < bytes <= storage-limit", len(raw))
+	}
+	decoded, err := decodeTemplateCatalog(raw, nil)
+	if err != nil || len(decoded.Templates) != len(catalog.Templates) {
+		t.Fatalf("stored catalog did not round-trip: templates=%d err=%v", len(decoded.Templates), err)
+	}
+}
+
+type currentTemplateReadStore struct {
+	Store
+	items []Item
+	kv    map[string]json.RawMessage
+}
+
+func (s *currentTemplateReadStore) Items(context.Context, string) ([]Item, error) {
+	return s.items, nil
+}
+
+func (s *currentTemplateReadStore) KVGet(_ context.Context, _ string, key string) (json.RawMessage, error) {
+	value, ok := s.kv[key]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return value, nil
+}
+
+func TestGetCurrentTemplateRejectsHostileLegacyStorePayloads(t *testing.T) {
+	largeContent := strings.Repeat("x", MaxItemContentBytes)
+	items := make([]Item, 17)
+	for i := range items {
+		items[i] = Item{ID: fmt.Sprintf("large-%d", i), Type: ItemHTML, Content: largeContent}
+	}
+	badItems := &currentTemplateReadStore{Store: NewMemoryStore(), items: items, kv: map[string]json.RawMessage{}}
+	if _, err := New(badItems).GetCurrentTemplate(context.Background(), "u", ""); err == nil || !strings.Contains(err.Error(), "item data exceeds") {
+		t.Fatalf("oversized legacy Items error = %v", err)
+	}
+
+	badLayout := &currentTemplateReadStore{
+		Store: NewMemoryStore(), kv: map[string]json.RawMessage{
+			"layout.root": json.RawMessage(`"` + strings.Repeat("x", MaxKVValueBytes) + `"`),
+		},
+	}
+	if _, err := New(badLayout).GetCurrentTemplate(context.Background(), "u", ""); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("oversized legacy layout error = %v", err)
+	}
+}
 
 func editableTemplate(id string) Template {
 	return Template{

@@ -39,6 +39,295 @@ func TestPutItemsLimitFailureDoesNotCreateRevision(t *testing.T) {
 	}
 }
 
+func TestKVCompareAndSetIsAtomicAcrossHandlers(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	first := New(store)
+	second := New(store)
+	t.Cleanup(func() { _ = first.Close() })
+	t.Cleanup(func() { _ = second.Close() })
+
+	revision, err := first.KVCompareAndSet(ctx, "u", "layout", json.RawMessage(`{"value":0}`), MissingKVRevision)
+	if err != nil || revision == "" || revision == MissingKVRevision {
+		t.Fatalf("initial conditional create: revision=%q err=%v", revision, err)
+	}
+	if err := second.KVSet(ctx, "u", "unrelated", json.RawMessage(`true`)); err != nil {
+		t.Fatal(err)
+	}
+	// An unrelated user-state version bump must not invalidate the per-key token.
+	revision, err = first.KVCompareAndSet(ctx, "u", "layout", json.RawMessage(`{"value":1}`), revision)
+	if err != nil {
+		t.Fatalf("unrelated write caused a false conflict: %v", err)
+	}
+
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	writesBefore := first.Stats()["writes"] + second.Stats()["writes"]
+	for i, handler := range []*Handler{first, second} {
+		i, handler := i, handler
+		go func() {
+			<-start
+			_, err := handler.KVCompareAndSet(ctx, "u", "layout", json.RawMessage(fmt.Sprintf(`{"writer":%d}`, i)), revision)
+			results <- err
+		}()
+	}
+	close(start)
+	successes, conflicts := 0, 0
+	for range 2 {
+		err := <-results
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, ErrKVConflict):
+			conflicts++
+			var detail *KVConflictError
+			if !errors.As(err, &detail) || !detail.Exists || detail.Actual == revision || !json.Valid(detail.Current) {
+				t.Fatalf("conflict did not carry the latest value: %#v", detail)
+			}
+		default:
+			t.Fatalf("unexpected conditional write error: %v", err)
+		}
+	}
+	if successes != 1 || conflicts != 1 {
+		t.Fatalf("conditional results: successes=%d conflicts=%d", successes, conflicts)
+	}
+	if writesAfter := first.Stats()["writes"] + second.Stats()["writes"]; writesAfter != writesBefore+1 {
+		t.Fatalf("failed CAS changed writes metric: before=%d after=%d", writesBefore, writesAfter)
+	}
+}
+
+func TestDeleteItemsAtomicallyCleansPersistedItemLayouts(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	h := New(store)
+	t.Cleanup(func() { _ = h.Close() })
+	if err := h.PutItems(ctx, "u", []Item{
+		{ID: "a", Type: ItemHTML, Content: "<p>A</p>"},
+		{ID: "b", Type: ItemHTML, Content: "<p>B</p>"},
+	}, "api", "seed"); err != nil {
+		t.Fatal(err)
+	}
+	layout := json.RawMessage(`{"version":1,"page":"","mode":"grid","unknown":{"keep":true},"items":{"a":{"slot":"main"},"b":{"slot":"main"}},"orderBySlot":{"main":["a","b"]}}`)
+	if err := h.KVSet(ctx, "u", ItemLayoutKVPrefix+"root", layout); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := h.DeleteItems(ctx, "u", []string{"a"}, "api", "delete a")
+	if err != nil || len(removed) != 1 || removed[0] != "a" {
+		t.Fatalf("delete result=%v err=%v", removed, err)
+	}
+	raw, err := h.KVGet(ctx, "u", ItemLayoutKVPrefix+"root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Unknown map[string]bool            `json:"unknown"`
+		Items   map[string]json.RawMessage `json:"items"`
+		Order   map[string][]string        `json:"orderBySlot"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := doc.Items["a"]; exists || doc.Items["b"] == nil || !doc.Unknown["keep"] || !reflect.DeepEqual(doc.Order["main"], []string{"b"}) {
+		t.Fatalf("layout cleanup lost or retained the wrong data: %s", raw)
+	}
+}
+
+func TestDeleteItemsCleansCaseInsensitiveItemLayoutKeys(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	h := New(store)
+	t.Cleanup(func() { _ = h.Close() })
+	if err := h.PutItems(ctx, "u", []Item{
+		{ID: "a", Type: ItemHTML, Content: "<p>A</p>"},
+		{ID: "b", Type: ItemHTML, Content: "<p>B</p>"},
+	}, "api", "seed"); err != nil {
+		t.Fatal(err)
+	}
+	key := "ITEM-LAYOUT.root"
+	if err := h.KVSet(ctx, "u", key, json.RawMessage(`{"version":1,"page":"","items":{"a":{"slot":"main"},"b":{"slot":"main"}},"orderBySlot":{"main":["a","b"]}}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.DeleteItems(ctx, "u", []string{"a"}, "api", "delete a"); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := h.KVGet(ctx, "u", key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Items map[string]json.RawMessage `json:"items"`
+		Order map[string][]string        `json:"orderBySlot"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := doc.Items["a"]; exists || doc.Items["b"] == nil || !reflect.DeepEqual(doc.Order["main"], []string{"b"}) {
+		t.Fatalf("case-insensitive layout cleanup retained the deleted Item: %s", raw)
+	}
+}
+
+func TestDeleteItemsLayoutCleanupDoesNotExpandHTMLNearKVLimit(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	h := New(store)
+	t.Cleanup(func() { _ = h.Close() })
+	if err := h.PutItems(ctx, "u", []Item{
+		{ID: "a", Type: ItemHTML, Content: "<p>A</p>"},
+		{ID: "b", Type: ItemHTML, Content: "<p>B</p>"},
+	}, "api", "seed"); err != nil {
+		t.Fatal(err)
+	}
+
+	prefix := `{"version":1,"page":"","items":{"a":{"slot":"main"},"b":{"slot":"main"}},"orderBySlot":{"main":["a","b"]},"unknown":"`
+	suffix := `"}`
+	unknownLength := MaxKVValueBytes - len(prefix) - len(suffix)
+	if unknownLength <= 0 {
+		t.Fatal("invalid near-limit test fixture")
+	}
+	raw := json.RawMessage(prefix + strings.Repeat("<", unknownLength) + suffix)
+	if len(raw) != MaxKVValueBytes || !json.Valid(raw) {
+		t.Fatalf("invalid near-limit layout fixture: bytes=%d valid=%v", len(raw), json.Valid(raw))
+	}
+	key := ItemLayoutKVPrefix + "near-limit"
+	if err := h.KVSet(ctx, "u", key, raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.DeleteItems(ctx, "u", []string{"a"}, "api", "delete a"); err != nil {
+		t.Fatalf("valid near-limit layout blocked Item deletion: %v", err)
+	}
+	cleaned, err := h.KVGet(ctx, "u", key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cleaned) > MaxKVValueBytes || strings.Contains(string(cleaned), `\u003c`) {
+		t.Fatalf("layout cleanup expanded opaque HTML: bytes=%d", len(cleaned))
+	}
+	var doc struct {
+		Unknown string                     `json:"unknown"`
+		Items   map[string]json.RawMessage `json:"items"`
+		Order   map[string][]string        `json:"orderBySlot"`
+	}
+	if err := json.Unmarshal(cleaned, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Unknown) != unknownLength || strings.Trim(doc.Unknown, "<") != "" {
+		t.Fatal("layout cleanup did not preserve the opaque HTML field")
+	}
+	if _, exists := doc.Items["a"]; exists || doc.Items["b"] == nil || !reflect.DeepEqual(doc.Order["main"], []string{"b"}) {
+		t.Fatalf("near-limit layout cleanup retained the deleted Item: %s", cleaned[:min(len(cleaned), 512)])
+	}
+}
+
+func TestPutItemsAggregateByteLimitIsAtomic(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	existing := make([]Item, 0, 16)
+	for i := 0; i < 15; i++ {
+		existing = append(existing, Item{ID: fmt.Sprintf("large-%d", i), Type: ItemCSS, Content: strings.Repeat("x", MaxItemContentBytes)})
+	}
+	existing = append(existing, Item{ID: "remainder", Type: ItemCSS, Content: strings.Repeat("y", 400<<10)})
+	if err := store.ReplaceItems(ctx, "u", existing); err != nil {
+		t.Fatal(err)
+	}
+	h := New(store)
+	err := h.PutItems(ctx, "u", []Item{{ID: "overflow", Type: ItemCSS, Content: strings.Repeat("z", 200<<10)}}, "api", "overflow")
+	if err == nil || !strings.Contains(err.Error(), "item data exceeds") {
+		t.Fatalf("aggregate limit error = %v", err)
+	}
+	revisions, revErr := store.Revisions(ctx, "u")
+	if revErr != nil {
+		t.Fatal(revErr)
+	}
+	if len(revisions) != 0 {
+		t.Fatalf("failed aggregate write created %d revisions", len(revisions))
+	}
+	items, itemsErr := store.Items(ctx, "u")
+	if itemsErr != nil {
+		t.Fatal(itemsErr)
+	}
+	if len(items) != len(existing) {
+		t.Fatalf("failed aggregate write changed item count: %d", len(items))
+	}
+}
+
+func TestListItemsRejectsOversizedOrUnboundedStoredMetadata(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	items := make([]Item, 17)
+	for i := range items {
+		items[i] = Item{ID: fmt.Sprintf("large-%d", i), Type: ItemHTML, Content: strings.Repeat("x", MaxItemContentBytes)}
+	}
+	if err := store.ReplaceItems(ctx, "u", items); err != nil {
+		t.Fatal(err)
+	}
+	h := New(store)
+	if _, err := h.ListItems(ctx, "u"); err == nil || !strings.Contains(err.Error(), "item data exceeds") {
+		t.Fatalf("oversized stored item set error = %v", err)
+	}
+
+	badMeta := Item{ID: "meta", Type: ItemHTML, Meta: map[string]string{"slot": strings.Repeat("x", MaxItemMetaValueBytes+1)}}
+	if err := badMeta.Validate(); err == nil {
+		t.Fatal("oversized Item metadata value was accepted")
+	}
+}
+
+func TestPrependRevisionEnforcesAggregateByteRetention(t *testing.T) {
+	large := strings.Repeat("x", MaxItemContentBytes)
+	items := make([]Item, 0, 16)
+	for i := 0; i < 15; i++ {
+		items = append(items, Item{ID: fmt.Sprintf("large-%d", i), Type: ItemHTML, Content: large})
+	}
+	items = append(items, Item{ID: "remainder", Type: ItemHTML, Content: strings.Repeat("y", 400<<10)})
+	if err := validateItems(items); err != nil {
+		t.Fatalf("test revision must itself remain valid: %v", err)
+	}
+
+	state := UserState{}
+	for i := 0; i < 12; i++ {
+		prependRevision(&state, Revision{ID: fmt.Sprintf("r-%d", i), Items: items}, 0)
+	}
+	total := 0
+	for _, revision := range state.Revisions {
+		total += revisionSourceBytes(revision)
+	}
+	if total > MaxUserRevisionBytes {
+		t.Fatalf("retained revisions use %d bytes, limit is %d", total, MaxUserRevisionBytes)
+	}
+	if len(state.Revisions) == 0 || len(state.Revisions) >= 12 {
+		t.Fatalf("byte retention kept %d revisions, want a non-empty bounded suffix", len(state.Revisions))
+	}
+	if state.Revisions[0].ID != "r-11" {
+		t.Fatalf("newest revision was not retained: %+v", state.Revisions)
+	}
+}
+
+func TestStoredStateAggregateGuardsBoundSharedPayloads(t *testing.T) {
+	// Reuse the same backing bytes to keep the test allocation small while the
+	// validator still accounts for the logical per-key payload copied by a Store.
+	value := json.RawMessage(`"` + strings.Repeat("x", maxInternalKVValueSize-2) + `"`)
+	kv := make(map[string]json.RawMessage, 40)
+	for i := 0; i < 40; i++ {
+		kv[fmt.Sprintf("__ihtml.test-%02d", i)] = value
+	}
+	if err := validateStoredKV(kv, 0); err == nil || !strings.Contains(err.Error(), "kv data exceeds") {
+		t.Fatalf("aggregate kv guard error = %v", err)
+	}
+
+	large := strings.Repeat("x", MaxItemContentBytes)
+	items := make([]Item, 0, 16)
+	for i := 0; i < 15; i++ {
+		items = append(items, Item{ID: fmt.Sprintf("large-%d", i), Type: ItemHTML, Content: large})
+	}
+	items = append(items, Item{ID: "remainder", Type: ItemHTML, Content: strings.Repeat("y", 400<<10)})
+	revisions := make([]Revision, 9)
+	for i := range revisions {
+		revisions[i] = Revision{ID: fmt.Sprintf("r-%d", i), Items: items}
+	}
+	if err := validateStoredRevisions(revisions); err == nil || !strings.Contains(err.Error(), "revisions exceed") {
+		t.Fatalf("aggregate revision guard error = %v", err)
+	}
+}
+
 func TestNoopPutDoesNotRewriteOrSnapshot(t *testing.T) {
 	ctx := context.Background()
 	store := NewMemoryStore()
@@ -187,6 +476,51 @@ func TestReportErrorsMergesAcrossHandlers(t *testing.T) {
 }
 
 type legacyStoreView struct{ Store }
+
+type preflightLegacyStore struct {
+	Store
+	keys          []string
+	revisions     []RevisionInfo
+	kvGets        int
+	revisionReads int
+}
+
+func (s *preflightLegacyStore) KVKeys(context.Context, string) ([]string, error) {
+	return append([]string(nil), s.keys...), nil
+}
+
+func (s *preflightLegacyStore) KVGet(context.Context, string, string) (json.RawMessage, error) {
+	s.kvGets++
+	return json.RawMessage(`true`), nil
+}
+
+func (s *preflightLegacyStore) Revisions(context.Context, string) ([]RevisionInfo, error) {
+	return append([]RevisionInfo(nil), s.revisions...), nil
+}
+
+func (s *preflightLegacyStore) RevisionItems(context.Context, string, string) ([]Item, error) {
+	s.revisionReads++
+	return nil, nil
+}
+
+func TestLegacyStoreMetadataIsValidatedBeforeSecondaryReads(t *testing.T) {
+	ctx := context.Background()
+	badKey := &preflightLegacyStore{
+		Store: NewMemoryStore(),
+		keys:  []string{strings.Repeat("k", 65)},
+	}
+	if _, err := New(badKey).ExportUser(ctx, "u"); err == nil || badKey.kvGets != 0 {
+		t.Fatalf("invalid legacy key reached KVGet: calls=%d err=%v", badKey.kvGets, err)
+	}
+
+	badRevision := &preflightLegacyStore{
+		Store:     NewMemoryStore(),
+		revisions: []RevisionInfo{{ID: strings.Repeat("r", maxRevisionIDBytes+1)}},
+	}
+	if _, err := New(badRevision).ExportUser(ctx, "u"); err == nil || badRevision.revisionReads != 0 {
+		t.Fatalf("invalid legacy revision reached RevisionItems: calls=%d err=%v", badRevision.revisionReads, err)
+	}
+}
 
 func TestKVAndErrorsRemainCompatibleWithLegacyStore(t *testing.T) {
 	ctx := context.Background()

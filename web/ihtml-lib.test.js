@@ -6,7 +6,102 @@ const assert = require('node:assert/strict');
 global.window = {};
 require('./ihtml-lib.js');
 
-const { fmt, util, makeT, template, chatAgent, chatTrace, itemLayout, runtime } = global.window.__ihtmlLib;
+const { fmt, util, makeT, template, chatAgent, chatTrace, chatContent, itemLayout, runtime } = global.window.__ihtmlLib;
+
+test('chat content format is additive, locks explicitly, and unknown values fail closed to text', () => {
+  assert.equal(chatContent.maxRenderBytes, 512 * 1024, 'browser hard limit must accept the SDK maximum');
+  assert.equal(chatContent.normalizeFormat(''), 'auto');
+  assert.equal(chatContent.normalizeFormat('application/x-unknown'), 'text');
+  assert.equal(chatContent.mergeFormat('auto', 'markdown'), 'markdown');
+  assert.equal(chatContent.mergeFormat('markdown', 'html'), 'markdown', 'the first explicit format locks the stream');
+  assert.equal(chatContent.mergeFormat('html', 'text'), 'html', 'an early explicit HTML delta remains authoritative');
+  assert.equal(chatContent.mergeFormat('html', '', true), 'auto', 'assistant_reset starts a fresh rendering stream');
+  assert.equal(chatContent.finalizeFormat('text', 'html'), 'html', 'assistant_done overrides the stream format');
+  assert.equal(chatContent.finalizeFormat('html', 'application/x-unknown'), 'text', 'unknown final formats fail closed');
+  assert.equal(chatContent.finalizeFormat('markdown', ''), 'markdown', 'an omitted final format preserves the stream format');
+  assert.deepEqual(chatContent.doneSnapshot({ message: '' }), { present: true, message: '' }, 'an explicit empty final snapshot clears the draft');
+  assert.deepEqual(chatContent.doneSnapshot({}), { present: false, message: '' }, 'an omitted snapshot preserves legacy streamed content');
+  assert.equal(chatContent.resolveFormat('', '<table><tr><td>1</td></tr></table>'), 'html');
+  assert.equal(chatContent.resolveFormat('', '```html\n<table></table>\n```'), 'markdown', 'HTML examples in code fences are not executed as HTML');
+  assert.equal(chatContent.resolveFormat('unexpected', '<b>not interpreted</b>'), 'text');
+});
+
+test('chat answer byte ceiling accepts SDK overrides through 512 KiB and clips above it', () => {
+  const within = 'x'.repeat(300 * 1024);
+  const accepted = chatContent.clipUTF8(within, chatContent.maxRenderBytes);
+  assert.equal(accepted.truncated, false);
+  assert.equal(accepted.text.length, within.length);
+
+  const oversized = '😀'.repeat(140 * 1024);
+  const clipped = chatContent.clipUTF8(oversized, chatContent.maxRenderBytes);
+  assert.equal(clipped.truncated, true);
+  assert.ok(clipped.bytes <= 512 * 1024);
+  assert.equal(clipped.text.length % 2, 0, 'UTF-16 surrogate pair remains complete');
+  assert.equal(clipped.text.codePointAt(clipped.text.length - 2), 0x1F600);
+});
+
+test('chat Markdown renders generic rich blocks including GFM tables without business-specific rules', () => {
+  const html = chatContent.markdownToHTML([
+    '# Summary',
+    '',
+    '| Name | Amount | Note |',
+    '| :--- | ---: | :---: |',
+    '| First | **12.50** | `a|b` |',
+    '',
+    '> A quoted **note**.',
+    '',
+    '1. Open [documentation](https://example.test/docs)',
+    '2. Review `result`',
+    '',
+    '```json',
+    '{"ok": true}',
+    '```',
+  ].join('\n'));
+  assert.match(html, /<h1>Summary<\/h1>/);
+  assert.match(html, /<table><thead><tr><th scope="col" style="text-align: left">Name<\/th>/);
+  assert.match(html, /<th scope="col" style="text-align: right">Amount<\/th>/);
+  assert.match(html, /<td style="text-align: center"><code>a\|b<\/code><\/td>/);
+  assert.match(html, /<blockquote><p>A quoted <strong>note<\/strong>\.<\/p><\/blockquote>/);
+  assert.match(html, /<ol><li>Open <a href="https:\/\/example\.test\/docs">documentation<\/a><\/li>/);
+  assert.match(html, /<pre><code class="language-json">\{&quot;ok&quot;: true\}<\/code><\/pre>/);
+});
+
+test('chat Markdown escapes raw HTML while auto and explicit HTML use the DOM sanitizer, and clips UTF-8 safely', () => {
+  const html = chatContent.markdownToHTML('Plain <not-a-real-tag data-x="1"> & text\n\n<mark aria-label="note">raw</mark>');
+  assert.match(html, /Plain &lt;not-a-real-tag data-x=&quot;1&quot;&gt; &amp; text/);
+  assert.match(html, /&lt;mark aria-label=&quot;note&quot;&gt;raw&lt;\/mark&gt;/);
+
+  const clipped = chatContent.clipUTF8('你好ab', 7);
+  assert.deepEqual(clipped, { text: '你好a', bytes: 7, truncated: true });
+  assert.deepEqual(chatContent.clipUTF8('plain', 32), { text: 'plain', bytes: 5, truncated: false });
+  assert.deepEqual(chatContent.splitTableRow('| `a|b` | c\\|d |'), ['`a|b`', 'c|d']);
+});
+
+test('chat inline parsing stays bounded for hostile unmatched delimiters', () => {
+  const hostile = 'IHTML_CONTENT_TOKEN' + '_'.repeat(100000) + '`'.repeat(100000) + '['.repeat(50000) + '<a '.repeat(10000);
+  const started = Date.now();
+  const html = chatContent.markdownToHTML(hostile);
+  assert.ok(html.length > hostile.length, 'hostile punctuation is escaped as content');
+  assert.ok(Date.now() - started < 1000, 'unmatched inline delimiters must not trigger quadratic rescans');
+});
+
+test('chat HTML auto detection stays linear for many unterminated tags', () => {
+  const hostile = '<div '.repeat(50000);
+  const started = Date.now();
+  assert.equal(chatContent.resolveFormat('', hostile), 'markdown');
+  assert.ok(Date.now() - started < 1500, 'unterminated tags must not trigger a quadratic closing-tag search');
+});
+
+test('chat link labels remove invisible Unicode before applying a bounded visible label', () => {
+  assert.deepEqual(chatContent.compactLinkLabel('\u2800\u3164\u200b', 320), { text: '', visible: false, truncated: false });
+  assert.deepEqual(chatContent.compactLinkLabel('  safe\n\u2800 documentation  ', 320), { text: 'safe documentation', visible: true, truncated: false });
+  assert.deepEqual(chatContent.compactLinkLabel('x' + '\u2800'.repeat(10000), 320), { text: 'x', visible: true, truncated: false });
+  const bounded = chatContent.compactLinkLabel('a'.repeat(500), 320);
+  assert.equal(Array.from(bounded.text).length, 320);
+  assert.equal(bounded.text.endsWith('…'), true);
+  assert.equal(bounded.visible, true);
+  assert.equal(bounded.truncated, true);
+});
 
 test('runtime isolates embedded CSS by exact instance while preserving standalone compatibility', () => {
   const css = '.ui-card{display:none}';
@@ -256,6 +351,48 @@ test('chat agent modes default safely and request snapshots do not drift', () =>
   assert.deepEqual(chatAgent.requestSnapshot(['fast'], 'deep', 'hidden-model', false), { agentMode: 'fast', model: '' });
 });
 
+test('confirmation dismissal builds cancel_tool without changing the signed card', () => {
+  const call = {
+    id: 'call-1', name: 'ui_page_delete', body: { name: 'old' },
+    confirmation_nonce: 'nonce', confirmation_token: 'signed-token',
+  };
+  const event = chatAgent.cancelToolEvent(call);
+  assert.deepEqual(event, { type: 'cancel_tool', tool_call: call });
+  assert.equal(event.tool_call.confirmation_token, 'signed-token');
+  assert.deepEqual(chatAgent.cancelToolEvent(null), { type: 'cancel_tool', tool_call: null });
+});
+
+test('cancel acknowledgements correlate by card id and nonce without accepting ambiguous events', () => {
+  const call = { id: 'call-1', confirmation_nonce: 'nonce-1' };
+  assert.equal(chatAgent.cancelAckMatches(call, {
+    type: 'cancel_tool_result', tool_id: 'call-1', confirmation_nonce: 'nonce-1', tool_status: 'cancelled',
+  }), true);
+  assert.equal(chatAgent.cancelAckMatches(call, { type: 'cancel_tool_result', tool_id: 'call-1' }), false);
+  assert.equal(chatAgent.cancelAckMatches(call, { type: 'cancel_tool_result', confirmation_nonce: 'nonce-1' }), false, 'an id-bearing card requires both dimensions');
+  assert.equal(chatAgent.cancelAckMatches(call, { type: 'cancel_tool_result', tool_id: 'other', confirmation_nonce: 'nonce-1' }), false);
+  assert.equal(chatAgent.cancelAckMatches(call, { type: 'cancel_tool_result', tool_id: 'call-1', confirmation_nonce: 'other' }), false);
+  assert.equal(chatAgent.cancelAckMatches(call, { type: 'cancel_tool_result' }), false);
+  assert.equal(chatAgent.cancelAckMatches({}, { type: 'cancel_tool_result', tool_id: 'call-1' }), false);
+  assert.equal(chatAgent.cancelAckMatches({ confirmation_nonce: 'nonce-1' }, { type: 'cancel_tool_result', confirmation_nonce: 'nonce-1' }), true, 'id-less provider cards still correlate by unique nonce');
+});
+
+test('turn stop and cancellation transport failures preserve honest confirmation states', () => {
+  assert.equal(chatAgent.statusAfterTurnStop('running'), 'error', 'a started tool becomes locked and unknown, not falsely cancelled');
+  assert.equal(chatAgent.statusAfterTurnStop('pending'), 'pending', 'a normal stop never revokes a signed confirmation card');
+  assert.equal(chatAgent.statusAfterTurnStop('success'), 'success');
+  assert.equal(chatAgent.cancellationFailureTerminal(false, false), false, 'a request that was never sent may be retried');
+  assert.equal(chatAgent.cancellationFailureTerminal(true, false), true, 'disconnect after send must lock the card');
+  assert.equal(chatAgent.cancellationFailureTerminal(false, true), true, 'an explicit terminal failure remains terminal');
+});
+
+test('streamed rich answers use a bounded render cadence', () => {
+  assert.equal(chatAgent.streamRenderDelay(1000, 1000, 80), 80);
+  assert.equal(chatAgent.streamRenderDelay(1000, 1030, 80), 50);
+  assert.equal(chatAgent.streamRenderDelay(1000, 1090, 80), 0);
+  assert.equal(chatAgent.streamRenderDelay(0, 0, 10000), 250, 'untrusted intervals are capped');
+  assert.equal(chatAgent.streamRenderDelay(0, 0, 1), 16, 'rendering never busy-loops');
+});
+
 test('deep event projection replaces plans and updates agents and budget in place', () => {
   let state = chatAgent.initialState('deep');
   state = chatAgent.project(state, {
@@ -265,7 +402,10 @@ test('deep event projection replaces plans and updates agents and budget in plac
   state = chatAgent.project(state, {
     type: 'assistant_agent',
     agent: { mode: 'deep', agent: 'ui_inspector', task_id: 'task-1', parent_task_id: 'root', phase: 'inspect', status: 'running', summary: 'Reading' },
-    budget: { model_calls: 2, max_model_calls: 24, subtasks: 1, max_subtasks: 3 },
+    budget: {
+      model_calls: 2, max_model_calls: 24, subtasks: 1, max_subtasks: 3,
+      tool_calls: 5, max_tool_calls: 32, max_tool_calls_per_tool: 8, max_repeated_tool_calls: 2,
+    },
   });
   state = chatAgent.project(state, {
     type: 'assistant_agent',
@@ -273,7 +413,11 @@ test('deep event projection replaces plans and updates agents and budget in plac
   });
   assert.equal(Object.keys(state.agents).length, 1, 'the same task updates instead of appending a log row');
   assert.equal(state.agents['task-1'].status, 'completed');
-  assert.deepEqual(chatAgent.budgetParts(state.budget), { modelCalls: 2, maxModelCalls: 24, subtasks: 1, maxSubtasks: 3 });
+  assert.deepEqual(chatAgent.budgetParts(state.budget), {
+    modelCalls: 2, maxModelCalls: 24, subtasks: 1, maxSubtasks: 3,
+    toolCalls: 5, maxToolCalls: 32, maxToolCallsPerTool: 8, maxRepeatedToolCalls: 2,
+    toolBudgetCode: '', toolBudgetLimit: '', toolBudgetTool: '',
+  });
   state = chatAgent.project(state, { type: 'assistant_plan', plan: [{ id: 'fix', content: 'Fix', status: 'completed' }] });
   assert.deepEqual(state.plan.map((item) => item.id), ['fix'], 'plan events are complete snapshots');
   state = chatAgent.project(state, {
@@ -344,6 +488,13 @@ test('chat trace removes credentials from request, result, debug, facts, and sum
   assert.match(view.summary, /\[redacted\]/);
   assert.match(view.result, /safe result/);
   assert.match(view.debug, /"status": "ok"/);
+
+  const pending = chatTrace.toolView({
+    name: 'custom_remote_tool', reason: 'authorization=Bearer ' + secret,
+  }, { type: 'confirmation_required', tool_status: 'pending' }, makeT('en'));
+  assert.doesNotMatch(JSON.stringify(pending), new RegExp(secret));
+  assert.match(pending.reason, /\[redacted\]/);
+  assert.equal(chatTrace.safeText('authToken=' + secret, 500), 'authToken=[redacted]');
 });
 
 test('chat trace safely falls back for unknown tools and keeps result and diagnostics separate', () => {
@@ -413,6 +564,124 @@ test('item layout normalization reconciles slot order without duplicates or stal
   });
   assert.deepEqual(doc.orderBySlot.left, ['b', 'a', 'd']);
   assert.deepEqual(doc.orderBySlot.right, ['c']);
+});
+
+test('item layout remote fingerprints distinguish real writes from harmless resyncs', () => {
+  const page = 'dashboard';
+  const stored = {
+    version: 1, page, mode: 'grid',
+    orderBySlot: { main: ['card'] },
+    items: { card: { slot: 'main', flow: { span: 6 }, free: { x: 0, y: 0, width: 320, height: 180, z: 0 } } },
+  };
+  const first = itemLayout.remoteSnapshot(stored, page);
+  const equivalent = itemLayout.remoteSnapshot(JSON.parse(JSON.stringify(stored)), page);
+  const changed = itemLayout.remoteSnapshot(Object.assign({}, stored, { mode: 'free' }), page);
+  const wrongPage = itemLayout.remoteSnapshot(stored, 'other');
+  assert.equal(first.valid, true);
+  assert.equal(first.fingerprint, equivalent.fingerprint);
+  assert.notEqual(first.fingerprint, changed.fingerprint);
+  assert.equal(wrongPage.valid, false);
+  assert.equal(wrongPage.fingerprint, '');
+});
+
+test('item layout fingerprints and dirty checks ignore object key insertion order', () => {
+  const page = 'dashboard';
+  const first = {
+    page, mode: 'grid',
+    items: { a: { slot: 'main', appearance: { color: '#111111', background: '#ffffff' } }, b: { slot: 'side' }, c: { slot: 'main' } },
+    orderBySlot: { main: ['a', 'c'], side: ['b'] },
+  };
+  const reordered = {
+    orderBySlot: { side: ['b'], main: ['a', 'c'] },
+    items: { c: { slot: 'main' }, b: { slot: 'side' }, a: { appearance: { background: '#ffffff', color: '#111111' }, slot: 'main' } },
+    mode: 'grid', page,
+  };
+  assert.equal(itemLayout.remoteSnapshot(first, page).fingerprint, itemLayout.remoteSnapshot(reordered, page).fingerprint);
+  assert.equal(itemLayout.remoteSnapshot(first, page).sourceFingerprint, itemLayout.remoteSnapshot(reordered, page).sourceFingerprint);
+  const state = itemLayout.initial(page, first);
+  const equivalent = itemLayout.reduce(state, { type: 'replaceDoc', doc: reordered });
+  assert.equal(equivalent.dirty, false);
+  assert.notEqual(itemLayout.remoteSnapshot(first, page).fingerprint, itemLayout.remoteSnapshot({ ...first, orderBySlot: { main: ['c', 'a'], side: ['b'] } }, page).fingerprint);
+  assert.notEqual(itemLayout.remoteSnapshot(first, page).sourceFingerprint, itemLayout.remoteSnapshot({ ...first, extension: { preserve: true } }, page).sourceFingerprint);
+});
+
+test('item layout remote classification separates equivalent and conflicting revisions', () => {
+  const base = {
+    baselineRevision: 'sha256:base',
+    baselineSourceFingerprint: 'json:base',
+    remoteRevision: 'sha256:base',
+    remoteSourceFingerprint: 'json:base',
+    localSourceFingerprint: 'json:local',
+    remoteExists: true,
+    remoteValid: true,
+  };
+  assert.equal(itemLayout.classifyRemoteChange(base), 'unchanged');
+  assert.equal(itemLayout.classifyRemoteChange({ ...base, remoteRevision: 'sha256:reordered' }), 'equivalent-baseline');
+  assert.equal(itemLayout.classifyRemoteChange({ ...base, remoteRevision: 'sha256:peer', remoteSourceFingerprint: 'json:local' }), 'matches-local');
+  assert.equal(itemLayout.classifyRemoteChange({ ...base, remoteRevision: 'sha256:unknown-extension', remoteSourceFingerprint: 'json:extended' }), 'conflict');
+  assert.equal(itemLayout.classifyRemoteChange({ ...base, remoteRevision: 'missing', remoteSourceFingerprint: 'missing', remoteExists: false, remoteValid: false }), 'conflict');
+});
+
+test('item layout history reconciles additions and removals before undo or redo', () => {
+  let state = itemLayout.initial('work', {
+    mode: 'grid',
+    items: { a: { slot: 'main', flow: { span: 12 } }, removed: { slot: 'main', flow: { span: 4 } } },
+    orderBySlot: { main: ['a', 'removed'] },
+  });
+  state = itemLayout.reduce(state, { type: 'select', id: 'removed' });
+  state = itemLayout.reduce(state, { type: 'patch', id: 'a', section: 'flow', patch: { span: 7 } });
+  state = itemLayout.reduce(state, { type: 'select', id: 'removed' });
+  const live = itemLayout.normalize({
+    page: 'work', mode: 'grid',
+    items: { a: { slot: 'main', flow: { span: 7 } }, added: { slot: 'main', flow: { span: 5 } } },
+    orderBySlot: { main: ['a', 'added'] },
+  });
+  state = itemLayout.reconcileState(state, live);
+  for (const snapshot of [state.doc, state.baseline, ...state.past, ...state.future]) {
+    assert.ok(snapshot.items.added, 'new live Item is present in every history snapshot');
+    assert.equal(snapshot.items.removed, undefined, 'deleted live Item is absent from every history snapshot');
+  }
+  assert.equal(state.selectedId, '');
+  state = itemLayout.reduce(state, { type: 'undo' });
+  assert.ok(state.doc.items.added);
+  assert.equal(state.doc.items.removed, undefined);
+  state = itemLayout.reduce(state, { type: 'redo' });
+  assert.ok(state.doc.items.added);
+  assert.equal(state.doc.items.removed, undefined);
+  assert.equal(state.doc.items.a.flow.span, 7);
+});
+
+test('item layout save acknowledgement can reconcile Item topology changed in flight', () => {
+  let state = itemLayout.initial('work', {
+    mode: 'grid',
+    items: { a: { slot: 'main', flow: { span: 12 } } },
+    orderBySlot: { main: ['a'] },
+  });
+  state = itemLayout.reduce(state, { type: 'patch', id: 'a', section: 'flow', patch: { span: 8 } });
+  const requestSnapshot = state.doc;
+  const live = itemLayout.normalize({
+    page: 'work', mode: 'grid',
+    items: {
+      a: { slot: 'side', flow: { span: 8 } },
+      added: { slot: 'main', flow: { span: 4 } },
+    },
+    orderBySlot: { side: ['a'], main: ['added'] },
+  });
+
+  // An Item event lands while the old layout request is still in flight.
+  state = itemLayout.reconcileState(state, live);
+  assert.equal(state.doc.items.a.slot, 'side');
+  assert.ok(state.doc.items.added);
+
+  // The editor first acknowledges the exact request snapshot, then immediately
+  // reconciles against the current live Item topology.
+  state = itemLayout.reduce(state, { type: 'markSaved', doc: requestSnapshot });
+  state = itemLayout.reconcileState(state, live);
+  assert.equal(state.doc.items.a.slot, 'side');
+  assert.ok(state.doc.items.added);
+  assert.deepEqual(state.doc.orderBySlot.side, ['a']);
+  assert.deepEqual(state.doc.orderBySlot.main, ['added']);
+  assert.equal(state.dirty, false);
 });
 
 test('item layout reducer edits existing items and reorders within or across slots', () => {
@@ -662,6 +931,37 @@ test('template move rejects cycles and preserves deterministic sibling order', (
   assert.equal(same, state, 'a parent cannot move beneath its descendant');
   state = template.reduce(state, { type: 'move', id: 'b', parentId: 'root', index: 0 });
   assert.deepEqual(state.doc.children.root, ['b', 'a']);
+});
+
+test('template pointer geometry is thresholded and grid sizing accounts for padding and gaps', () => {
+  assert.equal(template.pointerMoved({ x: 10, y: 10 }, { x: 13, y: 12 }, 4), false);
+  assert.equal(template.pointerMoved({ x: 10, y: 10 }, { x: 14, y: 10 }, 4), true);
+  assert.deepEqual(template.moveFrame({ x: 16, y: 24 }, { x: 11, y: -9 }, 8), { x: 24, y: 16 });
+
+  const geometry = { clientWidth: 664, paddingLeft: 16, paddingRight: 16, gap: 8, columns: 4 };
+  assert.equal(template.gridSpanForWidth(312, geometry), 2, 'two tracks plus one gap resolve to two columns');
+  assert.deepEqual(template.resizeFrame('grid', { width: 152, height: 120 }, { x: 160, y: 200 }, geometry), { span: 2 }, 'grid pointer resize never persists a rendered height');
+  assert.deepEqual(template.resizeFrame('free', { width: 240, height: 120 }, { x: 19, y: 13 }, geometry), { w: 256, h: 136 });
+});
+
+test('template touch reorder actions match reducer move semantics', () => {
+  let state = template.initial();
+  state = template.reduce(state, { type: 'add', id: 'a', parentId: 'root' });
+  state = template.reduce(state, { type: 'add', id: 'a-child', parentId: 'a' });
+  state = template.reduce(state, { type: 'add', id: 'b', parentId: 'root' });
+  state = template.reduce(state, { type: 'add', id: 'slot', nodeType: 'slot', parentId: 'root' });
+  state = template.reduce(state, { type: 'add', id: 'after-slot', parentId: 'root' });
+
+  const b = template.reorderActions(state.doc, 'b');
+  assert.deepEqual(b.up, { type: 'move', id: 'b', parentId: 'root', index: 0 });
+  assert.deepEqual(b.indent, { type: 'move', id: 'b', parentId: 'a' });
+  assert.equal(b.outdent, null);
+  assert.equal(template.reorderActions(state.doc, 'after-slot').indent, null, 'a layer cannot indent into a slot sibling');
+
+  const nested = template.reorderActions(state.doc, 'a-child');
+  assert.deepEqual(nested.outdent, { type: 'move', id: 'a-child', parentId: 'root', index: 1 });
+  const moved = template.reduce(state, nested.outdent);
+  assert.deepEqual(moved.doc.children.root, ['a', 'a-child', 'b', 'slot', 'after-slot']);
 });
 
 test('template breakpoint values inherit desktop then tablet overrides', () => {

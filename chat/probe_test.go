@@ -2,12 +2,15 @@ package chat
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/zdypro888/ihtml"
 )
@@ -59,6 +62,38 @@ func TestProbeAPIUsesExplicitBaseAndControlledIdentity(t *testing.T) {
 	}
 	if inbound.Get("Cookie") != "session=abc" {
 		t.Fatalf("decorator mutated captured inbound headers: %q", inbound.Get("Cookie"))
+	}
+}
+
+func TestProbeAPIDoesNotInheritAmbientDefaultClientCookies(t *testing.T) {
+	gotCookie := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotCookie <- r.Header.Get("Cookie")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+	serverURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jar.SetCookies(serverURL, []*http.Cookie{{Name: "ambient_session", Value: "must-not-leak"}})
+	previousJar := http.DefaultClient.Jar
+	http.DefaultClient.Jar = jar
+	t.Cleanup(func() { http.DefaultClient.Jar = previousJar })
+
+	rt := &runtime{
+		apiBase: server.URL,
+		apis:    []ihtml.APISpec{{Method: http.MethodGet, Path: "/players"}},
+	}
+	if _, _, err := probeAPI(context.Background(), rt, map[string]any{"path": "/players"}); err != nil {
+		t.Fatal(err)
+	}
+	if cookie := <-gotCookie; cookie != "" {
+		t.Fatalf("api_probe inherited ambient default-client cookie: %q", cookie)
 	}
 }
 
@@ -178,5 +213,39 @@ func TestProbeRequestCannotRewriteTarget(t *testing.T) {
 	_, _, err := probeAPI(context.Background(), rt, map[string]any{"path": "/safe"})
 	if err == nil || !strings.Contains(err.Error(), "不允许设置探测请求头") {
 		t.Fatalf("host header rewrite accepted: %v", err)
+	}
+}
+
+func TestProbeRequestTimeoutCannotMutateLiveRequest(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	mutated := make(chan struct{})
+	rt := &runtime{
+		inbound:       make(http.Header),
+		hostCallbacks: newHostCallbackLimiter(1),
+		cfg: Config{ProbeRequest: func(context.Context, string, http.Header, http.Header) error {
+			return nil
+		}},
+	}
+	rt.cfg.ProbeRequest = func(_ context.Context, _ string, _ http.Header, outbound http.Header) error {
+		close(started)
+		<-release // deliberately ignore cancellation
+		outbound.Set("X-Late", "must-not-reach-request")
+		close(mutated)
+		return nil
+	}
+	req := httptest.NewRequest(http.MethodGet, "https://api.example.test/data", nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- addProbeIdentity(ctx, rt, req) }()
+	<-started
+	if err := <-done; !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("addProbeIdentity error = %v, want deadline exceeded", err)
+	}
+	close(release)
+	<-mutated
+	if got := req.Header.Get("X-Late"); got != "" {
+		t.Fatalf("timed-out callback mutated live request: %q", got)
 	}
 }

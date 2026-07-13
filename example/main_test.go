@@ -67,25 +67,10 @@ func TestExampleChatConfigKeepsDeepExplicitAndBudgetsBounded(t *testing.T) {
 	}
 }
 
-func TestDemoInspectionNeverClaimsMissingItemLoadedBecauseOfOldError(t *testing.T) {
-	note := demoInspectionNote(&ihtml.ChatClientInspection{Items: []ihtml.ChatClientInspectionItem{{
-		ID: "ai-note", Present: false, Error: "historical error",
-	}}})
-	if !strings.Contains(note, "还没有找到") || strings.Contains(note, "已加载") {
-		t.Fatalf("missing Item was described as loaded: %q", note)
-	}
-	visible := demoInspectionNote(&ihtml.ChatClientInspection{Items: []ihtml.ChatClientInspectionItem{{
-		ID: "ai-note", Present: true, Visible: true,
-	}}})
-	if !strings.Contains(visible, "当前视口可见") {
-		t.Fatalf("visible Item was not accepted: %q", visible)
-	}
-}
-
 func TestExampleChatConfigAcceptsAnthropicEnvironment(t *testing.T) {
 	for _, key := range []string{
 		"IHTML_AI_BASE_URL", "IHTML_AI_PROVIDER", "IHTML_AI_API_KEY", "IHTML_AI_AUTH_TOKEN", "IHTML_AI_MODEL",
-		"IHTML_AI_MAX_TOKENS", "IHTML_AI_THINKING_BUDGET_TOKENS", "IHTML_AI_REQUEST_TIMEOUT_MS",
+		"IHTML_AI_THINKING", "IHTML_AI_MAX_TOKENS", "IHTML_AI_THINKING_BUDGET_TOKENS", "IHTML_AI_REQUEST_TIMEOUT_MS",
 		"ANTHROPIC_API_KEY", "ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL",
 	} {
 		t.Setenv(key, "")
@@ -103,11 +88,23 @@ func TestExampleChatConfigAcceptsAnthropicEnvironment(t *testing.T) {
 	if cfg.APIKey != "" || cfg.AuthToken != "test-token" || cfg.Model != "fast-model" {
 		t.Fatalf("credentials/model mapping failed: api_set=%v auth_matches=%v model=%q", cfg.APIKey != "", cfg.AuthToken == "test-token", cfg.Model)
 	}
-	if cfg.MaxTokens != 4096 || cfg.ThinkingBudgetTokens != 1024 {
+	if cfg.MaxTokens != 4096 || cfg.ThinkingBudgetTokens != 0 {
 		t.Fatalf("claude token defaults = max:%d thinking:%d", cfg.MaxTokens, cfg.ThinkingBudgetTokens)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Claude environment config without thinking must validate: %v", err)
 	}
 	if cfg.RequestTimeout != 3000000*time.Millisecond {
 		t.Fatalf("request timeout = %s", cfg.RequestTimeout)
+	}
+
+	t.Setenv("IHTML_AI_THINKING", "true")
+	cfg = exampleChatConfig(base, "", nil)
+	if !cfg.Thinking || cfg.ThinkingBudgetTokens != 1024 {
+		t.Fatalf("Claude thinking defaults = enabled:%v budget:%d", cfg.Thinking, cfg.ThinkingBudgetTokens)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Claude environment config with thinking must validate: %v", err)
 	}
 }
 
@@ -204,7 +201,7 @@ func TestLocalSameOriginRequest(t *testing.T) {
 	}
 }
 
-func newDemoTestSession(t *testing.T) (*ihtml.Handler, *demoSession, *[]ihtml.ChatStreamEvent) {
+func newDemoTestSession(t *testing.T) (*ihtml.Handler, *demoSession, func() []ihtml.ChatStreamEvent) {
 	t.Helper()
 	h := ihtml.New(ihtml.NewMemoryStore())
 	var mu sync.Mutex
@@ -219,11 +216,16 @@ func newDemoTestSession(t *testing.T) (*ihtml.Handler, *demoSession, *[]ihtml.Ch
 			return nil
 		},
 	}}
+	snapshot := func() []ihtml.ChatStreamEvent {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]ihtml.ChatStreamEvent(nil), events...)
+	}
 	t.Cleanup(func() {
 		s.Close()
 		_ = h.Close()
 	})
-	return h, s, &events
+	return h, s, snapshot
 }
 
 func TestDemoSessionCancelPreventsWrite(t *testing.T) {
@@ -242,28 +244,43 @@ func TestDemoSessionCancelPreventsWrite(t *testing.T) {
 	}
 }
 
-func TestDemoSessionWritesScopedEscapedHTML(t *testing.T) {
-	h, s, _ := newDemoTestSession(t)
+func TestDemoBackendAdvertisesPreviewWithoutRealModel(t *testing.T) {
+	models, err := (&demoBackend{}).Models(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if models.ModelReady || !models.PreviewOnly || models.Provider != "demo" || models.CurrentModel != "" {
+		t.Fatalf("demo model capabilities = %+v", models)
+	}
+}
+
+func TestDemoSessionReturnsEscapedRichHTMLWithoutWriting(t *testing.T) {
+	h, s, events := newDemoTestSession(t)
 	s.HandleEvent(context.Background(), &ihtml.ChatClientEvent{
 		Type: "user_message", Messages: []ihtml.ChatMessage{{Role: "user", Content: `<img src=x onerror="alert(1)">`}},
 	})
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		items, err := h.ListItems(context.Background(), "demo-test")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(items) == 1 {
-			content := items[0].Content
-			if strings.Contains(content, "<script") || strings.Contains(content, "<img") {
-				t.Fatalf("demo item contains executable user markup: %s", content)
+		for _, event := range events() {
+			if event.Type != ihtml.ChatStreamAssistantDone {
+				continue
 			}
-			if !strings.Contains(content, "&lt;img") || !strings.Contains(content, `class="ui-page"`) {
-				t.Fatalf("demo item is not escaped/scoped: %s", content)
+			if event.ContentFormat != ihtml.ChatContentFormatHTML || !strings.Contains(event.Message, "<table>") {
+				t.Fatalf("demo rich answer = %+v", event)
+			}
+			if strings.Contains(event.Message, "<img") || !strings.Contains(event.Message, "&lt;img") {
+				t.Fatalf("demo answer did not escape user markup: %s", event.Message)
+			}
+			items, err := h.ListItems(context.Background(), "demo-test")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(items) != 0 {
+				t.Fatalf("demo answer unexpectedly wrote %d items", len(items))
 			}
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatal("demo assistant did not write an item before timeout")
+	t.Fatal("demo assistant did not finish the rich answer before timeout")
 }

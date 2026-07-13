@@ -1,8 +1,10 @@
 package ihtml
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -50,6 +52,17 @@ type KVService interface {
 	KVSet(ctx context.Context, user, key string, value json.RawMessage) error
 	// KVDelete 删除用户级 KV 并广播变更事件；保留键返回 ErrReservedKVKey。
 	KVDelete(ctx context.Context, user, key string) error
+}
+
+// VersionedKVService 是 KVService 的可选增强能力。它把单个键的读取版本与
+// 条件写暴露给 SDK 消费者，适合编辑器、多标签页等不能接受静默覆盖的场景。
+// 这是独立接口，避免给已有第三方 KVService 实现增加破坏性方法要求。
+type VersionedKVService interface {
+	// KVGetWithRevision 返回值及其不透明版本令牌；键不存在仍返回 ErrNotFound。
+	KVGetWithRevision(ctx context.Context, user, key string) (json.RawMessage, string, error)
+	// KVCompareAndSet 仅在当前版本等于 expectedRevision 时原子写入，并返回
+	// 新版本。读取时不存在的键使用 MissingKVRevision 作为 expectedRevision。
+	KVCompareAndSet(ctx context.Context, user, key string, value json.RawMessage, expectedRevision string) (string, error)
 }
 
 // ErrorService is the browser runtime error capability.
@@ -131,6 +144,18 @@ var kvKeyPattern = regexp.MustCompile(`^[A-Za-z0-9._\-]{1,64}$`)
 // MaxKVValueBytes 是单个 KV 值的上限。
 const MaxKVValueBytes = 64 << 10
 
+const (
+	// MaxKVEntriesPerUser is a hard structural ceiling across public and
+	// kernel-owned keys. Limits.MaxKVKeysPerUser remains the configurable public
+	// quota; this ceiling keeps an explicitly unlimited or malformed Store from
+	// creating an unbounded map/list operation.
+	MaxKVEntriesPerUser = 4096
+	// MaxUserKVBytes bounds aggregate key/value source bytes copied in a complete
+	// UserState. It is deliberately above the default 256 x 64 KiB public quota
+	// while remaining finite for third-party Store implementations.
+	MaxUserKVBytes = 32 << 20
+)
+
 // userLock 返回该用户的互斥锁(固定分桶, 无内存泄漏), 用于串行化"读-改-写"。
 // 它只覆盖当前 Handler；VersionedUserStateStore 通过 CAS+重试处理跨副本
 // 交错。只有 legacy/non-versioned Store 才仍需 sticky routing 或外部互斥。
@@ -199,6 +224,9 @@ func (h *Handler) ListItems(ctx context.Context, user string) ([]Item, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := validateItems(items); err != nil {
+		return nil, fmt.Errorf("stored items are invalid: %w", err)
+	}
 	items = cloneItems(items)
 	sortItems(items)
 	return items, nil
@@ -233,16 +261,131 @@ func validateItems(items []Item) error {
 		return fmt.Errorf("too many items: %d > %d", len(items), MaxItemsPerUser)
 	}
 	seen := make(map[string]struct{}, len(items))
+	totalBytes := 0
 	for i := range items {
 		if err := items[i].Validate(); err != nil {
 			return err
 		}
+		itemBytes := itemSourceBytes(items[i])
+		if itemBytes > MaxUserItemBytes-totalBytes {
+			return fmt.Errorf("item data exceeds %d bytes per user", MaxUserItemBytes)
+		}
+		totalBytes += itemBytes
 		if _, dup := seen[items[i].ID]; dup {
 			return fmt.Errorf("duplicate item id %q", items[i].ID)
 		}
 		seen[items[i].ID] = struct{}{}
 	}
 	return nil
+}
+
+func itemSourceBytes(item Item) int {
+	total := len(item.ID) + len(item.Title) + len(item.Page) + len(item.Content)
+	for key, value := range item.Meta {
+		total += len(key) + len(value)
+	}
+	return total
+}
+
+func revisionSourceBytes(rev Revision) int {
+	total := 256 + len(rev.ID) + len(rev.Note) + len(rev.By) + len(rev.RootTemplateID)
+	for _, item := range rev.Items {
+		total += itemSourceBytes(item)
+	}
+	for _, page := range rev.Pages {
+		total += 64 + len(page.Name) + len(page.Title) + len(page.Icon) + len(page.TemplateID)
+	}
+	for i := range rev.Templates {
+		template := &rev.Templates[i]
+		total += 256 + len(template.ID) + len(template.Name) + templateVersionSize(&template.Draft)
+		if template.Published != nil {
+			total += templateVersionSize(template.Published)
+		}
+	}
+	return total
+}
+
+func validateStoredKV(kv map[string]json.RawMessage, publicLimit int) error {
+	if len(kv) > MaxKVEntriesPerUser {
+		return fmt.Errorf("too many kv entries: %d > %d", len(kv), MaxKVEntriesPerUser)
+	}
+	publicKeys := 0
+	totalBytes := 0
+	for key, value := range kv {
+		if err := validateKVKey(key); err != nil {
+			return err
+		}
+		valueLimit := storedKVValueLimit(key)
+		if !strings.HasPrefix(key, reservedKVPrefix) {
+			publicKeys++
+		}
+		if len(value) > valueLimit {
+			return fmt.Errorf("kv value %q exceeds %d bytes", key, valueLimit)
+		}
+		size := len(key) + len(value)
+		if size > MaxUserKVBytes-totalBytes {
+			return fmt.Errorf("kv data exceeds %d bytes per user", MaxUserKVBytes)
+		}
+		totalBytes += size
+	}
+	if publicLimit > 0 && publicKeys > publicLimit {
+		return fmt.Errorf("kv keys quota exceeded: %d > %d", publicKeys, publicLimit)
+	}
+	return nil
+}
+
+func storedKVValueLimit(key string) int {
+	if key == templatesKVKey {
+		return MaxTemplateCatalogStorageBytes
+	}
+	if strings.HasPrefix(key, reservedKVPrefix) {
+		return maxInternalKVValueSize
+	}
+	return MaxKVValueBytes
+}
+
+func validateStoredRevisions(revisions []Revision) error {
+	if len(revisions) > MaxRevisionsPerUser {
+		return fmt.Errorf("too many revisions: %d > %d", len(revisions), MaxRevisionsPerUser)
+	}
+	seen := make(map[string]struct{}, len(revisions))
+	totalBytes := 0
+	for i := range revisions {
+		// Import validation performs legacy-version normalization. Validate a local
+		// header copy so reading a third-party Store never mutates its returned
+		// object while still applying the exact public backup contract.
+		candidate := revisions[i]
+		if err := validateRevisionForImport(&candidate); err != nil {
+			return fmt.Errorf("stored revision is invalid: %w", err)
+		}
+		if _, duplicate := seen[candidate.ID]; duplicate {
+			return fmt.Errorf("duplicate revision id %q", candidate.ID)
+		}
+		seen[candidate.ID] = struct{}{}
+		size := revisionSourceBytes(candidate)
+		if size > MaxUserRevisionBytes-totalBytes {
+			return fmt.Errorf("revisions exceed %d bytes per user", MaxUserRevisionBytes)
+		}
+		totalBytes += size
+	}
+	return nil
+}
+
+func validateStoredUserState(state UserState, publicKVLimit int) error {
+	if err := validateItems(state.Items); err != nil {
+		return fmt.Errorf("stored items are invalid: %w", err)
+	}
+	if err := validateStoredKV(state.KV, publicKVLimit); err != nil {
+		return fmt.Errorf("stored kv is invalid: %w", err)
+	}
+	pages, err := statePages(state)
+	if err != nil {
+		return err
+	}
+	if _, err := stateTemplateCatalog(state, pages); err != nil {
+		return err
+	}
+	return validateStoredRevisions(state.Revisions)
 }
 
 func sameItemContent(a, b Item) bool {
@@ -290,8 +433,8 @@ func (h *Handler) PutItems(ctx context.Context, user string, items []Item, by, n
 			written = append(written, it)
 		}
 		// 必须先完成合并和上限校验，再生成快照；失败请求不能污染历史列表。
-		if len(merged) > MaxItemsPerUser {
-			return UserState{}, fmt.Errorf("too many items: %d > %d", len(merged), MaxItemsPerUser)
+		if err := validateItems(merged); err != nil {
+			return UserState{}, err
 		}
 		if len(written) == 0 {
 			return UserState{}, errUserStateUnchanged
@@ -347,6 +490,7 @@ func (h *Handler) DeleteItems(ctx context.Context, user string, ids []string, by
 	defer lock.Unlock()
 
 	var removed []string
+	var cleanedLayoutKeys []string
 	err := h.updateUserStateLocked(ctx, user, func(before UserState) (UserState, error) {
 		existing := before.Items
 		if err := validateItems(existing); err != nil {
@@ -368,20 +512,138 @@ func (h *Handler) DeleteItems(ctx context.Context, user string, ids []string, by
 		if len(removed) == 0 {
 			return UserState{}, errUserStateUnchanged
 		}
+		removedSet := make(map[string]struct{}, len(removed))
+		for _, id := range removed {
+			removedSet[id] = struct{}{}
+		}
 		next, err := nextStateWithSnapshot(before, by, note, h.opts.maxRevisions)
 		if err != nil {
 			return UserState{}, err
 		}
 		next.Items = kept
+		cleanedLayoutKeys = cleanedLayoutKeys[:0]
+		for key, raw := range next.KV {
+			if !strings.HasPrefix(strings.ToLower(key), ItemLayoutKVPrefix) {
+				continue
+			}
+			cleaned, changed, err := removeItemIDsFromLayout(raw, removedSet)
+			if err != nil {
+				return UserState{}, fmt.Errorf("clean item layout %q: %w", key, err)
+			}
+			if changed {
+				next.KV[key] = cleaned
+				cleanedLayoutKeys = append(cleanedLayoutKeys, key)
+			}
+		}
 		return next, nil
 	})
 	if err != nil || len(removed) == 0 {
 		return nil, err
 	}
 	h.metric("writes", 1)
-	h.publish(user, Event{Type: "items", Op: "delete", IDs: removed, By: by})
+	events := []Event{{Type: "items", Op: "delete", IDs: removed, By: by}}
+	sort.Strings(cleanedLayoutKeys)
+	for _, key := range cleanedLayoutKeys {
+		events = append(events, Event{Type: "kv", Key: key, By: by})
+	}
+	h.publishEvents(user, events...)
 	h.audit(ctx, user, "items.delete", by, note, map[string]any{"ids": removed})
 	return removed, nil
+}
+
+// removeItemIDsFromLayout removes deleted Item references while preserving all
+// unknown top-level and per-item JSON. Malformed/non-object layout values are
+// ignored here: deleting a real Item must not be blocked by an unrelated legacy
+// value, and the browser loader will continue to fail closed for that value.
+func removeItemIDsFromLayout(raw json.RawMessage, drop map[string]struct{}) (json.RawMessage, bool, error) {
+	var doc map[string]json.RawMessage
+	if len(drop) == 0 || json.Unmarshal(raw, &doc) != nil || doc == nil {
+		return raw, false, nil
+	}
+	changed := false
+	if itemsRaw, ok := doc["items"]; ok {
+		var items map[string]json.RawMessage
+		if json.Unmarshal(itemsRaw, &items) == nil && items != nil {
+			for id := range drop {
+				if _, exists := items[id]; exists {
+					delete(items, id)
+					changed = true
+				}
+			}
+			if changed {
+				encoded, err := marshalJSONWithoutHTMLEscaping(items)
+				if err != nil {
+					return nil, false, err
+				}
+				doc["items"] = encoded
+			}
+		}
+	}
+	if orderRaw, ok := doc["orderBySlot"]; ok {
+		var order map[string]json.RawMessage
+		if json.Unmarshal(orderRaw, &order) == nil && order != nil {
+			orderChanged := false
+			for slot, idsRaw := range order {
+				var ids []string
+				if json.Unmarshal(idsRaw, &ids) != nil {
+					continue
+				}
+				kept := ids[:0]
+				for _, id := range ids {
+					if _, remove := drop[id]; remove {
+						orderChanged = true
+						continue
+					}
+					kept = append(kept, id)
+				}
+				if len(kept) == 0 {
+					delete(order, slot)
+				} else if len(kept) != len(ids) {
+					encoded, err := marshalJSONWithoutHTMLEscaping(kept)
+					if err != nil {
+						return nil, false, err
+					}
+					order[slot] = encoded
+				}
+			}
+			if orderChanged {
+				encoded, err := marshalJSONWithoutHTMLEscaping(order)
+				if err != nil {
+					return nil, false, err
+				}
+				doc["orderBySlot"] = encoded
+				changed = true
+			}
+		}
+	}
+	if !changed {
+		return raw, false, nil
+	}
+	encoded, err := marshalJSONWithoutHTMLEscaping(doc)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(encoded) > MaxKVValueBytes {
+		return nil, false, fmt.Errorf("cleaned layout exceeds %d bytes", MaxKVValueBytes)
+	}
+	return encoded, true, nil
+}
+
+// marshalJSONWithoutHTMLEscaping keeps opaque layout fields byte-efficient.
+// encoding/json's default HTML escaping can turn each literal '<', '>' or '&'
+// into six bytes; re-encoding a valid near-limit layout during cleanup must not
+// make an unrelated opaque field exceed the public KV ceiling and block Item
+// deletion. Encoder.Encode appends exactly one trailing newline, which is not
+// part of the JSON value persisted by KVSet.
+func marshalJSONWithoutHTMLEscaping(value any) (json.RawMessage, error) {
+	var buffer bytes.Buffer
+	encoder := json.NewEncoder(&buffer)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(value); err != nil {
+		return nil, err
+	}
+	encoded := bytes.TrimSuffix(buffer.Bytes(), []byte{'\n'})
+	return append(json.RawMessage(nil), encoded...), nil
 }
 
 // ReplaceItems 实现 Service。
@@ -441,7 +703,30 @@ func (h *Handler) ListRevisions(ctx context.Context, user string) ([]RevisionInf
 	if err != nil {
 		return nil, err
 	}
+	if err := validateRevisionInfos(revisions); err != nil {
+		return nil, err
+	}
 	return append([]RevisionInfo(nil), revisions...), nil
+}
+
+func validateRevisionInfos(revisions []RevisionInfo) error {
+	if len(revisions) > MaxRevisionsPerUser {
+		return fmt.Errorf("too many revisions: %d > %d", len(revisions), MaxRevisionsPerUser)
+	}
+	seen := make(map[string]struct{}, len(revisions))
+	for _, revision := range revisions {
+		if strings.TrimSpace(revision.ID) == "" || len(revision.ID) > maxRevisionIDBytes ||
+			len(revision.Note) > maxRevisionNoteBytes || len(revision.By) > maxRevisionByBytes ||
+			revision.ItemCount < 0 || revision.ItemCount > MaxItemsPerUser ||
+			revision.TemplateCount < 0 || revision.TemplateCount > maxTemplatesPerUser {
+			return fmt.Errorf("stored revision metadata %q is invalid", revision.ID)
+		}
+		if _, duplicate := seen[revision.ID]; duplicate {
+			return fmt.Errorf("duplicate revision id %q", revision.ID)
+		}
+		seen[revision.ID] = struct{}{}
+	}
+	return nil
 }
 
 // RevisionItems 实现 Service。
@@ -449,6 +734,9 @@ func (h *Handler) RevisionItems(ctx context.Context, user, id string) ([]Item, e
 	items, err := h.store.RevisionItems(ctx, user, id)
 	if err != nil {
 		return nil, err
+	}
+	if err := validateItems(items); err != nil {
+		return nil, fmt.Errorf("stored revision items are invalid: %w", err)
 	}
 	items = cloneItems(items)
 	sortItems(items)
@@ -548,6 +836,31 @@ func validatePublicKVKey(key string) error {
 	return nil
 }
 
+// MissingKVRevision 是 KVGetWithRevision 读取一个不存在的键时，调用方在首次
+// KVCompareAndSet 中使用的版本前置条件。它与已有值的 SHA-256 版本空间分离。
+const MissingKVRevision = "missing"
+
+var kvRevisionPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
+func kvValueRevision(value json.RawMessage) string {
+	sum := sha256.Sum256(value)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func validateKVRevision(revision string) error {
+	if revision == MissingKVRevision || kvRevisionPattern.MatchString(revision) {
+		return nil
+	}
+	return fmt.Errorf("invalid kv revision")
+}
+
+func newKVConflict(key, expected, actual string, current json.RawMessage, exists bool) error {
+	return &KVConflictError{
+		Key: key, Expected: expected, Actual: actual,
+		Current: append(json.RawMessage(nil), current...), Exists: exists,
+	}
+}
+
 // KVGet 实现 Service。
 func (h *Handler) KVGet(ctx context.Context, user, key string) (json.RawMessage, error) {
 	if err := validatePublicKVKey(key); err != nil {
@@ -557,7 +870,106 @@ func (h *Handler) KVGet(ctx context.Context, user, key string) (json.RawMessage,
 	if err != nil {
 		return nil, err
 	}
+	if len(value) > MaxKVValueBytes {
+		return nil, fmt.Errorf("stored kv value exceeds %d bytes", MaxKVValueBytes)
+	}
+	if !json.Valid(value) {
+		return nil, fmt.Errorf("stored kv value is invalid JSON")
+	}
 	return append(json.RawMessage(nil), value...), nil
+}
+
+// KVGetWithRevision 原子读取语义由底层 KVGet 提供，并为逐字节值生成一个
+// 不透明版本令牌。令牌只用于 KVCompareAndSet，调用方不应解析或自行构造。
+func (h *Handler) KVGetWithRevision(ctx context.Context, user, key string) (json.RawMessage, string, error) {
+	value, err := h.KVGet(ctx, user, key)
+	if err != nil {
+		return nil, "", err
+	}
+	return value, kvValueRevision(value), nil
+}
+
+// KVCompareAndSet 仅当 key 当前值仍等于 expectedRevision 所代表的快照时写入。
+// VersionedUserStateStore 路径把比较和写入放在同一次状态 CAS 中，因此跨 Handler /
+// 跨副本也不会静默覆盖；旧 Store 仍在当前 Handler 的用户锁内提供原子语义。
+func (h *Handler) KVCompareAndSet(ctx context.Context, user, key string, value json.RawMessage, expectedRevision string) (string, error) {
+	if err := validatePublicKVKey(key); err != nil {
+		return "", err
+	}
+	if err := validateKVRevision(expectedRevision); err != nil {
+		return "", err
+	}
+	if len(value) > MaxKVValueBytes {
+		return "", fmt.Errorf("kv value exceeds %d bytes", MaxKVValueBytes)
+	}
+	if !json.Valid(value) {
+		return "", fmt.Errorf("kv value must be valid JSON")
+	}
+
+	lock := h.userLock(user)
+	lock.Lock()
+	defer lock.Unlock()
+
+	wrote := false
+	if _, versioned := h.store.(VersionedUserStateStore); versioned {
+		err := h.updateUserStateLocked(ctx, user, func(before UserState) (UserState, error) {
+			wrote = false
+			current, exists := before.KV[key]
+			currentRevision := MissingKVRevision
+			if exists {
+				currentRevision = kvValueRevision(current)
+			}
+			if currentRevision != expectedRevision {
+				return UserState{}, newKVConflict(key, expectedRevision, currentRevision, current, exists)
+			}
+			if exists && bytes.Equal(current, value) {
+				return UserState{}, errUserStateUnchanged
+			}
+			if err := checkKVQuota(before.KV, key, h.opts.limits.MaxKVKeysPerUser); err != nil {
+				return UserState{}, err
+			}
+			next := cloneUserState(before)
+			next.KV[key] = append(json.RawMessage(nil), value...)
+			wrote = true
+			return next, nil
+		})
+		if err != nil {
+			return "", err
+		}
+	} else {
+		current, err := h.store.KVGet(ctx, user, key)
+		exists := err == nil
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			return "", err
+		}
+		currentRevision := MissingKVRevision
+		if exists {
+			if len(current) > MaxKVValueBytes || !json.Valid(current) {
+				return "", fmt.Errorf("stored kv value is invalid or exceeds %d bytes", MaxKVValueBytes)
+			}
+			currentRevision = kvValueRevision(current)
+		}
+		if currentRevision != expectedRevision {
+			return "", newKVConflict(key, expectedRevision, currentRevision, current, exists)
+		}
+		if !exists || !bytes.Equal(current, value) {
+			if err := h.checkLegacyKVQuota(ctx, user, key); err != nil {
+				return "", err
+			}
+			if err := h.store.KVSet(ctx, user, key, value); err != nil {
+				return "", err
+			}
+			wrote = true
+		}
+	}
+
+	revision := kvValueRevision(value)
+	if wrote {
+		h.metric("writes", 1)
+		h.publish(user, Event{Type: "kv", Key: key})
+		h.audit(ctx, user, "kv.compare_and_set", "", "", map[string]any{"key": key})
+	}
+	return revision, nil
 }
 
 // KVSet 实现 Service。
@@ -627,20 +1039,33 @@ func (h *Handler) checkLegacyKVQuota(ctx context.Context, user, key string) erro
 	if strings.HasPrefix(key, reservedKVPrefix) {
 		return nil
 	}
-	if _, err := h.store.KVGet(ctx, user, key); err == nil {
-		return nil
-	} else if !errors.Is(err, ErrNotFound) {
-		return err
-	}
 	keys, err := h.store.KVKeys(ctx, user)
 	if err != nil {
 		return err
 	}
+	if len(keys) > MaxKVEntriesPerUser {
+		return fmt.Errorf("too many kv entries: %d > %d", len(keys), MaxKVEntriesPerUser)
+	}
+	seen := make(map[string]struct{}, len(keys))
 	n := 0
+	exists := false
 	for _, existing := range keys {
+		if err := validateKVKey(existing); err != nil {
+			return fmt.Errorf("stored kv key is invalid: %w", err)
+		}
+		if _, duplicate := seen[existing]; duplicate {
+			return fmt.Errorf("duplicate stored kv key %q", existing)
+		}
+		seen[existing] = struct{}{}
+		if existing == key {
+			exists = true
+		}
 		if !strings.HasPrefix(existing, reservedKVPrefix) {
 			n++
 		}
+	}
+	if exists {
+		return nil
 	}
 	if limit := h.opts.limits.MaxKVKeysPerUser; limit > 0 && n >= limit {
 		return fmt.Errorf("kv keys quota exceeded (%d); 请清理不再使用的键", limit)
@@ -681,9 +1106,20 @@ func decodePageErrors(raw json.RawMessage) ([]PageError, error) {
 	if len(raw) == 0 {
 		return nil, nil
 	}
+	if len(raw) > maxInternalKVValueSize {
+		return nil, fmt.Errorf("page error log exceeds %d bytes", maxInternalKVValueSize)
+	}
 	var out []PageError
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return nil, fmt.Errorf("corrupt page error log: %w", err)
+	}
+	if len(out) > MaxPageErrors {
+		return nil, fmt.Errorf("page error log has too many entries: %d > %d", len(out), MaxPageErrors)
+	}
+	for i := range out {
+		if len(out[i].Message) > 2048 || len(out[i].Stack) > 4096 || len(out[i].URL) > 512 || len(out[i].ItemID) > 128 {
+			return nil, fmt.Errorf("page error log entry %d exceeds field limits", i)
+		}
 	}
 	return out, nil
 }
@@ -798,6 +1234,9 @@ func sortPages(pages []Page) {
 }
 
 func decodePages(raw json.RawMessage) ([]Page, error) {
+	if len(raw) > maxInternalKVValueSize {
+		return nil, fmt.Errorf("page registry exceeds %d bytes", maxInternalKVValueSize)
+	}
 	var pages []Page
 	if err := json.Unmarshal(raw, &pages); err != nil {
 		return nil, fmt.Errorf("corrupt page registry: %w", err)
@@ -855,6 +1294,11 @@ func (h *Handler) readUserStateLocked(ctx context.Context, user string) (UserSta
 		if state.KV == nil {
 			state.KV = make(map[string]json.RawMessage)
 		}
+		// Configurable public-key quota is admission control, not stored-data
+		// validity: lowering it must still allow reads and cleanup of old keys.
+		if err := validateStoredUserState(state, 0); err != nil {
+			return UserState{}, err
+		}
 		return cloneUserState(state), nil
 	}
 	state := UserState{KV: make(map[string]json.RawMessage)}
@@ -863,23 +1307,59 @@ func (h *Handler) readUserStateLocked(ctx context.Context, user string) (UserSta
 	if err != nil {
 		return UserState{}, err
 	}
+	if err := validateItems(state.Items); err != nil {
+		return UserState{}, fmt.Errorf("stored items are invalid: %w", err)
+	}
 	keys, err := h.store.KVKeys(ctx, user)
 	if err != nil {
 		return UserState{}, err
 	}
+	if len(keys) > MaxKVEntriesPerUser {
+		return UserState{}, fmt.Errorf("too many kv entries: %d > %d", len(keys), MaxKVEntriesPerUser)
+	}
+	for _, key := range keys {
+		if err := validateKVKey(key); err != nil {
+			return UserState{}, fmt.Errorf("stored kv key is invalid: %w", err)
+		}
+	}
 	sort.Strings(keys)
+	for index := 1; index < len(keys); index++ {
+		if keys[index] == keys[index-1] {
+			return UserState{}, fmt.Errorf("duplicate stored kv key %q", keys[index])
+		}
+	}
+	kvBytes := 0
 	for _, key := range keys {
 		value, err := h.store.KVGet(ctx, user, key)
 		if err != nil {
 			return UserState{}, fmt.Errorf("read kv %q: %w", key, err)
 		}
+		valueLimit := storedKVValueLimit(key)
+		if len(value) > valueLimit {
+			return UserState{}, fmt.Errorf("stored kv value %q exceeds %d bytes", key, valueLimit)
+		}
+		if !json.Valid(value) {
+			return UserState{}, fmt.Errorf("stored kv value %q is invalid JSON", key)
+		}
+		size := len(key) + len(value)
+		if size > MaxUserKVBytes-kvBytes {
+			return UserState{}, fmt.Errorf("kv data exceeds %d bytes per user", MaxUserKVBytes)
+		}
+		kvBytes += size
 		state.KV[key] = append(json.RawMessage(nil), value...)
 	}
 	infos, err := h.store.Revisions(ctx, user)
 	if err != nil {
 		return UserState{}, err
 	}
+	// Validate metadata before reflecting any identifier back into a third-party
+	// Store callback. Besides bounding memory, this prevents a malformed Store
+	// from turning an oversized ID into a second untrusted lookup.
+	if err := validateRevisionInfos(infos); err != nil {
+		return UserState{}, err
+	}
 	fullStore, canReadFullRevision := h.store.(RevisionStore)
+	revisionBytes := 0
 	for _, info := range infos {
 		var rev Revision
 		if canReadFullRevision {
@@ -891,7 +1371,22 @@ func (h *Handler) readUserStateLocked(ctx context.Context, user string) (UserSta
 		if err != nil {
 			return UserState{}, fmt.Errorf("read revision %q: %w", info.ID, err)
 		}
-		state.Revisions = append(state.Revisions, rev)
+		candidate := rev
+		if err := validateRevisionForImport(&candidate); err != nil {
+			return UserState{}, fmt.Errorf("stored revision %q is invalid: %w", info.ID, err)
+		}
+		if candidate.ID != info.ID {
+			return UserState{}, fmt.Errorf("stored revision id mismatch: metadata %q, record %q", info.ID, candidate.ID)
+		}
+		size := revisionSourceBytes(candidate)
+		if size > MaxUserRevisionBytes-revisionBytes {
+			return UserState{}, fmt.Errorf("revisions exceed %d bytes per user", MaxUserRevisionBytes)
+		}
+		revisionBytes += size
+		state.Revisions = append(state.Revisions, candidate)
+	}
+	if err := validateStoredUserState(state, 0); err != nil {
+		return UserState{}, err
 	}
 	return state, nil
 }
@@ -994,9 +1489,24 @@ func sleepJittered(ctx context.Context, attempt int) error {
 
 func prependRevision(state *UserState, rev Revision, keep int) {
 	state.Revisions = append([]Revision{rev}, state.Revisions...)
-	if keep > 0 && len(state.Revisions) > keep {
-		state.Revisions = state.Revisions[:keep]
+	countLimit := keep
+	if countLimit <= 0 || countLimit > MaxRevisionsPerUser {
+		countLimit = MaxRevisionsPerUser
 	}
+	if len(state.Revisions) > countLimit {
+		state.Revisions = state.Revisions[:countLimit]
+	}
+	total := 0
+	kept := 0
+	for i := range state.Revisions {
+		size := revisionSourceBytes(state.Revisions[i])
+		if size > MaxUserRevisionBytes-total {
+			break
+		}
+		total += size
+		kept = i + 1
+	}
+	state.Revisions = state.Revisions[:kept]
 }
 
 // ListPages 实现 Service。
@@ -1206,14 +1716,23 @@ func validateRevisionForImport(rev *Revision) error {
 		rev.Version = 3
 	}
 	if rev.Version >= 3 {
-		catalog := templateCatalog{
+		// Validate the caller-owned structure before cloning it. This keeps an
+		// oversized third-party backup/Store payload from doubling memory merely
+		// to discover that it violates the catalog limits.
+		preflight := templateCatalog{
 			RootTemplateID: rev.RootTemplateID, NextRevision: rev.TemplateRevisionClock,
-			Templates: cloneTemplates(rev.Templates),
+			Templates: rev.Templates,
 		}
-		normalizeTemplateCatalog(&catalog)
-		if err := validateTemplateCatalog(catalog, rev.Pages); err != nil {
+		for i := range preflight.Templates {
+			if preflight.NextRevision < preflight.Templates[i].Revision {
+				preflight.NextRevision = preflight.Templates[i].Revision
+			}
+		}
+		if err := validateTemplateCatalog(preflight, rev.Pages); err != nil {
 			return fmt.Errorf("revision %q: %w", rev.ID, err)
 		}
+		catalog := cloneTemplateCatalog(preflight)
+		normalizeTemplateCatalog(&catalog)
 		rev.Templates = catalog.Templates
 		rev.TemplateRevisionClock = catalog.NextRevision
 	}
@@ -1233,20 +1752,52 @@ func (h *Handler) importState(export *UserExport) (UserState, error) {
 	if err := validatePages(export.Pages); err != nil {
 		return UserState{}, err
 	}
-	catalog := templateCatalog{
+	preflightCatalog := templateCatalog{
 		RootTemplateID: export.RootTemplateID, NextRevision: export.TemplateRevisionClock,
-		Templates: cloneTemplates(export.Templates),
+		Templates: export.Templates,
 	}
-	normalizeTemplateCatalog(&catalog)
-	if err := validateTemplateCatalog(catalog, export.Pages); err != nil {
+	for i := range preflightCatalog.Templates {
+		if preflightCatalog.NextRevision < preflightCatalog.Templates[i].Revision {
+			preflightCatalog.NextRevision = preflightCatalog.Templates[i].Revision
+		}
+	}
+	if err := validateTemplateCatalog(preflightCatalog, export.Pages); err != nil {
 		return UserState{}, err
+	}
+	catalog := cloneTemplateCatalog(preflightCatalog)
+	normalizeTemplateCatalog(&catalog)
+	if len(export.Revisions) > MaxRevisionsPerUser {
+		return UserState{}, fmt.Errorf("too many revisions: %d > %d", len(export.Revisions), MaxRevisionsPerUser)
 	}
 	if h.opts.maxRevisions > 0 && len(export.Revisions) > h.opts.maxRevisions {
 		return UserState{}, fmt.Errorf("too many revisions: %d > %d", len(export.Revisions), h.opts.maxRevisions)
 	}
+	if len(export.KV) > MaxKVEntriesPerUser-2 {
+		return UserState{}, fmt.Errorf("too many exported kv entries: %d > %d", len(export.KV), MaxKVEntriesPerUser-2)
+	}
+	if err := validateStoredKV(export.KV, h.opts.limits.MaxKVKeysPerUser); err != nil {
+		return UserState{}, err
+	}
+	seenRevisions := make(map[string]struct{}, len(export.Revisions))
+	revisionBytes := 0
+	for i := range export.Revisions {
+		candidate := export.Revisions[i]
+		if err := validateRevisionForImport(&candidate); err != nil {
+			return UserState{}, err
+		}
+		if _, exists := seenRevisions[candidate.ID]; exists {
+			return UserState{}, fmt.Errorf("duplicate revision id %q", candidate.ID)
+		}
+		size := revisionSourceBytes(candidate)
+		if size > MaxUserRevisionBytes-revisionBytes {
+			return UserState{}, fmt.Errorf("revisions exceed %d bytes per user", MaxUserRevisionBytes)
+		}
+		revisionBytes += size
+		seenRevisions[candidate.ID] = struct{}{}
+	}
 	state := UserState{
 		Items:     cloneItems(export.Items),
-		KV:        make(map[string]json.RawMessage, len(export.KV)+1),
+		KV:        make(map[string]json.RawMessage, len(export.KV)+2),
 		Revisions: cloneRevisions(export.Revisions),
 	}
 	regularKeys := 0
@@ -1257,10 +1808,8 @@ func (h *Handler) importState(export *UserExport) (UserState, error) {
 		if key == pagesKVKey || key == templatesKVKey {
 			return UserState{}, fmt.Errorf("kv key %q is reserved for a top-level export field", key)
 		}
-		limit := MaxKVValueBytes
-		if strings.HasPrefix(key, reservedKVPrefix) {
-			limit = maxInternalKVValueSize
-		} else {
+		limit := storedKVValueLimit(key)
+		if !strings.HasPrefix(key, reservedKVPrefix) {
 			regularKeys++
 		}
 		if len(value) > limit {
@@ -1280,15 +1829,13 @@ func (h *Handler) importState(export *UserExport) (UserState, error) {
 	if err := setStateTemplateCatalog(&state, catalog, export.Pages); err != nil {
 		return UserState{}, err
 	}
-	seenRevisions := make(map[string]struct{}, len(state.Revisions))
 	for i := range state.Revisions {
 		if err := validateRevisionForImport(&state.Revisions[i]); err != nil {
 			return UserState{}, err
 		}
-		if _, exists := seenRevisions[state.Revisions[i].ID]; exists {
-			return UserState{}, fmt.Errorf("duplicate revision id %q", state.Revisions[i].ID)
-		}
-		seenRevisions[state.Revisions[i].ID] = struct{}{}
+	}
+	if err := validateStoredKV(state.KV, h.opts.limits.MaxKVKeysPerUser); err != nil {
+		return UserState{}, err
 	}
 	return state, nil
 }

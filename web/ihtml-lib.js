@@ -6,7 +6,7 @@
   /* ---------- i18n: 内核 chrome 文案(zh/en, 宿主可经 mount strings 覆写) ---------- */
   const I18N = {
     zh: {
-      chat_entry: 'AI 助手', chat_title: 'AI 页面助手', send: '发送', stop: '停止',
+      chat_entry: 'AI 助手', chat_title: 'AI 助手', send: '发送', stop: '停止',
       new_session: '新对话', close: '关闭', settings: '页面设置', menu: '菜单', dialog: '对话框', page_actions: '页面操作', conversation: '与 AI 助手的对话',
       refresh_models: '刷新模型', model_placeholder: '选择已加载模型, 或直接输入模型名',
       agent_mode_label: '执行模式', agent_fast: 'Fast', agent_deep: 'Deep',
@@ -14,24 +14,30 @@
       agent_deep_hint: '先规划并委派只读检查，适合复杂界面任务。',
       agent_deep_manual: '需确认的变更会暂停；确认只执行当前卡片，计划不会自动继续。',
       agent_plan: '计划', agent_plan_paused: '计划已暂停', agent_budget: '预算',
-      agent_model_budget: '模型 {used}/{max}', agent_subtask_budget: '子任务 {used}/{max}',
+      agent_model_budget: '模型 {used}/{max}', agent_subtask_budget: '子任务 {used}/{max}', agent_tool_budget: '工具 {used}/{max}',
       agent_root: '主代理', agent_inspector: '页面检查', agent_reviewer: 'UI 验收',
       agent_status_pending: '待处理', agent_status_running: '进行中', agent_status_completed: '完成', agent_status_paused: '暂停', agent_status_error: '失败',
       agent_manual_confirm: '确认只执行此卡，Deep 计划不会自动恢复；完成后发送“继续”进行后续验收。',
-      composer_placeholder: '描述你想创建或修改的界面…', composer_hint: 'Enter 发送 · Shift+Enter 换行',
-      welcome: '告诉我你想创建或修改什么界面。我会先说明处理过程，再把结果直接应用到页面。',
+      composer_placeholder: '询问问题、分析数据，或描述想创建、修改的页面…', composer_hint: 'Enter 发送 · Shift+Enter 换行',
+      welcome: '你可以直接提问、分析业务数据，也可以明确要求创建或修改页面。回答会以合适的 HTML 结构展示在这里。',
       session_reset: '新会话已开始。之前的对话上下文已清空, 页面 Item 不受影响。',
       chat_reconnected: '连接已重连, 上下文已恢复。', chat_disconnected: '连接已断开, 发送消息时会自动重连。',
-      process: '处理记录', analyzing: '正在处理', thinking: '模型思考', done: '已完成', turn_stopped: '已停止', turn_failed: '处理失败',
-      tool_running: '执行中', tool_pending: '待确认', tool_success: '完成', tool_error: '失败', tool_cancelled: '已取消',
+      process: '处理记录', analyzing: '正在处理', thinking: '模型思考', done: '已完成', turn_stopped: '已请求停止', turn_failed: '处理失败',
+      turn_stop_unknown: '已请求停止当前轮次。已开始的操作可能仍在收尾，请核对最终结果。',
+      tool_running: '执行中', tool_pending: '待确认', tool_success: '完成', tool_error: '失败', tool_cancelled: '已取消', tool_cancelling: '撤销中',
       risk_low: '低风险', risk_medium: '中风险', risk_high: '高风险', risk_blocked: '已拦截',
-      confirm_run: '确认执行', cancel: '取消', confirmed_running: '已确认, 正在执行。', cancelled_not_run: '已取消, 未执行。',
+      confirm_run: '确认执行', cancel: '取消', confirmed_running: '已确认, 正在执行。', cancelled_not_run: '已撤销，操作未执行。',
+      confirmation_connecting: '正在连接并提交确认…', cancellation_waiting: '正在向服务器撤销，等待确认…',
+      confirmation_send_failed: '未能提交确认，操作尚未开始。', cancellation_send_failed: '未能发送撤销请求，操作仍待确认。',
+      cancellation_ack_timeout: '未收到服务器撤销回执，执行状态未知。请重新连接后再确认。', cancellation_failed: '撤销失败，执行状态未确认。',
       confirm_expired: '确认卡已过期, 请重新让 AI 发起。', expires_in: '有效期',
       params_title: '操作参数', debug_title: '调试详情', tools_called: '调用 {n} 个工具',
       process_steps: '过程', steps_completed: '已完成 {n} 个步骤', tools_running: '正在执行 {n} 项', answering: '正在整理回答',
       reasoning_step: '分析步骤 {n}', reasoning_streaming: '正在分析', reasoning_complete: '分析完成', technical_details: '技术详情',
       request_summary: '请求摘要', result_data: '返回结果', diagnostic_data: '诊断信息', tool_reason: '为什么需要确认',
       confirm_this_action: '确认此操作', dismiss_tool: '暂不执行', answer_complete: '回答已完成',
+      answer_complete_summary: '回答已完成：{summary}', answer_truncated: '回答过长，已仅展示前面部分。',
+      answer_table: '数据表格', answer_code: '代码内容', opens_new_window: '在新窗口打开',
       confirmation_announced: '{name} 待确认，{risk}', tool_confirmed_announced: '已确认 {name}，正在执行', tool_dismissed_announced: '已暂不执行 {name}',
       confirmation_expired_announced: '{name} 的确认已过期', content_chars: '包含 {n} 个字符的内容', content_truncated: '内容过长，已截断。',
       confirmation_busy: '请先等待当前请求完成，再处理之前的确认卡。',
@@ -73,6 +79,7 @@
       safe_title: '安全模式', safe_hint: '未执行任何 UI Item。可以回滚到某个历史快照, 或让 AI 助手修复。',
       safe_readonly_hint: '未执行任何 UI Item。当前账号没有修改权限，请联系有权限的管理员处理。',
       safe_exit: '退出安全模式', ai_unavailable: 'AI 服务未配置, 请联系管理员。',
+      ai_preview: '演示预览：当前未连接真实 AI 模型，不会执行真实问答或页面修改。',
       model_needed: '请先选择或输入模型名', chat_broken: 'AI 连接失败', ws_lost: '连接已断开, 请重新发送',
       item_broken: 'Item "{id}" 执行失败: {msg}', loading: '加载中…', author_user: '你',
       panel_layout: '布局', layout_edit: '开启拖拽排版', layout_editing: '正在编辑布局',
@@ -81,8 +88,8 @@
       layout_resize_width: '调整 {title} 宽度', layout_resize_width_short: '宽度',
       item_editor_title: '内容排版', item_editor_layout_mode: '排版模式', item_editor_auto: '自动排版', item_editor_free: '自由定位',
       item_editor_auto_hint: '拖动内容调整顺序，拉动边角调整大小。', item_editor_free_hint: '自由移动、缩放内容，并调整层级。',
-      item_editor_save: '保存', item_editor_saving: '保存中…', item_editor_saved: '已保存', item_editor_done: '完成',
-      item_editor_unsaved: '有未保存修改', item_editor_clean: '修改已保存', item_editor_conflict: '布局已在其他位置更新，请重新打开编辑器。', item_editor_save_failed: '保存失败',
+      item_editor_save: '保存', item_editor_reload: '重新加载', item_editor_saving: '保存中…', item_editor_saved: '已保存', item_editor_done: '完成',
+      item_editor_unsaved: '有未保存修改', item_editor_clean: '修改已保存', item_editor_conflict: '布局已在其他位置更新，请放弃本地修改并重新加载。', item_editor_load_failed: '读取布局失败', item_editor_save_failed: '保存失败',
       item_editor_current_items: '页面内容', item_editor_canvas: '编辑画布', item_editor_properties: '属性', item_editor_selected: '所选内容',
       item_editor_select_hint: '选择画布中的内容后编辑属性。', item_editor_no_selection: '请选择内容', item_editor_empty: '当前页面没有可编辑内容',
       item_editor_move: '拖动', item_editor_layer: '层级', item_editor_layer_up: '上移一层', item_editor_layer_down: '下移一层',
@@ -113,12 +120,13 @@
       template_exit: '退出编辑', template_delete_title: '删除结构', template_delete_hint: '将同时删除其全部子层。此操作可以撤销。', template_exit_hint: '退出后将丢失尚未保存的模板修改。',
       template_desktop: '桌面', template_tablet: '平板', template_mobile: '手机', template_inherited: '继承',
       template_canvas: '模板画布', template_drop_here: '拖到这里', template_locked_root: 'Root 不能删除或移动',
+      template_reorder_actions: '调整 {title} 的层级', template_move_up: '上移', template_move_down: '下移', template_indent: '缩进', template_outdent: '减少缩进',
       template_load_failed: '模板加载失败，请重试；远端模板未被覆盖', template_save_failed: '模板保存失败', template_min_height: '最小高度',
       template_conflict: '模板已在其他位置更新', template_reload: '载入远端版本',
       template_unassigned: '未放置内容', template_unassigned_empty: '没有未放置内容',
     },
     en: {
-      chat_entry: 'AI assistant', chat_title: 'AI page assistant', send: 'Send', stop: 'Stop',
+      chat_entry: 'AI assistant', chat_title: 'AI assistant', send: 'Send', stop: 'Stop',
       new_session: 'New chat', close: 'Close', settings: 'Page settings', menu: 'Menu', dialog: 'Dialog', page_actions: 'Page actions', conversation: 'Conversation with the AI assistant',
       refresh_models: 'Refresh', model_placeholder: 'Pick a loaded model or type a name',
       agent_mode_label: 'Execution mode', agent_fast: 'Fast', agent_deep: 'Deep',
@@ -126,24 +134,30 @@
       agent_deep_hint: 'Plans first and delegates read-only checks for complex interface work.',
       agent_deep_manual: 'Changes requiring confirmation pause the plan. Confirming runs only that card and does not resume the plan.',
       agent_plan: 'Plan', agent_plan_paused: 'Plan paused', agent_budget: 'Budget',
-      agent_model_budget: 'Model {used}/{max}', agent_subtask_budget: 'Subtasks {used}/{max}',
+      agent_model_budget: 'Model {used}/{max}', agent_subtask_budget: 'Subtasks {used}/{max}', agent_tool_budget: 'Tools {used}/{max}',
       agent_root: 'Main agent', agent_inspector: 'Page inspector', agent_reviewer: 'UI reviewer',
       agent_status_pending: 'Pending', agent_status_running: 'Running', agent_status_completed: 'Done', agent_status_paused: 'Paused', agent_status_error: 'Failed',
       agent_manual_confirm: 'Confirming runs only this card; the Deep plan stays paused. Send “continue” afterward for further verification.',
-      composer_placeholder: 'Describe the interface you want to create or change…', composer_hint: 'Enter to send · Shift+Enter for a new line',
-      welcome: 'Describe what you want to create or change. I’ll show the work log, then apply the result to the page.',
+      composer_placeholder: 'Ask a question, analyze data, or describe a page to create or change…', composer_hint: 'Enter to send · Shift+Enter for a new line',
+      welcome: 'Ask a question, analyze business data, or explicitly ask me to create or change the page. Answers appear here using an appropriate HTML structure.',
       session_reset: 'New session started. Conversation context cleared; page items are unaffected.',
       chat_reconnected: 'Reconnected; context restored.', chat_disconnected: 'Disconnected. Sending will reconnect automatically.',
-      process: 'Work log', analyzing: 'Working', thinking: 'Model reasoning', done: 'Done', turn_stopped: 'Stopped', turn_failed: 'Failed',
-      tool_running: 'Running', tool_pending: 'Confirm', tool_success: 'Done', tool_error: 'Failed', tool_cancelled: 'Cancelled',
+      process: 'Work log', analyzing: 'Working', thinking: 'Model reasoning', done: 'Done', turn_stopped: 'Stop requested', turn_failed: 'Failed',
+      turn_stop_unknown: 'Stop was requested. An operation that already started may still be finishing; verify its final result.',
+      tool_running: 'Running', tool_pending: 'Confirm', tool_success: 'Done', tool_error: 'Failed', tool_cancelled: 'Cancelled', tool_cancelling: 'Cancelling',
       risk_low: 'low risk', risk_medium: 'medium risk', risk_high: 'high risk', risk_blocked: 'blocked',
-      confirm_run: 'Confirm', cancel: 'Cancel', confirmed_running: 'Confirmed, running.', cancelled_not_run: 'Cancelled.',
+      confirm_run: 'Confirm', cancel: 'Cancel', confirmed_running: 'Confirmed, running.', cancelled_not_run: 'Revoked; the operation was not run.',
+      confirmation_connecting: 'Connecting and submitting confirmation…', cancellation_waiting: 'Revoking on the server; waiting for confirmation…',
+      confirmation_send_failed: 'Confirmation could not be submitted; the operation was not started.', cancellation_send_failed: 'The cancellation request could not be sent; the operation is still awaiting confirmation.',
+      cancellation_ack_timeout: 'No cancellation acknowledgement was received; execution status is unknown. Reconnect before taking further action.', cancellation_failed: 'Cancellation failed; execution status is not confirmed.',
       confirm_expired: 'Confirmation expired; ask the AI again.', expires_in: 'expires in',
       params_title: 'Parameters', debug_title: 'Debug', tools_called: '{n} tool calls',
       process_steps: 'Process', steps_completed: '{n} steps completed', tools_running: '{n} running', answering: 'Preparing the answer',
       reasoning_step: 'Reasoning step {n}', reasoning_streaming: 'Analyzing', reasoning_complete: 'Analysis complete', technical_details: 'Technical details',
       request_summary: 'Request summary', result_data: 'Result', diagnostic_data: 'Diagnostics', tool_reason: 'Why confirmation is required',
       confirm_this_action: 'Confirm this action', dismiss_tool: 'Not now', answer_complete: 'Answer complete',
+      answer_complete_summary: 'Answer complete: {summary}', answer_truncated: 'This answer was too long, so only the first part is shown.',
+      answer_table: 'Data table', answer_code: 'Code content', opens_new_window: 'opens in a new window',
       confirmation_announced: '{name} awaits confirmation, {risk}', tool_confirmed_announced: 'Confirmed {name}; running now', tool_dismissed_announced: 'Skipped {name}',
       confirmation_expired_announced: 'Confirmation for {name} expired', content_chars: 'Contains {n} characters of content', content_truncated: 'Long content was truncated.',
       confirmation_busy: 'Wait for the current request to finish before using an earlier confirmation card.',
@@ -185,6 +199,7 @@
       safe_title: 'Safe mode', safe_hint: 'No UI items were executed. Roll back to a snapshot or let the AI fix things.',
       safe_readonly_hint: 'No UI items were executed. This account cannot make changes; contact an administrator with write access.',
       safe_exit: 'Exit safe mode', ai_unavailable: 'AI service is not configured. Contact the administrator.',
+      ai_preview: 'Demo preview: no real AI model is connected, so answers and page changes are not executed.',
       model_needed: 'Pick or type a model name first', chat_broken: 'AI connection failed', ws_lost: 'Connection lost, please resend',
       item_broken: 'Item "{id}" failed: {msg}', loading: 'Loading…', author_user: 'You',
       panel_layout: 'Layout', layout_edit: 'Enable drag layout', layout_editing: 'Editing layout',
@@ -193,8 +208,8 @@
       layout_resize_width: 'Resize {title} width', layout_resize_width_short: 'Width',
       item_editor_title: 'Content layout', item_editor_layout_mode: 'Layout mode', item_editor_auto: 'Auto layout', item_editor_free: 'Free position',
       item_editor_auto_hint: 'Drag content to reorder it, and drag a corner to resize it.', item_editor_free_hint: 'Move, resize, and layer content freely.',
-      item_editor_save: 'Save', item_editor_saving: 'Saving…', item_editor_saved: 'Saved', item_editor_done: 'Done',
-      item_editor_unsaved: 'Unsaved changes', item_editor_clean: 'Changes saved', item_editor_conflict: 'The layout changed elsewhere. Reopen the editor to reload it.', item_editor_save_failed: 'Save failed',
+      item_editor_save: 'Save', item_editor_reload: 'Reload', item_editor_saving: 'Saving…', item_editor_saved: 'Saved', item_editor_done: 'Done',
+      item_editor_unsaved: 'Unsaved changes', item_editor_clean: 'Changes saved', item_editor_conflict: 'The layout changed elsewhere. Discard local changes to reload it.', item_editor_load_failed: 'Could not load layout', item_editor_save_failed: 'Save failed',
       item_editor_current_items: 'Page content', item_editor_canvas: 'Editing canvas', item_editor_properties: 'Properties', item_editor_selected: 'Selected content',
       item_editor_select_hint: 'Select content on the canvas to edit its properties.', item_editor_no_selection: 'Select some content', item_editor_empty: 'This page has no editable content',
       item_editor_move: 'Drag', item_editor_layer: 'Layer', item_editor_layer_up: 'Bring forward', item_editor_layer_down: 'Send backward',
@@ -225,6 +240,7 @@
       template_exit: 'Exit editor', template_delete_title: 'Delete structure', template_delete_hint: 'All nested layers will also be removed. You can undo this action.', template_exit_hint: 'Exiting will discard unsaved template changes.',
       template_desktop: 'Desktop', template_tablet: 'Tablet', template_mobile: 'Mobile', template_inherited: 'Inherited',
       template_canvas: 'Template canvas', template_drop_here: 'Drop here', template_locked_root: 'Root cannot be deleted or moved',
+      template_reorder_actions: 'Reorder {title}', template_move_up: 'Move up', template_move_down: 'Move down', template_indent: 'Indent', template_outdent: 'Outdent',
       template_load_failed: 'Template failed to load. Retry; the remote template was not changed', template_save_failed: 'Failed to save template', template_min_height: 'Min height',
       template_conflict: 'Template changed elsewhere', template_reload: 'Load remote version',
       template_unassigned: 'Unassigned content', template_unassigned_empty: 'No unassigned content',
@@ -240,6 +256,398 @@
       return s;
     };
   }
+
+  /* ---------- chatContent: 通用回答格式、Markdown 与传输预算 ----------
+   * 这里只把 Markdown 转成 HTML 字符串，绝不把它视为可信 DOM。内核会把
+   * Markdown 和显式 HTML 一并送入同一个 DOM 白名单清洗器。 */
+  const chatContent = (() => {
+    const KNOWN_FORMATS = new Set(['auto', 'html', 'markdown', 'text']);
+    // Matches chat.Config's public maximum. The server default remains 256 KiB;
+    // this browser ceiling merely avoids truncating a valid host override a
+    // second time while retaining a non-disableable DOM/rendering boundary.
+    const MAX_RENDER_BYTES = 512 * 1024;
+    const HTML_TAGS = new Set(('article section header footer aside div span p br hr h1 h2 h3 h4 h5 h6 blockquote ' +
+      'ul ol li dl dt dd table caption colgroup col thead tbody tfoot tr th td pre code strong em b i u s del ins a ' +
+      'details summary figure figcaption time mark kbd samp var cite abbr q data progress meter').split(' '));
+    const encoder = typeof TextEncoder === 'function' ? new TextEncoder() : null;
+    const linkTextFilters = (() => {
+      try {
+        return {
+          whitespace: new RegExp('\\p{White_Space}+', 'gu'),
+          invisible: new RegExp('[\\p{Default_Ignorable_Code_Point}\\u2800]+', 'gu'),
+          marks: new RegExp('\\p{Mark}+', 'gu'),
+        };
+      } catch {
+        return {
+          whitespace: /\s+/g,
+          invisible: /[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u202a-\u202e\u2060-\u206f\u2800\u3164\ufe00-\ufe0f\ufeff\uffa0]+/g,
+          marks: /[\u0300-\u036f\u0483-\u0489\u0591-\u05bd\u05bf\u05c1-\u05c2\u0610-\u061a\u064b-\u065f\u0670]+/g,
+        };
+      }
+    })();
+
+    function escapeHTML(value) {
+      return String(value == null ? '' : value)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    function normalizeFormat(value) {
+      const raw = String(value == null ? '' : value).trim().toLowerCase();
+      if (!raw) return 'auto';
+      return KNOWN_FORMATS.has(raw) ? raw : 'text';
+    }
+
+    // The first explicit stream format locks that projection. assistant_reset
+    // starts a fresh rendering stream; assistant_done is handled separately.
+    function mergeFormat(current, incoming, reset) {
+      const base = reset ? 'auto' : normalizeFormat(current);
+      if (base !== 'auto') return base;
+      if (incoming == null || String(incoming).trim() === '') return base;
+      return normalizeFormat(incoming);
+    }
+
+    // A non-empty assistant_done format describes its authoritative snapshot.
+    // Unknown values deliberately normalize to text; omission preserves the
+    // format established by streaming deltas or legacy auto detection.
+    function finalizeFormat(current, incoming) {
+      const base = normalizeFormat(current);
+      if (incoming == null || String(incoming).trim() === '') return base;
+      return normalizeFormat(incoming);
+    }
+
+    function doneSnapshot(event) {
+      const present = !!event && Object.prototype.hasOwnProperty.call(event, 'message') && typeof event.message === 'string';
+      return { present, message: present ? event.message : '' };
+    }
+
+    function stripInlineCode(line) {
+      const source = String(line || '');
+      let output = '';
+      let cursor = 0;
+      while (cursor < source.length) {
+        const start = source.indexOf('`', cursor);
+        if (start < 0) { output += source.slice(cursor); break; }
+        output += source.slice(cursor, start);
+        let end = start + 1;
+        while (source[end] === '`') end++;
+        const marker = source.slice(start, end);
+        const close = source.indexOf(marker, end);
+        if (close < 0) break;
+        cursor = close + marker.length;
+      }
+      return output;
+    }
+
+    function withoutCode(source) {
+      const lines = String(source || '').replace(/\r\n?/g, '\n').split('\n');
+      let fence = '';
+      return lines.map((line) => {
+        const match = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+        if (match) {
+          if (!fence) fence = match[1][0];
+          else if (match[1][0] === fence) fence = '';
+          return '';
+        }
+        if (fence) return '';
+        return stripInlineCode(line);
+      }).join('\n');
+    }
+
+    // The auto detector is deliberately a single forward scan. A regex ending in
+    // `[^>]*>` turns many unterminated tags into quadratic work on model output.
+    function looksLikeHTML(source) {
+      const clean = withoutCode(source);
+      let open = -1;
+      for (let index = 0; index < clean.length; index++) {
+        const char = clean.charCodeAt(index);
+        if (char === 60) { open = index; continue; } // <
+        if (char !== 62 || open < 0) continue; // >
+        if (index - open <= 512) {
+          const match = /^<\s*\/?\s*([a-z][a-z0-9]*)\b/i.exec(clean.slice(open, index + 1));
+          if (match && HTML_TAGS.has(match[1].toLowerCase())) return true;
+        }
+        open = -1;
+      }
+      return false;
+    }
+
+    function resolveFormat(format, source) {
+      const normalized = normalizeFormat(format);
+      if (normalized !== 'auto') return normalized;
+      return looksLikeHTML(source) ? 'html' : 'markdown';
+    }
+
+    function clipUTF8(value, maxBytes) {
+      const text = String(value == null ? '' : value);
+      const limit = Math.max(0, Math.floor(Number(maxBytes) || 0));
+      if (!encoder) {
+        const clipped = text.slice(0, limit);
+        return { text: clipped, bytes: clipped.length, truncated: clipped.length < text.length };
+      }
+      const encoded = encoder.encode(text);
+      if (encoded.length <= limit) return { text, bytes: encoded.length, truncated: false };
+      let low = 0;
+      let high = Math.min(text.length, limit);
+      while (low < high) {
+        const mid = Math.ceil((low + high) / 2);
+        if (encoder.encode(text.slice(0, mid)).length <= limit) low = mid;
+        else high = mid - 1;
+      }
+      if (low > 0 && /[\uD800-\uDBFF]/.test(text.charAt(low - 1))) low--;
+      const clipped = text.slice(0, low);
+      return { text: clipped, bytes: encoder.encode(clipped).length, truncated: true };
+    }
+
+    function compactLinkLabel(value, maxCodePoints = 320) {
+      const raw = String(value == null ? '' : value);
+      let normalized = raw;
+      try { normalized = normalized.normalize('NFKC'); } catch { /* Older engines use the explicit fallback ranges. */ }
+      let label = normalized.replace(linkTextFilters.invisible, '');
+      label = label.replace(linkTextFilters.whitespace, ' ').trim();
+      const visible = !!label.replace(linkTextFilters.marks, '').trim();
+      const points = Array.from(label);
+      const limit = Math.max(2, Math.min(1024, Math.floor(Number(maxCodePoints) || 320)));
+      const truncated = points.length > limit;
+      if (truncated) label = points.slice(0, limit - 1).join('') + '…';
+      return { text: label, visible, truncated };
+    }
+
+    let tokenSequence = 0;
+    function tokenStore(source) {
+      const values = [];
+      let nonce = (++tokenSequence).toString(36) + Math.random().toString(36).slice(2, 12);
+      let prefix = '\uE000IHTML_' + nonce + '_';
+      // Bounded collision handling avoids an attacker-controlled O(n²) search.
+      for (let attempt = 0; attempt < 3 && source.includes(prefix); attempt++) {
+        nonce = (++tokenSequence).toString(36) + Math.random().toString(36).slice(2, 12);
+        prefix = '\uE000IHTML_' + nonce + '_';
+      }
+      const suffix = '\uE001';
+      return {
+        put(value) { const index = values.push(String(value)) - 1; return prefix + index + suffix; },
+        restore(value) {
+          const pattern = new RegExp(prefix + '(\\d+)' + suffix, 'g');
+          return String(value).replace(pattern, (_, index) => values[Number(index)] || '');
+        },
+      };
+    }
+
+    function protectCodeSpans(source, tokens) {
+      let output = '';
+      let cursor = 0;
+      while (cursor < source.length) {
+        const start = source.indexOf('`', cursor);
+        if (start < 0) { output += source.slice(cursor); break; }
+        output += source.slice(cursor, start);
+        let end = start + 1;
+        while (source[end] === '`') end++;
+        const marker = source.slice(start, end);
+        const close = source.indexOf(marker, end);
+        if (close < 0) { output += source.slice(start); break; }
+        output += tokens.put('<code>' + escapeHTML(source.slice(end, close).trim()) + '</code>');
+        cursor = close + marker.length;
+      }
+      return output;
+    }
+
+    function protectLinks(source, tokens, depth) {
+      let output = '';
+      let cursor = 0;
+      while (cursor < source.length) {
+        const open = source.indexOf('[', cursor);
+        if (open < 0) { output += source.slice(cursor); break; }
+        const image = open > cursor && source[open - 1] === '!';
+        const start = image ? open - 1 : open;
+        output += source.slice(cursor, start);
+        const closeLabel = source.indexOf(']', open + 1);
+        if (closeLabel < 0) { output += source.slice(start); break; }
+        if (source[closeLabel + 1] !== '(') {
+          output += source.slice(start, closeLabel + 1);
+          cursor = closeLabel + 1;
+          continue;
+        }
+        const closeTarget = source.indexOf(')', closeLabel + 2);
+        if (closeTarget < 0) { output += source.slice(start); break; }
+        const label = source.slice(open + 1, closeLabel);
+        const target = source.slice(closeLabel + 2, closeTarget).trim();
+        const href = target.split(/\s+/, 1)[0] || '';
+        if (!label || !href || label.length > 4096 || href.length > 4096) {
+          output += source.slice(start, closeTarget + 1);
+        } else if (image) {
+          // Remote images are deliberately not part of the answer surface; retain
+          // useful alternative text without creating a tracking request.
+          output += tokens.put(inlineMarkdown(label, depth + 1));
+        } else {
+          output += tokens.put('<a href="' + escapeHTML(href) + '">' + inlineMarkdown(label, depth + 1) + '</a>');
+        }
+        cursor = closeTarget + 1;
+      }
+      return output;
+    }
+
+    function inlineMarkdown(source, depth = 0) {
+      let text = String(source == null ? '' : source);
+      if (!text || depth > 4) return escapeHTML(text);
+      const tokens = tokenStore(text);
+
+      // Code and links use forward-only scanners. Unclosed openers turn the
+      // remaining input into plain text instead of repeatedly rescanning it.
+      text = protectCodeSpans(text, tokens);
+      text = text.replace(/\\([\\`*{}\[\]()#+\-.!_>~|])/g, (_, value) => tokens.put(escapeHTML(value)));
+      text = protectLinks(text, tokens, depth);
+      text = text.replace(/<((?:https?:\/\/|mailto:)[^>\s]+)>/gi,
+        (_, href) => tokens.put('<a href="' + escapeHTML(href) + '">' + escapeHTML(href) + '</a>'));
+
+      text = escapeHTML(text)
+        .replace(/~~([^~\n]+)~~/g, '<del>$1</del>')
+        .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
+        .replace(/__([^_\n]+)__/g, '<strong>$1</strong>')
+        .replace(/(^|[^\w])\*([^*\n]+)\*(?!\w)/g, '$1<em>$2</em>')
+        .replace(/(^|[^\w])_([^_\n]+)_(?!\w)/g, '$1<em>$2</em>')
+        .replace(/ {2,}\n/g, '<br>\n')
+        .replace(/\n/g, ' ');
+      return tokens.restore(text);
+    }
+
+    function splitTableRow(line) {
+      let source = String(line || '').trim();
+      if (source.startsWith('|')) source = source.slice(1);
+      if (source.endsWith('|') && !source.endsWith('\\|')) source = source.slice(0, -1);
+      const cells = [];
+      let cell = '';
+      let codeFence = 0;
+      for (let index = 0; index < source.length; index++) {
+        const ch = source[index];
+        if (ch === '\\' && index + 1 < source.length) {
+          const next = source[index + 1];
+          if (next === '|' || next === '\\') { cell += next; index++; continue; }
+        }
+        if (ch === '`') {
+          let end = index;
+          while (source[end] === '`') end++;
+          const width = end - index;
+          codeFence = codeFence === width ? 0 : (codeFence || width);
+          cell += source.slice(index, end);
+          index = end - 1;
+          continue;
+        }
+        if (ch === '|' && !codeFence) { cells.push(cell.trim()); cell = ''; continue; }
+        cell += ch;
+      }
+      cells.push(cell.trim());
+      return cells;
+    }
+
+    function tableDelimiter(line) {
+      if (!String(line || '').includes('|')) return null;
+      const cells = splitTableRow(line);
+      if (!cells.length || cells.some((cell) => !/^:?-{3,}:?$/.test(cell.replace(/\s/g, '')))) return null;
+      return cells.map((cell) => {
+        const clean = cell.replace(/\s/g, '');
+        return clean.startsWith(':') && clean.endsWith(':') ? 'center' : (clean.endsWith(':') ? 'right' : (clean.startsWith(':') ? 'left' : ''));
+      });
+    }
+
+    function markdownToHTML(source, depth = 0) {
+      const lines = String(source == null ? '' : source).replace(/\r\n?/g, '\n').split('\n');
+      const output = [];
+      let index = 0;
+      const isFence = (line) => /^ {0,3}(?:`{3,}|~{3,})/.test(line || '');
+      const isList = (line) => /^ {0,3}(?:[-+*]|\d+[.)])\s+\S/.test(line || '');
+      const isHeading = (line) => /^ {0,3}#{1,6}\s+\S/.test(line || '');
+      const isQuote = (line) => /^ {0,3}>/.test(line || '');
+      const isRule = (line) => /^ {0,3}(?:(?:\*\s*){3,}|(?:-\s*){3,}|(?:_\s*){3,})$/.test(line || '');
+
+      while (index < lines.length) {
+        const line = lines[index];
+        if (!line.trim()) { index++; continue; }
+
+        const fence = /^ {0,3}(`{3,}|~{3,})\s*([^\s`]*)?.*$/.exec(line);
+        if (fence) {
+          const marker = fence[1];
+          const language = /^[A-Za-z0-9_-]{1,40}$/.test(fence[2] || '') ? fence[2] : '';
+          const body = [];
+          index++;
+          const closing = new RegExp('^ {0,3}' + (marker[0] === '`' ? '`' : '~') + '{' + marker.length + ',}\\s*$');
+          while (index < lines.length && !closing.test(lines[index])) body.push(lines[index++]);
+          if (index < lines.length) index++;
+          output.push('<pre><code' + (language ? ' class="language-' + language + '"' : '') + '>' + escapeHTML(body.join('\n')) + '</code></pre>');
+          continue;
+        }
+
+        const heading = /^ {0,3}(#{1,6})\s+(.+?)\s*#*\s*$/.exec(line);
+        if (heading) {
+          const level = heading[1].length;
+          output.push('<h' + level + '>' + inlineMarkdown(heading[2]) + '</h' + level + '>');
+          index++;
+          continue;
+        }
+        if (index + 1 < lines.length && line.trim() && /^ {0,3}(?:=+|-+)\s*$/.test(lines[index + 1]) && !line.includes('|')) {
+          const level = lines[index + 1].trim().startsWith('=') ? 1 : 2;
+          output.push('<h' + level + '>' + inlineMarkdown(line.trim()) + '</h' + level + '>');
+          index += 2;
+          continue;
+        }
+        if (isRule(line)) { output.push('<hr>'); index++; continue; }
+
+        if (isQuote(line)) {
+          const quote = [];
+          while (index < lines.length && isQuote(lines[index])) quote.push(lines[index++].replace(/^ {0,3}>\s?/, ''));
+          output.push('<blockquote>' + (depth < 8 ? markdownToHTML(quote.join('\n'), depth + 1) : '<p>' + inlineMarkdown(quote.join(' ')) + '</p>') + '</blockquote>');
+          continue;
+        }
+
+        const alignments = index + 1 < lines.length && line.includes('|') ? tableDelimiter(lines[index + 1]) : null;
+        if (alignments) {
+          const headers = splitTableRow(line);
+          if (headers.length === alignments.length) {
+            index += 2;
+            const rows = [];
+            while (index < lines.length && lines[index].trim() && lines[index].includes('|')) {
+              const cells = splitTableRow(lines[index++]);
+              while (cells.length < headers.length) cells.push('');
+              rows.push(cells.slice(0, headers.length));
+            }
+            const style = (value) => value ? ' style="text-align: ' + value + '"' : '';
+            output.push('<table><thead><tr>' + headers.map((cell, column) => '<th scope="col"' + style(alignments[column]) + '>' + inlineMarkdown(cell) + '</th>').join('') + '</tr></thead>' +
+              (rows.length ? '<tbody>' + rows.map((row) => '<tr>' + row.map((cell, column) => '<td' + style(alignments[column]) + '>' + inlineMarkdown(cell) + '</td>').join('') + '</tr>').join('') + '</tbody>' : '') + '</table>');
+            continue;
+          }
+        }
+
+        const firstList = /^ {0,3}([-+*]|\d+[.)])\s+(.+)$/.exec(line);
+        if (firstList) {
+          const ordered = /^\d/.test(firstList[1]);
+          const tag = ordered ? 'ol' : 'ul';
+          const start = ordered ? Math.max(1, Number.parseInt(firstList[1], 10) || 1) : 1;
+          const items = [];
+          while (index < lines.length) {
+            const item = /^ {0,3}([-+*]|\d+[.)])\s+(.+)$/.exec(lines[index]);
+            if (!item || /^\d/.test(item[1]) !== ordered) break;
+            const parts = [item[2]];
+            index++;
+            while (index < lines.length && /^ {2,}\S/.test(lines[index]) && !isList(lines[index])) parts.push(lines[index++].trim());
+            items.push(parts.join(' '));
+          }
+          output.push('<' + tag + (ordered && start !== 1 ? ' start="' + start + '"' : '') + '>' + items.map((item) => '<li>' + inlineMarkdown(item) + '</li>').join('') + '</' + tag + '>');
+          continue;
+        }
+
+        const paragraph = [line.trim()];
+        index++;
+        while (index < lines.length && lines[index].trim()) {
+          if (isFence(lines[index]) || isHeading(lines[index]) || isList(lines[index]) || isQuote(lines[index]) || isRule(lines[index])) break;
+          if (index + 1 < lines.length && lines[index].includes('|') && tableDelimiter(lines[index + 1])) break;
+          paragraph.push(lines[index++].trim());
+        }
+        output.push('<p>' + inlineMarkdown(paragraph.join('\n')) + '</p>');
+      }
+      return output.join('\n');
+    }
+
+    return Object.freeze({ maxRenderBytes: MAX_RENDER_BYTES, escapeHTML, normalizeFormat, mergeFormat, finalizeFormat, doneSnapshot, looksLikeHTML, resolveFormat, clipUTF8, compactLinkLabel, inlineMarkdown, splitTableRow, markdownToHTML });
+  })();
 
   /* ---------- chatAgent: Fast/Deep 能力选择与事件投影纯函数 ---------- */
   const chatAgent = (() => {
@@ -272,6 +680,51 @@
         agentMode: selectMode(modes, preferred),
         model: modelSelect ? String(model || '').trim() : '',
       };
+    }
+
+    function cancelToolEvent(call) {
+      return {
+        type: 'cancel_tool',
+        tool_call: call && typeof call === 'object' ? call : null,
+      };
+    }
+
+    function cancelAckMatches(call, event) {
+      const card = call && typeof call === 'object' ? call : {};
+      const ack = event && typeof event === 'object' ? event : {};
+      const cardID = String(card.id || '');
+      const cardNonce = String(card.confirmation_nonce || '');
+      const ackID = String(ack.tool_id || '');
+      const ackNonce = String(ack.confirmation_nonce || '');
+      // Every signed card has a unique nonce and the new acknowledgement
+      // protocol always echoes it. A tool id alone is ambiguous across turns.
+      if (!cardNonce || !ackNonce || cardNonce !== ackNonce) return false;
+      // ID is optional for provider compatibility, but if either side supplies
+      // one both sides must agree; never silently downgrade a two-part key.
+      if (cardID || ackID) return !!cardID && !!ackID && cardID === ackID;
+      return true;
+    }
+
+    // A normal turn stop only tells us that cancellation was requested. It
+    // must never revoke a separate, signed confirmation card, and a tool that
+    // already started may ignore context cancellation. Project that ambiguity
+    // to a locked error card instead of claiming the side effect was cancelled.
+    function statusAfterTurnStop(status) {
+      return String(status || '') === 'running' ? 'error' : String(status || '');
+    }
+
+    // Once cancel_tool was put on the wire, losing the acknowledgement makes
+    // execution state unknown. Callers may request terminal handling earlier,
+    // but may never downgrade a sent request back to an actionable card.
+    function cancellationFailureTerminal(cancelSent, requestedTerminal) {
+      return !!cancelSent || !!requestedTerminal;
+    }
+
+    function streamRenderDelay(lastRenderedAt, now, interval) {
+      const last = Number(lastRenderedAt) || 0;
+      const current = Math.max(0, Number(now) || 0);
+      const minimum = Math.max(16, Math.min(250, Number(interval) || 80));
+      return Math.max(0, Math.min(minimum, minimum - Math.max(0, current - last)));
     }
 
     function initialState(mode) {
@@ -328,6 +781,12 @@
         out.budget = {
           model_calls: count(ev.budget.model_calls), max_model_calls: count(ev.budget.max_model_calls),
           subtasks: count(ev.budget.subtasks), max_subtasks: count(ev.budget.max_subtasks),
+          tool_calls: count(ev.budget.tool_calls), max_tool_calls: count(ev.budget.max_tool_calls),
+          max_tool_calls_per_tool: count(ev.budget.max_tool_calls_per_tool),
+          max_repeated_tool_calls: count(ev.budget.max_repeated_tool_calls),
+          tool_budget_code: String(ev.budget.tool_budget_code || '').slice(0, 120),
+          tool_budget_limit: String(ev.budget.tool_budget_limit || '').slice(0, 120),
+          tool_budget_tool: String(ev.budget.tool_budget_tool || '').slice(0, 120),
           deadline_unix_ms: count(ev.budget.deadline_unix_ms),
         };
       }
@@ -344,10 +803,20 @@
       return {
         modelCalls: count(budget.model_calls), maxModelCalls: count(budget.max_model_calls),
         subtasks: count(budget.subtasks), maxSubtasks: count(budget.max_subtasks),
+        toolCalls: count(budget.tool_calls), maxToolCalls: count(budget.max_tool_calls),
+        maxToolCallsPerTool: count(budget.max_tool_calls_per_tool),
+        maxRepeatedToolCalls: count(budget.max_repeated_tool_calls),
+        toolBudgetCode: String(budget.tool_budget_code || ''),
+        toolBudgetLimit: String(budget.tool_budget_limit || ''),
+        toolBudgetTool: String(budget.tool_budget_tool || ''),
       };
     }
 
-    return { normalizeModes, selectMode, requestSnapshot, initialState, project, budgetParts };
+    return {
+      normalizeModes, selectMode, requestSnapshot, cancelToolEvent, cancelAckMatches,
+      statusAfterTurnStop, cancellationFailureTerminal, streamRenderDelay,
+      initialState, project, budgetParts,
+    };
   })();
 
   /* ---------- chatTrace: 将工具协议事件投影为可读、脱敏的界面数据 ---------- */
@@ -622,6 +1091,7 @@
       const pending = ev.type === 'confirmation_required' || ev.tool_status === 'pending';
       const summarySource = pending && source.reason ? source.reason : (ev.tool_summary || source.reason || projected.action);
       const summary = safeText(summarySource, SUMMARY_LIMIT);
+      const reason = pending && source.reason ? safeText(source.reason, SUMMARY_LIMIT) : '';
       const requestPayload = {};
       if (source.method) requestPayload.method = source.method;
       if (source.path) requestPayload.path = source.path;
@@ -634,6 +1104,7 @@
         title,
         action: projected.action,
         summary,
+        reason,
         facts: projected.facts,
         request,
         result,
@@ -642,7 +1113,7 @@
       };
     }
 
-    return { toolView };
+    return { toolView, safeText };
   })();
 
   /* ---------- fmt: 数字/金额/时间格式化(AI 生成代码的标准件) ---------- */
@@ -1118,8 +1589,111 @@
       return out;
     }
 
+    // JSON.stringify preserves object insertion order, which is not semantic for
+    // item/slot maps. Sort object keys recursively while retaining array order so
+    // equivalent documents produce the same dirty/fingerprint result.
+    function canonical(value) {
+      if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
+      if (value && typeof value === 'object') {
+        return '{' + Object.keys(value).sort().map((key) => JSON.stringify(key) + ':' + canonical(value[key])).join(',') + '}';
+      }
+      return JSON.stringify(value);
+    }
+
+    function sourceFingerprint(value) {
+      if (value == null) return 'missing';
+      const budget = { nodes: 0 };
+      function walk(input, depth) {
+        budget.nodes += 1;
+        if (depth > 64 || budget.nodes > 5000) throw new Error('layout fingerprint budget exceeded');
+        if (Array.isArray(input)) return '[' + input.map((entry) => walk(entry, depth + 1)).join(',') + ']';
+        if (input && typeof input === 'object') {
+          return '{' + Object.keys(input).sort().map((key) => JSON.stringify(key) + ':' + walk(input[key], depth + 1)).join(',') + '}';
+        }
+        return JSON.stringify(input);
+      }
+      try { return 'json:' + walk(value, 0); }
+      catch (_) {
+        // Public KV values are already byte-bounded. For unusually deep/wide
+        // documents stay conservative: insertion-order changes may conflict,
+        // but unknown data is never silently treated as equivalent.
+        try { return 'opaque:' + JSON.stringify(value); } catch (_) { return 'opaque:unavailable'; }
+      }
+    }
+
+    // Keep a canonical fingerprint of the last server-owned layout document.
+    // The editor's seeded baseline also contains live Item geometry, so it is
+    // intentionally unsuitable for deciding whether an SSE resync represents
+    // a real concurrent layout write.
+    function remoteSnapshot(input, page) {
+      const valid = !!input && typeof input === 'object' && !Array.isArray(input) && String(input.page || '') === String(page || '');
+      const doc = valid ? normalize(input, page) : null;
+      return { valid, doc, fingerprint: valid ? canonical(doc) : '', sourceFingerprint: sourceFingerprint(input) };
+    }
+
+    // KV revisions intentionally represent the exact JSON bytes, whereas the
+    // editor works with semantic documents. Classify a changed revision before
+    // surfacing a conflict so harmless object-key reordering, an identical save
+    // from a peer, and a committed write whose response was lost all converge.
+    // Source fingerprints include unknown fields; normalized fingerprints alone
+    // must never make a forward-compatible extension disappear silently.
+    function classifyRemoteChange(input) {
+      const value = input && typeof input === 'object' ? input : {};
+      if (String(value.remoteRevision || '') === String(value.baselineRevision || '')) return 'unchanged';
+      if (String(value.remoteSourceFingerprint || '') === String(value.baselineSourceFingerprint || '')) return 'equivalent-baseline';
+      if (value.remoteExists && value.remoteValid && String(value.remoteSourceFingerprint || '') === String(value.localSourceFingerprint || '')) return 'matches-local';
+      return 'conflict';
+    }
+
     function cloneDoc(doc) { return normalize(doc, doc && doc.page); }
-    function differs(doc, baseline) { return JSON.stringify(doc) !== JSON.stringify(baseline); }
+    function differs(doc, baseline) { return canonical(doc) !== canonical(baseline); }
+
+    // Reconcile a historical layout snapshot with the current live Item
+    // topology. Existing geometry/appearance stays historical; removed Items
+    // disappear and newly arrived Items are seeded from liveDoc. This keeps
+    // undo/redo from resurrecting deleted Items or dropping newly added ones.
+    function reconcileDoc(snapshot, liveInput) {
+      const live = normalize(liveInput, liveInput && liveInput.page);
+      const source = normalize(snapshot, live.page);
+      const out = empty(live.page);
+      out.mode = source.mode;
+      for (const id of Object.keys(live.items)) {
+        out.items[id] = clone(source.items[id] || live.items[id]);
+        out.items[id].slot = live.items[id].slot;
+      }
+      const seen = new Set();
+      for (const slot of Object.keys(live.orderBySlot)) {
+        const current = live.orderBySlot[slot] || [];
+        const preferred = source.orderBySlot[slot] || [];
+        const ids = [];
+        for (const id of preferred.concat(current)) {
+          if (seen.has(id) || !own(out.items, id) || out.items[id].slot !== slot) continue;
+          seen.add(id); ids.push(id);
+        }
+        if (ids.length) out.orderBySlot[slot] = ids;
+      }
+      for (const id of Object.keys(out.items)) {
+        if (seen.has(id)) continue;
+        const slot = out.items[id].slot;
+        if (!out.orderBySlot[slot]) out.orderBySlot[slot] = [];
+        out.orderBySlot[slot].push(id);
+      }
+      return normalize(out, live.page);
+    }
+
+    function reconcileState(state, liveDoc) {
+      state = state && state.doc ? state : initial(liveDoc);
+      const doc = reconcileDoc(state.doc, liveDoc);
+      const baseline = reconcileDoc(state.baseline, liveDoc);
+      const past = state.past.map((entry) => reconcileDoc(entry, liveDoc));
+      const future = state.future.map((entry) => reconcileDoc(entry, liveDoc));
+      return Object.assign({}, state, {
+        doc, baseline, past, future,
+        selectedId: own(doc.items, state.selectedId) ? state.selectedId : '',
+        pendingRemoveId: own(doc.items, state.pendingRemoveId) ? state.pendingRemoveId : '',
+        dirty: differs(doc, baseline),
+      });
+    }
 
     function initial(page, input) {
       if (page && typeof page === 'object' && input == null) { input = page; page = input.page; }
@@ -1281,7 +1855,7 @@
       return styles;
     }
 
-    return { key, fnv1a, empty, normalize, initial, reduce, styleFor, sanitizeColor };
+    return { key, fnv1a, empty, normalize, remoteSnapshot, classifyRemoteChange, reconcileDoc, reconcileState, initial, reduce, styleFor, sanitizeColor };
   })();
 
   /* ---------- template: 空模板结构编辑器的纯状态机 ----------
@@ -1608,6 +2182,75 @@
       return out;
     }
 
+    function pointerMoved(start, point, threshold) {
+      start = start && typeof start === 'object' ? start : {};
+      point = point && typeof point === 'object' ? point : {};
+      const dx = Number(point.x) - Number(start.x);
+      const dy = Number(point.y) - Number(start.y);
+      const limit = Math.max(1, Math.min(32, Number(threshold) || 4));
+      return Number.isFinite(dx) && Number.isFinite(dy) && Math.hypot(dx, dy) >= limit;
+    }
+
+    function moveFrame(frame, delta, snap) {
+      frame = sanitizeFrame(frame);
+      delta = delta && typeof delta === 'object' ? delta : {};
+      const step = Math.max(1, Math.min(64, Number(snap) || 8));
+      const dx = Number.isFinite(Number(delta.x)) ? Number(delta.x) : 0;
+      const dy = Number.isFinite(Number(delta.y)) ? Number(delta.y) : 0;
+      const x = Math.max(0, Math.min(4000, Math.round(((frame.x || 0) + dx) / step) * step));
+      const y = Math.max(0, Math.min(4000, Math.round(((frame.y || 0) + dy) / step) * step));
+      return { x, y };
+    }
+
+    function gridSpanForWidth(width, geometry) {
+      geometry = geometry && typeof geometry === 'object' ? geometry : {};
+      const columns = finite(geometry.columns, 12, 1, 24);
+      const clientWidth = Math.max(1, Number(geometry.clientWidth) || 1);
+      const paddingLeft = Math.max(0, Number(geometry.paddingLeft) || 0);
+      const paddingRight = Math.max(0, Number(geometry.paddingRight) || 0);
+      const gap = Math.max(0, Number(geometry.gap) || 0);
+      const contentWidth = Math.max(1, clientWidth - paddingLeft - paddingRight);
+      const trackWidth = Math.max(1, (contentWidth - gap * (columns - 1)) / columns);
+      const requested = Math.round((Math.max(48, Number(width) || 48) + gap) / (trackWidth + gap));
+      return Math.max(1, Math.min(columns, requested));
+    }
+
+    function resizeFrame(mode, rect, delta, geometry, snap) {
+      rect = rect && typeof rect === 'object' ? rect : {};
+      delta = delta && typeof delta === 'object' ? delta : {};
+      const step = Math.max(1, Math.min(64, Number(snap) || 8));
+      const dx = Number.isFinite(Number(delta.x)) ? Number(delta.x) : 0;
+      const dy = Number.isFinite(Number(delta.y)) ? Number(delta.y) : 0;
+      const width = Math.max(48, Math.min(10000, Math.round((Math.max(0, Number(rect.width) || 0) + dx) / step) * step));
+      if (mode === 'grid') return { span: gridSpanForWidth(width, geometry) };
+      const height = Math.max(48, Math.min(4000, Math.round((Math.max(0, Number(rect.height) || 0) + dy) / step) * step));
+      return { w: width, h: height };
+    }
+
+    // Touch UIs expose these actions as buttons; the keyboard tree uses the
+    // same move semantics. Returning reducer actions keeps both paths aligned
+    // and makes disabled states independently testable without a DOM.
+    function reorderActions(doc, id) {
+      const none = { up: null, down: null, indent: null, outdent: null };
+      if (!doc || !doc.nodes || !doc.children || id === 'root' || !doc.nodes[id]) return none;
+      const node = doc.nodes[id];
+      const parent = node.parent || 'root';
+      const siblings = Array.isArray(doc.children[parent]) ? doc.children[parent] : [];
+      const index = siblings.indexOf(id);
+      if (index < 0) return none;
+      const actions = { up: null, down: null, indent: null, outdent: null };
+      if (index > 0) actions.up = { type: 'move', id, parentId: parent, index: index - 1 };
+      if (index < siblings.length - 1) actions.down = { type: 'move', id, parentId: parent, index: index + 1 };
+      const previous = index > 0 ? doc.nodes[siblings[index - 1]] : null;
+      if (previous && previous.type !== 'slot') actions.indent = { type: 'move', id, parentId: previous.id };
+      if (parent !== 'root' && doc.nodes[parent]) {
+        const grand = doc.nodes[parent].parent || 'root';
+        const grandSiblings = Array.isArray(doc.children[grand]) ? doc.children[grand] : [];
+        actions.outdent = { type: 'move', id, parentId: grand, index: Math.max(0, grandSiblings.indexOf(parent) + 1) };
+      }
+      return actions;
+    }
+
     function initial(doc) {
       const normalized = normalize(doc);
       return { doc: normalized, baseline: clone(normalized), selectedId: 'root', breakpoint: 'desktop', view: 'studio', past: [], future: [], dirty: false };
@@ -1747,7 +2390,11 @@
       return state;
     }
 
-    return { BREAKPOINTS, empty, normalize, fromVersion, toVersion, saveRequest, initial, reduce, resolveLayout, resolveFrame, chooseBreakpoint, resolvePlacement, descendants, flatten };
+    return {
+      BREAKPOINTS, empty, normalize, fromVersion, toVersion, saveRequest, initial, reduce,
+      resolveLayout, resolveFrame, chooseBreakpoint, resolvePlacement, descendants, flatten,
+      pointerMoved, moveFrame, gridSpanForWidth, resizeFrame, reorderActions,
+    };
   })();
 
   /* ---------- runtime 纯函数: 多实例命名/样式与 inspect 分页 ---------- */
@@ -2328,5 +2975,5 @@
     });
   })();
 
-  window.__ihtmlLib = { makeT, fmt, util, chart, template, chatAgent, chatTrace, itemLayout, runtime };
+  window.__ihtmlLib = { makeT, fmt, util, chart, template, chatAgent, chatTrace, chatContent, itemLayout, runtime };
 })();

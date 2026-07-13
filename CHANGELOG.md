@@ -20,6 +20,11 @@ the first tagged release, changes are recorded under **Unreleased**.
 - `ihtml/storetest`: the official conformance suite for third-party `Store`
   implementations (`storetest.Run`). Built-in stores and the sqlstore SQLite
   dialect are validated by the same suite.
+- Public hard resource ceilings for Item source/metadata (512-KiB content,
+  8-MiB user aggregate), templates (1 MiB per version / 8 MiB per logical
+  catalog, plus a 16-MiB encoded catalog envelope), KV maps (4096 entries /
+  32 MiB), and retained revisions (4096 / 64 MiB). These remain active when
+  ordinary revision retention uses `WithMaxRevisions(0)`.
 - `ui_page_inspect` chat tool + `inspect_request`/`inspect_result` WebSocket
   frames: the assistant can read the live page render state (per-item
   presence/visibility/size/text/errors) through the active session, with a
@@ -34,21 +39,74 @@ the first tagged release, changes are recorded under **Unreleased**.
   supported and latest stable).
 - Reusable `chat/config` SDK package with strict, versioned JSON decoding,
   typed errors, explicit `SecretResolver` injection, and secure file loading.
+- AI configuration schema v2 adds runtime/tool/context/application controls;
+  the frozen v1 document shape remains readable and rejects v2-only fields.
 - Validation-first `ihtml.NewHandler` and `chat.NewChecked` constructors.
 - Capability-sized Service interfaces and request-bound `ScopedService`.
 - `WithAccessPolicyE` for fail-closed external authorization providers.
 - Public chat/event protocol constants and chat `protocol_version` capability.
+- A backend-agnostic WebSocket egress guard: encoded events are at most 1 MiB -
+  1 byte, each turn at most 4096 events / 4 MiB, and each connection at most
+  65536 events / 64 MiB. Unsafe or oversized third-party `ChatBackend` output
+  fails closed with status 1009.
+- Additive rich-answer `content_format` metadata (`text` / `markdown` / `html`)
+  plus `assistant_reset` for clearing a rejected partial stream before retry.
 - Segmented streaming reasoning (`thinking_id` / `thinking_done`) and a
   human-readable tool timeline with redacted, collapsible technical details.
+- Per-turn semantic tool safety budgets shared by the root and Deep subagents:
+  total, per-tool, and canonical-identical-argument limits reject execution
+  with stable `assistant_budget` metadata. Strict JSON config exposes all three.
+- Host-injected per-turn generation overrides (`RuntimeConfigProvider`) and a
+  privacy-preserving, failure-isolated `TurnObserver` lifecycle API.
+- Public Backend ceilings bound outstanding critical host callbacks,
+  best-effort observation callbacks, and model/Service operations independently;
+  a stalled observer can no longer consume authorization/confirmation capacity.
+- Provider-body, per-call, per-turn and model-event output hard limits (defaults
+  8 MiB / 1 MiB / 4 MiB / 4096), with stable `ErrModelOutputLimit` /
+  `ModelOutputLimitError` diagnostics and schema-v2 configuration. Visible
+  answer and reasoning projections each default to a separate non-disableable
+  256-KiB limit independent of provider token claims.
+- Turn/write host interceptors are deadline-bounded and panic-isolated;
+  unreviewed callback errors are projected as generic user-safe failures while
+  `NewUserFacingError` explicitly opts reviewed text into browser display.
+- Conservative Eino model retries, normalized finish/usage metadata, and a
+  no-tool final-answer repair pass for empty or token-truncated responses after
+  successful tool evidence.
+- Secure long-session summarization plus Deep-mode dynamic tool discovery;
+  strict JSON configuration exposes both features and their thresholds.
+- Capability-scoped opaque session IDs rotate persisted AI history when the
+  host's authorization, prompt, confirmation, probe, or API boundary changes.
+- Confirmation cards are HMAC-bound to their logical session, application
+  capability scope, and semantic-tool protocol version. The additive
+  `cancel_tool` client event shares a bounded FIFO with confirmation and returns
+  an ID+nonce-correlated `cancel_tool_result`; the UI only claims an operation
+  was not run after that authoritative acknowledgement succeeds.
+- External confirmation nonce stores, like external session stores, now require
+  an application `SessionNamespace` in checked construction; unchecked legacy
+  construction generates an isolated ephemeral namespace.
 - `TemperatureOverride` for providers that need an explicit zero temperature.
 - `ErrReservedKVKey` and `ReservedKVPrefix` let SDK hosts detect kernel-owned
   KV access without parsing error text.
+- Additive `VersionedKVService` / `ScopedVersionedKVService` single-key CAS,
+  SHA-256 RawMessage revision tokens, typed `KVConflictError`, and compatible
+  HTTP `revision` / optional `expected_revision` fields. Item layout saves now
+  use one atomic conditional write; Item deletion transactionally removes its
+  persisted layout references.
 - `WithOrderedBroadcaster` is an explicit incremental-event opt-in for hosts
   that globally serialize every same-user write through publication. Ordinary
   external broadcasters retain the safe `resync` default.
 
 ### Changed
 
+- Model text/reasoning stream chunks are coalesced into UTF-8-safe bounded
+  WebSocket deltas; the same bounded projection now drives both deltas and the
+  authoritative `assistant_done` snapshot, including retry rollback/replay.
+- Chat sessions now have a single in-process owner per scoped SessionID.
+  Reconnect takeover is non-blocking but execution waits for the previous
+  model/tool/manual lane to return; confirmation and pending-turn queues plus
+  confirm/cancel frame rates are hard-bounded, and manual tools inherit the
+  turn-duration deadline. Cross-process ownership still requires host routing
+  or a distributed lease.
 - Minimum Go version is now 1.25.0 (was pinned to the 1.26.5 patch release).
 - `FileStore` serializes all in-process access plus cooperating processes with
   OS file locks, uses unique `0600` temporary/data files, fsyncs data before
@@ -66,8 +124,18 @@ the first tagged release, changes are recorded under **Unreleased**.
 - `SetPage` now counts toward the `writes` metric like every other mutation.
 - The example delegates AI configuration to the public loader instead of
   owning a private parser in `package main`.
+- The built-in assistant now treats ordinary questions and business-data
+  queries as chat answers, reserving UI writes for explicit page-change
+  requests. Its model contract emits semantic HTML without fixed business
+  templates; the no-model demo truthfully previews rich answers without fake
+  reasoning, fake tool calls, or page mutations.
 - Handler read APIs defensively copy third-party Store values before sorting or
   returning them to callers.
+- Handler reads and whole-state mutations now validate data returned by legacy
+  `Store` and `UserStateStore` implementations against the same structural and
+  aggregate limits as new writes. Invalid or oversized legacy state fails
+  closed instead of being partially exposed or silently truncated and must be
+  migrated or cleaned before upgrade.
 - Production asset embedding no longer includes JavaScript test files.
 - External/cross-replica broadcasters now receive authoritative `resync`
   notifications rather than state-bearing incrementals, because a database
@@ -120,6 +188,9 @@ the first tagged release, changes are recorded under **Unreleased**.
 - The platform contract now names Linux, macOS, and Windows as release targets;
   uncommon targets are best-effort, and the optional Eino/Sonic chat adapter is
   explicitly documented as unavailable on Plan 9.
+- Chat collection now preserves provider answer whitespace, separates multiple
+  message outputs, honors `Stream=false` even when tools are enabled, and drops
+  rejected mid-stream retry content from the authoritative final snapshot.
 
 ### Security
 

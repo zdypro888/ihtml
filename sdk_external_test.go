@@ -2,6 +2,7 @@ package ihtml_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -27,6 +28,13 @@ type nilChatBackend struct{}
 
 func (*nilChatBackend) NewSession(context.Context, *ihtml.ChatSessionContext) (ihtml.ChatSession, error) {
 	return nil, nil
+}
+
+// legacyOnlyService models a third-party implementation compiled against the
+// original Service contract. Embedding the legacy interface intentionally
+// hides optional capabilities implemented by the concrete value it wraps.
+type legacyOnlyService struct {
+	ihtml.Service
 }
 
 func ExampleNewHandler() {
@@ -106,6 +114,26 @@ func TestScopeServiceRejectsTypedNilService(t *testing.T) {
 	}
 }
 
+func TestScopeServiceDoesNotInventVersionedKVCapability(t *testing.T) {
+	handler, err := ihtml.NewHandler(ihtml.NewMemoryStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer handler.Close()
+
+	var service ihtml.Service = &legacyOnlyService{Service: handler}
+	scoped, err := ihtml.ScopeService(service, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := scoped.(ihtml.ScopedVersionedKVService); ok {
+		t.Fatal("legacy-only Service unexpectedly exposes the optional versioned KV capability")
+	}
+	if _, err := scoped.ListItems(context.Background()); err != nil {
+		t.Fatalf("legacy scoped service read failed: %v", err)
+	}
+}
+
 func TestReservedKVContractIsTypedForSDKCallers(t *testing.T) {
 	handler, err := ihtml.NewHandler(ihtml.NewMemoryStore())
 	if err != nil {
@@ -140,6 +168,16 @@ func TestServiceForRequestBindsUserAndEnforcesPolicy(t *testing.T) {
 	}
 	if err := scoped.PutItems(context.Background(), []ihtml.Item{{ID: "card", Type: ihtml.ItemHTML, Content: "<div/>"}}, "host", "test"); !errors.Is(err, ihtml.ErrAccessDenied) {
 		t.Fatalf("read-only write error = %v", err)
+	}
+	versioned, ok := scoped.(ihtml.ScopedVersionedKVService)
+	if !ok {
+		t.Fatal("request-scoped Handler must expose the additive versioned KV capability")
+	}
+	if _, _, err := versioned.KVGetWithRevision(context.Background(), "layout"); !errors.Is(err, ihtml.ErrNotFound) {
+		t.Fatalf("versioned KV read error = %v", err)
+	}
+	if _, err := versioned.KVCompareAndSet(context.Background(), "layout", json.RawMessage(`{}`), ihtml.MissingKVRevision); !errors.Is(err, ihtml.ErrAccessDenied) {
+		t.Fatalf("read-only conditional KV write error = %v", err)
 	}
 }
 

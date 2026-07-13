@@ -1,6 +1,7 @@
 package ihtml
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -106,11 +107,20 @@ func validateTemplateCatalog(c templateCatalog, pages []Page) error {
 	}
 	ids := make(map[string]bool, len(c.Templates))
 	var highestRevision uint64
+	totalBytes := 0
 	for i := range c.Templates {
 		t := &c.Templates[i]
 		if err := t.Validate(); err != nil {
 			return err
 		}
+		templateBytes := 256 + len(t.ID) + len(t.Name) + templateVersionSize(&t.Draft)
+		if t.Published != nil {
+			templateBytes += templateVersionSize(t.Published)
+		}
+		if templateBytes > MaxTemplateCatalogBytes-totalBytes {
+			return fmt.Errorf("template catalog exceeds %d bytes per user", MaxTemplateCatalogBytes)
+		}
+		totalBytes += templateBytes
 		if t.Revision == 0 || t.Draft.Version == 0 {
 			return fmt.Errorf("persisted template %q must have non-zero revision and draft version", t.ID)
 		}
@@ -154,6 +164,9 @@ func validateTemplateCatalog(c templateCatalog, pages []Page) error {
 }
 
 func decodeTemplateCatalog(raw json.RawMessage, pages []Page) (templateCatalog, error) {
+	if len(raw) > MaxTemplateCatalogStorageBytes {
+		return templateCatalog{}, fmt.Errorf("template catalog exceeds %d encoded bytes", MaxTemplateCatalogStorageBytes)
+	}
 	var catalog templateCatalog
 	if err := json.Unmarshal(raw, &catalog); err != nil {
 		return templateCatalog{}, fmt.Errorf("corrupt template catalog: %w", err)
@@ -180,12 +193,18 @@ func setStateTemplateCatalog(state *UserState, catalog templateCatalog, pages []
 		return err
 	}
 	sortTemplates(next.Templates)
-	raw, err := json.Marshal(next)
-	if err != nil {
+	var encoded bytes.Buffer
+	encoder := json.NewEncoder(&encoded)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(next); err != nil {
 		return err
 	}
-	if len(raw) > maxInternalKVValueSize {
-		return fmt.Errorf("template catalog exceeds %d bytes", maxInternalKVValueSize)
+	raw := encoded.Bytes()
+	if len(raw) > 0 && raw[len(raw)-1] == '\n' {
+		raw = raw[:len(raw)-1]
+	}
+	if len(raw) > MaxTemplateCatalogStorageBytes {
+		return fmt.Errorf("template catalog exceeds %d encoded bytes", MaxTemplateCatalogStorageBytes)
 	}
 	if state.KV == nil {
 		state.KV = make(map[string]json.RawMessage)
@@ -538,6 +557,9 @@ func (h *Handler) GetCurrentTemplate(ctx context.Context, user, page string) (Cu
 	if err != nil {
 		return CurrentTemplate{}, err
 	}
+	if err := validateItems(items); err != nil {
+		return CurrentTemplate{}, fmt.Errorf("stored items are invalid: %w", err)
+	}
 	state := UserState{Items: items, KV: make(map[string]json.RawMessage)}
 	layoutKey := "layout.root"
 	if page != "" {
@@ -551,7 +573,10 @@ func (h *Handler) GetCurrentTemplate(ctx context.Context, user, page string) (Cu
 		if err != nil {
 			return CurrentTemplate{}, err
 		}
-		state.KV[key] = raw
+		state.KV[key] = append(json.RawMessage(nil), raw...)
+	}
+	if err := validateStoredKV(state.KV, 0); err != nil {
+		return CurrentTemplate{}, fmt.Errorf("stored template state is invalid: %w", err)
 	}
 	current, _, _, err := currentTemplateFromState(state, page)
 	return current, err

@@ -89,6 +89,9 @@ func TestCheckedExampleConfigFileLoads(t *testing.T) {
 	if cfg.Provider != chat.ProviderClaude || cfg.Model != "glm-5.2" || !cfg.Thinking || !cfg.EnableDeepAgent {
 		t.Fatalf("sample capabilities = provider:%q model:%q thinking:%v deep:%v", cfg.Provider, cfg.Model, cfg.Thinking, cfg.EnableDeepAgent)
 	}
+	if cfg.MaxOutstandingHostCallbacks != 32 || cfg.MaxOutstandingObservations != 32 || cfg.MaxOutstandingOperations != 64 || cfg.SessionNamespace != "example-app" {
+		t.Fatalf("sample runtime bounds/scope = %d/%d/%d namespace:%q", cfg.MaxOutstandingHostCallbacks, cfg.MaxOutstandingObservations, cfg.MaxOutstandingOperations, cfg.SessionNamespace)
+	}
 }
 
 func TestConfigDecoderRejectsAmbiguityAndUnknownFields(t *testing.T) {

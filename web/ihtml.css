@@ -931,6 +931,15 @@ html.ihtml-standalone.ihtml-embed .ihtml-root { min-height: 0; }
 .ihtml-template-adds { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 12px; }
 .ihtml-template-adds button { min-width: 0; padding-inline: 6px; }
 .ihtml-template-tree { display: grid; gap: 2px; }
+.ihtml-template-tree-item { min-width: 0; }
+.ihtml-template-tree-actions { display: none; align-items: center; gap: 4px; }
+.ihtml-template-tree-actions button {
+  width: 44px; min-width: 44px; height: 44px; min-height: 44px; padding: 0;
+  border: 1px solid var(--ui-control-border); border-radius: 8px;
+  background: var(--ui-surface); color: var(--ui-text); font: inherit; font-size: 16px; cursor: pointer;
+}
+.ihtml-template-tree-actions button:disabled { opacity: 0.34; cursor: not-allowed; }
+.ihtml-template-tree-actions button:hover:not(:disabled) { border-color: var(--ui-primary-border); background: var(--ui-surface-hover); }
 .ihtml-template-unassigned { display: grid; gap: 5px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--ui-border); }
 .ihtml-template-unassigned strong { font-size: 11.5px; }
 .ihtml-template-unassigned small { color: var(--ui-text-muted); font-size: 10.5px; }
@@ -977,6 +986,11 @@ html.ihtml-standalone.ihtml-embed .ihtml-root { min-height: 0; }
 .ihtml-template-node.selected {
   border-color: var(--ui-primary); outline: 2px solid var(--ui-primary-soft); outline-offset: 1px;
 }
+.ihtml-root.ihtml-template-interacting { user-select: none; }
+.ihtml-template-node.pointer-preview {
+  z-index: 8; opacity: 0.94; will-change: left, top, width, min-height, grid-column;
+  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.2);
+}
 .ihtml-template-node-head {
   min-height: 31px; padding: 3px 5px;
   display: flex; align-items: center; gap: 4px;
@@ -1015,6 +1029,7 @@ html.ihtml-standalone.ihtml-embed .ihtml-root { min-height: 0; }
   border: 1px solid var(--ui-primary); border-radius: 7px;
   background: var(--ui-primary); color: var(--ui-primary-contrast); cursor: nwse-resize; touch-action: none;
 }
+.ihtml-template-resize.width-only { cursor: ew-resize; }
 .ihtml-template-loading { min-height: 260px; display: grid; place-items: center; color: var(--ui-text-muted); }
 .ihtml-template-field { display: grid; gap: 5px; margin-bottom: 10px; color: var(--ui-text-muted); font-size: 11.5px; }
 .ihtml-template-field input, .ihtml-template-field select {
@@ -1063,6 +1078,36 @@ html.ihtml-standalone.ihtml-embed .ihtml-root { min-height: 0; }
   .ihtml-template-body { display: flex; flex-direction: column; min-width: 0; overflow-y: auto; }
   .ihtml-template-layers, .ihtml-template-inspector { flex: none; max-height: none; overflow: visible; border: 0; border-bottom: 1px solid var(--ui-border); }
   .ihtml-template-main { flex: none; min-height: 480px; padding: 10px; overflow: auto; }
+}
+
+@media (pointer: coarse) {
+  .ihtml-template-tree-item.has-actions[data-selected="true"] {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 5px;
+  }
+  .ihtml-template-tree-item.has-actions[data-selected="true"] .ihtml-template-tree-actions {
+    display: grid; grid-template-columns: repeat(2, 44px);
+  }
+  .ihtml-template-node-head .drag {
+    width: 44px; min-width: 44px; height: 44px; min-height: 44px;
+  }
+  .ihtml-template-resize {
+    right: -8px; bottom: -8px; width: 44px; min-width: 44px; height: 44px; min-height: 44px;
+  }
+}
+
+@media (max-width: 640px) {
+  .ihtml-template-tree-item.has-actions[data-selected="true"] {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 5px;
+  }
+  .ihtml-template-tree-item.has-actions[data-selected="true"] .ihtml-template-tree-actions {
+    display: grid; grid-template-columns: repeat(4, 44px);
+  }
+  .ihtml-template-node-head .drag {
+    width: 44px; min-width: 44px; height: 44px; min-height: 44px;
+  }
+  .ihtml-template-resize {
+    right: -8px; bottom: -8px; width: 44px; min-width: 44px; height: 44px; min-height: 44px;
+  }
 }
 
 /* Item 入场过渡 */
@@ -1332,18 +1377,27 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
 .ihtml-msg.assistant { align-self: stretch; width: 100%; padding: 0 2px; row-gap: 0; }
 .ihtml-msg.assistant > .author { margin-bottom: 6px; }
 
-/* 助手回答富文本 */
-.ihtml-msg .answer { line-height: 1.72; overflow-x: auto; font-size: 14.5px; }
-.ihtml-msg .answer.streaming { white-space: pre-wrap; overflow-wrap: anywhere; }
+/* 助手回答画布：Markdown 与白名单 HTML 共用这套通用语义样式。 */
+.ihtml-msg .answer { min-width: 0; max-width: 100%; line-height: 1.72; overflow-x: hidden; overflow-wrap: anywhere; font-size: 14.5px; }
+.ihtml-msg .answer[data-content-format="text"] { white-space: pre-wrap; overflow-wrap: anywhere; }
 .ihtml-msg .answer > :first-child { margin-top: 0; }
 .ihtml-msg .answer > :last-child { margin-bottom: 0; }
 .ihtml-msg .answer h1, .ihtml-msg .answer h2, .ihtml-msg .answer h3,
-.ihtml-msg .answer h4, .ihtml-msg .answer h5, .ihtml-msg .answer h6 {
-  margin: 12px 0 8px; font-size: 15px; line-height: 1.45;
-}
+.ihtml-msg .answer h4, .ihtml-msg .answer h5, .ihtml-msg .answer h6 { margin: 16px 0 8px; line-height: 1.38; }
+.ihtml-msg .answer h1 { font-size: 20px; }
+.ihtml-msg .answer h2 { font-size: 17.5px; }
+.ihtml-msg .answer h3 { font-size: 15.5px; }
+.ihtml-msg .answer h4, .ihtml-msg .answer h5, .ihtml-msg .answer h6 { font-size: 14.5px; }
 .ihtml-msg .answer p { margin: 0 0 10px; }
 .ihtml-msg .answer ul, .ihtml-msg .answer ol { margin: 6px 0 10px; padding-left: 22px; }
 .ihtml-msg .answer li { margin: 4px 0; }
+.ihtml-msg .answer a { color: var(--ui-primary-text); white-space: normal; overflow-wrap: anywhere; text-decoration-thickness: 1px; text-underline-offset: 2px; }
+.ihtml-msg .answer a:hover { text-decoration-thickness: 2px; }
+.ihtml-msg .answer :where(article, section, figure) { min-width: 0; margin: 10px 0; }
+.ihtml-msg .answer :where(header, footer, figcaption) { color: var(--ui-text-muted); }
+.ihtml-msg .answer figure { margin-inline: 0; }
+.ihtml-msg .answer figcaption { margin-top: 5px; font-size: 12px; }
+.ihtml-msg .answer hr { margin: 14px 0; border: 0; border-top: 1px solid var(--ui-border); }
 .ihtml-msg .answer code {
   padding: 1px 5px; border-radius: 4px;
   background: var(--ui-surface-muted);
@@ -1360,17 +1414,57 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
   border-left: 3px solid var(--ui-primary-border);
   color: var(--ui-text-muted);
 }
+.ihtml-msg .answer dl {
+  margin: 8px 0 12px; display: grid; grid-template-columns: minmax(92px, max-content) minmax(0, 1fr);
+  gap: 5px 12px;
+}
+.ihtml-msg .answer dt { font-weight: 750; }
+.ihtml-msg .answer dd { min-width: 0; margin: 0; }
+.ihtml-msg .answer details {
+  margin: 8px 0; border: 1px solid var(--ui-border); border-radius: 8px; background: var(--ui-surface-muted);
+}
+.ihtml-msg .answer details > summary { min-height: 38px; padding: 7px 10px; cursor: pointer; color: var(--ui-text); white-space: normal; overflow-wrap: anywhere; font-weight: 700; }
+.ihtml-msg .answer details > :not(summary) { margin-inline: 10px; }
+.ihtml-msg .answer :where(kbd, samp) { font-family: var(--ui-font-mono); font-size: 0.9em; }
+.ihtml-msg .answer kbd { padding: 1px 5px; border: 1px solid var(--ui-control-border); border-radius: 4px; background: var(--ui-surface); box-shadow: 0 1px 0 var(--ui-border); }
+.ihtml-msg .answer mark { padding-inline: 2px; border-radius: 3px; color: inherit; background: color-mix(in srgb, #facc15 38%, transparent); }
+.ihtml-msg .answer :where(progress, meter) { width: min(320px, 100%); max-width: 100%; vertical-align: middle; accent-color: var(--ui-primary); }
+.ihtml-msg .answer time { font-variant-numeric: tabular-nums; }
+.ihtml-answer-table-wrap {
+  width: 100%; max-width: 100%; margin: 8px 0 12px; overflow-x: auto; overscroll-behavior-inline: contain;
+  border: 1px solid var(--ui-border); border-radius: 8px; background: var(--ui-surface);
+}
 .ihtml-msg .answer table {
-  width: 100%; border-collapse: collapse; font-size: 13px;
-  font-variant-numeric: tabular-nums; margin: 8px 0 12px;
-  border: 1px solid var(--ui-border); border-radius: 8px;
+  width: max-content; min-width: 100%; max-width: none; margin: 0; border-collapse: collapse;
+  font-size: 13px; font-variant-numeric: tabular-nums;
+}
+.ihtml-msg .answer caption {
+  padding: 8px 10px; color: var(--ui-text-muted); font-size: 12px; font-weight: 700; text-align: start;
+  border-bottom: 1px solid var(--ui-border);
 }
 .ihtml-msg .answer th, .ihtml-msg .answer td {
-  padding: 8px 10px; border-bottom: 1px solid var(--ui-border);
-  text-align: left; vertical-align: top;
+  min-width: 7ch; max-width: min(360px, 72vw); padding: 8px 10px;
+  border-right: 1px solid var(--ui-border); border-bottom: 1px solid var(--ui-border);
+  text-align: left; vertical-align: top; overflow-wrap: anywhere; white-space: normal;
 }
 .ihtml-msg .answer th { background: color-mix(in srgb, var(--ui-primary) 10%, transparent); font-weight: 800; }
+.ihtml-msg .answer tr > :last-child { border-right: 0; }
 .ihtml-msg .answer tr:last-child td { border-bottom: 0; }
+.ihtml-msg .answer tbody tr:hover td { background: var(--ui-surface-hover); }
+.ihtml-answer-truncated {
+  margin: 10px 0 0 !important; padding: 7px 10px; border: 1px solid var(--ui-border); border-radius: 7px;
+  color: var(--ui-text-muted); background: var(--ui-surface-muted); font-size: 12px;
+}
+
+@media (max-width: 640px) {
+  .ihtml-msg .answer { font-size: 14px; line-height: 1.65; }
+  .ihtml-msg .answer h1 { font-size: 18px; }
+  .ihtml-msg .answer h2 { font-size: 16.5px; }
+  .ihtml-msg .answer dl { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  .ihtml-msg .answer dd { margin-bottom: 6px; }
+  .ihtml-msg .answer table { font-size: 12.5px; }
+  .ihtml-msg .answer th, .ihtml-msg .answer td { max-width: min(280px, 78vw); padding: 7px 8px; }
+}
 
 /* 分析过程 (折叠时间线) */
 .ihtml-process {
@@ -1576,6 +1670,10 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
   transition: border-color 0.15s ease, background 0.15s ease;
 }
 .ihtml-tool[data-status="running"] { border-color: var(--ui-primary-border); }
+.ihtml-tool.confirmation-busy[data-status="pending"] {
+  border-color: var(--ui-primary-border);
+  background: color-mix(in srgb, var(--ui-primary) 4%, var(--ui-surface));
+}
 .ihtml-tool.pending,
 .ihtml-tool[data-status="pending"],
 .ihtml-tool[data-status="confirmation"],
@@ -1693,6 +1791,11 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
   color: var(--ui-text); line-height: 1.5; overflow-wrap: anywhere;
 }
 .ihtml-tool .t-reason strong { margin-right: 4px; }
+.ihtml-tool .t-interaction-error {
+  border-color: color-mix(in srgb, var(--ui-err) 30%, var(--ui-border));
+  background: color-mix(in srgb, var(--ui-err) 6%, transparent);
+  color: var(--ui-err);
+}
 .ihtml-tool .t-facts {
   display: grid; grid-template-columns: repeat(auto-fit, minmax(min(150px, 100%), 1fr));
   gap: 5px; min-width: 0; margin: 0;

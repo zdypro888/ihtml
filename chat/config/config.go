@@ -31,11 +31,12 @@ import (
 
 const (
 	// CurrentSchemaVersion is the latest supported AI configuration schema.
-	CurrentSchemaVersion = 1
+	CurrentSchemaVersion = 2
 	// MaxDocumentBytes bounds both standalone and embedded AI documents.
-	MaxDocumentBytes = 64 << 10
-	maxSecretBytes   = 16 << 10
-	maxPromptBytes   = 16 << 10
+	MaxDocumentBytes   = 64 << 10
+	maxSecretBytes     = 16 << 10
+	maxPromptBytes     = 16 << 10
+	maxOutstandingWork = 4096
 )
 
 // ErrorKind is a stable, machine-readable configuration error category.
@@ -220,23 +221,40 @@ func (l *Loader) DecodeSection(ctx context.Context, raw json.RawMessage) (Result
 		return Result{}, configError(ErrorSyntax, "ai", "must be one JSON object", err)
 	}
 
-	dec := json.NewDecoder(bytes.NewReader(trimmed))
-	dec.DisallowUnknownFields()
+	var version struct {
+		SchemaVersion int `json:"schema_version"`
+	}
+	if err := json.Unmarshal(trimmed, &version); err != nil {
+		return Result{}, configError(ErrorSyntax, "ai", "invalid JSON field", err)
+	}
+	decodeStrict := func(target any) error {
+		dec := json.NewDecoder(bytes.NewReader(trimmed))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(target); err != nil {
+			return err
+		}
+		return ensureJSONEOF(dec)
+	}
 	var rawConfig aiFileConfig
-	if err := dec.Decode(&rawConfig); err != nil {
+	var decodeErr error
+	switch version.SchemaVersion {
+	case 1:
+		var legacy aiFileConfigV1
+		decodeErr = decodeStrict(&legacy)
+		rawConfig = legacy.current()
+	case CurrentSchemaVersion:
+		decodeErr = decodeStrict(&rawConfig)
+	default:
+		return Result{}, configError(ErrorUnsupportedVersion, "ai.schema_version", fmt.Sprintf("version %d is not supported; expected 1 or %d", version.SchemaVersion, CurrentSchemaVersion), nil)
+	}
+	if decodeErr != nil {
 		kind := ErrorSyntax
 		problem := "invalid JSON field"
-		if strings.Contains(err.Error(), "unknown field") {
+		if strings.Contains(decodeErr.Error(), "unknown field") {
 			kind = ErrorUnknownField
-			problem = err.Error()
+			problem = decodeErr.Error()
 		}
-		return Result{}, configError(kind, "ai", problem, err)
-	}
-	if err := ensureJSONEOF(dec); err != nil {
-		return Result{}, configError(ErrorSyntax, "ai", "trailing JSON is not allowed", err)
-	}
-	if rawConfig.SchemaVersion != CurrentSchemaVersion {
-		return Result{}, configError(ErrorUnsupportedVersion, "ai.schema_version", fmt.Sprintf("version %d is not supported; expected %d", rawConfig.SchemaVersion, CurrentSchemaVersion), nil)
+		return Result{}, configError(kind, "ai", problem, decodeErr)
 	}
 	return l.resolve(ctx, rawConfig)
 }
@@ -269,6 +287,70 @@ type aiFileConfig struct {
 	SystemPrompt  string               `json:"system_prompt"`
 }
 
+// aiFileConfigV1 is frozen so schema 1 remains strictly readable while new
+// fields are rejected instead of silently changing the meaning of an old
+// document. Schema 2 adds runtime resource ceilings, retries, tool discovery,
+// summarization, tool budgets and explicit application scoping.
+type aiFileConfigV1 struct {
+	SchemaVersion int                  `json:"schema_version"`
+	Enabled       *bool                `json:"enabled"`
+	Provider      string               `json:"provider"`
+	BaseURL       string               `json:"base_url"`
+	Model         string               `json:"model"`
+	Auth          authFileConfig       `json:"auth"`
+	Generation    generationFileConfig `json:"generation"`
+	Agent         agentFileConfigV1    `json:"agent"`
+	Safety        safetyFileConfig     `json:"safety"`
+	History       historyFileConfigV1  `json:"history"`
+	SystemPrompt  string               `json:"system_prompt"`
+}
+
+type agentFileConfigV1 struct {
+	DeepEnabled      bool   `json:"deep_enabled"`
+	AllowModelSelect bool   `json:"allow_model_select"`
+	MaxIterations    int    `json:"max_iterations"`
+	MaxModelCalls    int    `json:"max_model_calls"`
+	MaxSubtasks      int    `json:"max_subtasks"`
+	RequestTimeout   string `json:"request_timeout"`
+	MaxTurnDuration  string `json:"max_turn_duration"`
+}
+
+type historyFileConfigV1 struct {
+	MaxSessions int    `json:"max_sessions"`
+	MaxEvents   int    `json:"max_events_per_session"`
+	MaxBytes    int64  `json:"max_bytes_per_session"`
+	TTL         string `json:"ttl"`
+}
+
+func (legacy aiFileConfigV1) current() aiFileConfig {
+	return aiFileConfig{
+		SchemaVersion: legacy.SchemaVersion,
+		Enabled:       legacy.Enabled,
+		Provider:      legacy.Provider,
+		BaseURL:       legacy.BaseURL,
+		Model:         legacy.Model,
+		Auth:          legacy.Auth,
+		Generation:    legacy.Generation,
+		Agent: agentFileConfig{
+			DeepEnabled:      legacy.Agent.DeepEnabled,
+			AllowModelSelect: legacy.Agent.AllowModelSelect,
+			MaxIterations:    legacy.Agent.MaxIterations,
+			MaxModelCalls:    legacy.Agent.MaxModelCalls,
+			MaxSubtasks:      legacy.Agent.MaxSubtasks,
+			RequestTimeout:   legacy.Agent.RequestTimeout,
+			MaxTurnDuration:  legacy.Agent.MaxTurnDuration,
+		},
+		Safety: legacy.Safety,
+		History: historyFileConfig{
+			MaxSessions: legacy.History.MaxSessions,
+			MaxEvents:   legacy.History.MaxEvents,
+			MaxBytes:    legacy.History.MaxBytes,
+			TTL:         legacy.History.TTL,
+		},
+		SystemPrompt: legacy.SystemPrompt,
+	}
+}
+
 type authFileConfig struct {
 	Type string `json:"type"`
 	Env  string `json:"env"`
@@ -289,13 +371,30 @@ type thinkingFileConfig struct {
 }
 
 type agentFileConfig struct {
-	DeepEnabled      bool   `json:"deep_enabled"`
-	AllowModelSelect bool   `json:"allow_model_select"`
-	MaxIterations    int    `json:"max_iterations"`
-	MaxModelCalls    int    `json:"max_model_calls"`
-	MaxSubtasks      int    `json:"max_subtasks"`
-	RequestTimeout   string `json:"request_timeout"`
-	MaxTurnDuration  string `json:"max_turn_duration"`
+	DeepEnabled                 bool   `json:"deep_enabled"`
+	DynamicToolSearch           *bool  `json:"dynamic_tool_search"`
+	ContextSummarization        *bool  `json:"context_summarization"`
+	SummarizeAfterTokens        int    `json:"summarize_after_tokens"`
+	SummarizeAfterMessages      int    `json:"summarize_after_messages"`
+	AllowModelSelect            bool   `json:"allow_model_select"`
+	MaxIterations               int    `json:"max_iterations"`
+	MaxModelCalls               int    `json:"max_model_calls"`
+	MaxModelRetries             int    `json:"max_model_retries"`
+	MaxSubtasks                 int    `json:"max_subtasks"`
+	MaxToolCalls                int    `json:"max_tool_calls"`
+	MaxToolCallsPerTool         int    `json:"max_tool_calls_per_tool"`
+	MaxRepeatedToolCalls        int    `json:"max_repeated_tool_calls"`
+	MaxProviderResponseBytes    int64  `json:"max_provider_response_bytes"`
+	MaxModelOutputBytesPerCall  int64  `json:"max_model_output_bytes_per_call"`
+	MaxModelOutputBytesPerTurn  int64  `json:"max_model_output_bytes_per_turn"`
+	MaxModelOutputEventsPerTurn int    `json:"max_model_output_events_per_turn"`
+	MaxAssistantMessageBytes    int64  `json:"max_assistant_message_bytes"`
+	MaxReasoningBytesPerTurn    int64  `json:"max_reasoning_bytes_per_turn"`
+	MaxOutstandingHostCallbacks int    `json:"max_outstanding_host_callbacks"`
+	MaxOutstandingObservations  int    `json:"max_outstanding_observations"`
+	MaxOutstandingOperations    int    `json:"max_outstanding_operations"`
+	RequestTimeout              string `json:"request_timeout"`
+	MaxTurnDuration             string `json:"max_turn_duration"`
 }
 
 type safetyFileConfig struct {
@@ -311,10 +410,12 @@ type secretFileRef struct {
 }
 
 type historyFileConfig struct {
-	MaxSessions int    `json:"max_sessions"`
-	MaxEvents   int    `json:"max_events_per_session"`
-	MaxBytes    int64  `json:"max_bytes_per_session"`
-	TTL         string `json:"ttl"`
+	Namespace         string `json:"namespace"`
+	CapabilityVersion string `json:"capability_version"`
+	MaxSessions       int    `json:"max_sessions"`
+	MaxEvents         int    `json:"max_events_per_session"`
+	MaxBytes          int64  `json:"max_bytes_per_session"`
+	TTL               string `json:"ttl"`
 }
 
 func (l *Loader) resolve(ctx context.Context, raw aiFileConfig) (Result, error) {
@@ -404,7 +505,78 @@ func (l *Loader) resolve(ctx context.Context, raw aiFileConfig) (Result, error) 
 	if err != nil {
 		return Result{}, err
 	}
+	maxModelRetries, err := boundedBudgetInt(raw.Agent.MaxModelRetries, 1, 5, "ai.agent.max_model_retries")
+	if err != nil {
+		return Result{}, err
+	}
 	maxSubtasks, err := boundedInt(raw.Agent.MaxSubtasks, 3, 1, 16, "ai.agent.max_subtasks")
+	if err != nil {
+		return Result{}, err
+	}
+	maxToolCalls, err := boundedBudgetInt(raw.Agent.MaxToolCalls, 32, 512, "ai.agent.max_tool_calls")
+	if err != nil {
+		return Result{}, err
+	}
+	maxToolCallsPerTool, err := boundedBudgetInt(raw.Agent.MaxToolCallsPerTool, 8, 128, "ai.agent.max_tool_calls_per_tool")
+	if err != nil {
+		return Result{}, err
+	}
+	maxRepeatedToolCalls, err := boundedBudgetInt(raw.Agent.MaxRepeatedToolCalls, 2, 32, "ai.agent.max_repeated_tool_calls")
+	if err != nil {
+		return Result{}, err
+	}
+	maxProviderResponseBytes, err := boundedInt64(raw.Agent.MaxProviderResponseBytes, 8<<20, 1<<20, 64<<20, "ai.agent.max_provider_response_bytes")
+	if err != nil {
+		return Result{}, err
+	}
+	maxModelOutputBytesPerCall, err := boundedInt64(raw.Agent.MaxModelOutputBytesPerCall, 1<<20, 64<<10, 16<<20, "ai.agent.max_model_output_bytes_per_call")
+	if err != nil {
+		return Result{}, err
+	}
+	maxModelOutputBytesPerTurn, err := boundedInt64(raw.Agent.MaxModelOutputBytesPerTurn, 4<<20, 64<<10, 64<<20, "ai.agent.max_model_output_bytes_per_turn")
+	if err != nil {
+		return Result{}, err
+	}
+	if maxModelOutputBytesPerTurn < maxModelOutputBytesPerCall {
+		return Result{}, validation("ai.agent.max_model_output_bytes_per_turn", "cannot be smaller than max_model_output_bytes_per_call")
+	}
+	maxModelOutputEventsPerTurn, err := boundedInt(raw.Agent.MaxModelOutputEventsPerTurn, 4096, 16, 65536, "ai.agent.max_model_output_events_per_turn")
+	if err != nil {
+		return Result{}, err
+	}
+	maxAssistantMessageBytes, err := boundedInt64(raw.Agent.MaxAssistantMessageBytes, 256<<10, 16<<10, 512<<10, "ai.agent.max_assistant_message_bytes")
+	if err != nil {
+		return Result{}, err
+	}
+	maxReasoningBytesPerTurn, err := boundedInt64(raw.Agent.MaxReasoningBytesPerTurn, 256<<10, 16<<10, 768<<10, "ai.agent.max_reasoning_bytes_per_turn")
+	if err != nil {
+		return Result{}, err
+	}
+	maxOutstandingHostCallbacks, err := boundedInt(raw.Agent.MaxOutstandingHostCallbacks, 32, 1, maxOutstandingWork, "ai.agent.max_outstanding_host_callbacks")
+	if err != nil {
+		return Result{}, err
+	}
+	maxOutstandingObservations, err := boundedInt(raw.Agent.MaxOutstandingObservations, 32, 1, maxOutstandingWork, "ai.agent.max_outstanding_observations")
+	if err != nil {
+		return Result{}, err
+	}
+	maxOutstandingOperations, err := boundedInt(raw.Agent.MaxOutstandingOperations, 64, 1, maxOutstandingWork, "ai.agent.max_outstanding_operations")
+	if err != nil {
+		return Result{}, err
+	}
+	dynamicToolSearch := true
+	if raw.Agent.DynamicToolSearch != nil {
+		dynamicToolSearch = *raw.Agent.DynamicToolSearch
+	}
+	contextSummarization := true
+	if raw.Agent.ContextSummarization != nil {
+		contextSummarization = *raw.Agent.ContextSummarization
+	}
+	summarizeAfterTokens, err := boundedInt(raw.Agent.SummarizeAfterTokens, 24000, 1024, 1<<20, "ai.agent.summarize_after_tokens")
+	if err != nil {
+		return Result{}, err
+	}
+	summarizeAfterMessages, err := boundedInt(raw.Agent.SummarizeAfterMessages, 80, 8, 10000, "ai.agent.summarize_after_messages")
 	if err != nil {
 		return Result{}, err
 	}
@@ -448,36 +620,62 @@ func (l *Loader) resolve(ctx context.Context, raw aiFileConfig) (Result, error) 
 	if err != nil {
 		return Result{}, err
 	}
+	for field, value := range map[string]string{
+		"namespace": raw.History.Namespace, "capability_version": raw.History.CapabilityVersion,
+	} {
+		if len(value) > 256 || strings.ContainsFunc(value, unicode.IsControl) {
+			return Result{}, validation("ai.history."+field, "must be at most 256 bytes and contain no control characters")
+		}
+	}
 	if len(raw.SystemPrompt) > maxPromptBytes || strings.ContainsRune(raw.SystemPrompt, '\x00') {
 		return Result{}, validation("ai.system_prompt", fmt.Sprintf("must not contain NUL or exceed %d bytes", maxPromptBytes))
 	}
 
 	cfg := chat.Config{
-		Provider:             provider,
-		BaseURL:              strings.TrimRight(baseURL.String(), "/"),
-		APIKey:               apiKey,
-		AuthToken:            authToken,
-		Model:                model,
-		Stream:               stream,
-		Thinking:             thinking,
-		ThinkingBudgetTokens: thinkingBudget,
-		RequestTimeout:       requestTimeout,
-		MaxTokens:            maxTokens,
-		TemperatureOverride:  temperatureOverride,
-		SystemPrompt:         raw.SystemPrompt,
-		ConfirmWrites:        confirmWrites,
-		MaxIterations:        maxIterations,
-		EnableDeepAgent:      raw.Agent.DeepEnabled,
-		MaxModelCallsPerTurn: maxCalls,
-		MaxSubtasksPerTurn:   maxSubtasks,
-		MaxTurnDuration:      turnDuration,
-		ConfirmSecret:        confirmSecret,
-		AllowModelSelect:     raw.Agent.AllowModelSelect,
-		MaxHistorySessions:   maxSessions,
-		MaxHistoryEvents:     maxEvents,
-		MaxHistoryBytes:      maxBytes,
-		HistoryTTL:           historyTTL,
-		WritesPerMinute:      writesPerMinute,
+		Provider:                    provider,
+		BaseURL:                     strings.TrimRight(baseURL.String(), "/"),
+		APIKey:                      apiKey,
+		AuthToken:                   authToken,
+		Model:                       model,
+		Stream:                      stream,
+		Thinking:                    thinking,
+		ThinkingBudgetTokens:        thinkingBudget,
+		RequestTimeout:              requestTimeout,
+		MaxTokens:                   maxTokens,
+		TemperatureOverride:         temperatureOverride,
+		SystemPrompt:                raw.SystemPrompt,
+		ConfirmWrites:               confirmWrites,
+		MaxIterations:               maxIterations,
+		EnableDeepAgent:             raw.Agent.DeepEnabled,
+		DisableDynamicToolSearch:    !dynamicToolSearch,
+		DisableContextSummarization: !contextSummarization,
+		SummarizeAfterTokens:        summarizeAfterTokens,
+		SummarizeAfterMessages:      summarizeAfterMessages,
+		MaxModelCallsPerTurn:        maxCalls,
+		MaxModelRetries:             maxModelRetries,
+		MaxSubtasksPerTurn:          maxSubtasks,
+		MaxToolCallsPerTurn:         maxToolCalls,
+		MaxToolCallsPerTool:         maxToolCallsPerTool,
+		MaxRepeatedToolCalls:        maxRepeatedToolCalls,
+		MaxProviderResponseBytes:    maxProviderResponseBytes,
+		MaxModelOutputBytesPerCall:  maxModelOutputBytesPerCall,
+		MaxModelOutputBytesPerTurn:  maxModelOutputBytesPerTurn,
+		MaxModelOutputEventsPerTurn: maxModelOutputEventsPerTurn,
+		MaxAssistantMessageBytes:    maxAssistantMessageBytes,
+		MaxReasoningBytesPerTurn:    maxReasoningBytesPerTurn,
+		MaxTurnDuration:             turnDuration,
+		MaxOutstandingHostCallbacks: maxOutstandingHostCallbacks,
+		MaxOutstandingObservations:  maxOutstandingObservations,
+		MaxOutstandingOperations:    maxOutstandingOperations,
+		ConfirmSecret:               confirmSecret,
+		AllowModelSelect:            raw.Agent.AllowModelSelect,
+		SessionNamespace:            raw.History.Namespace,
+		SessionCapabilityVersion:    raw.History.CapabilityVersion,
+		MaxHistorySessions:          maxSessions,
+		MaxHistoryEvents:            maxEvents,
+		MaxHistoryBytes:             maxBytes,
+		HistoryTTL:                  historyTTL,
+		WritesPerMinute:             writesPerMinute,
 	}
 	if err := cfg.Validate(); err != nil {
 		var fieldErr *chat.ConfigError
@@ -635,6 +833,31 @@ func boundedInt(value, def, min, max int, path string) (int, error) {
 	}
 	if value < min || value > max {
 		return 0, validation(path, fmt.Sprintf("must be between %d and %d", min, max))
+	}
+	return value, nil
+}
+
+func boundedInt64(value, def, min, max int64, path string) (int64, error) {
+	if value == 0 {
+		return def, nil
+	}
+	if value < min || value > max {
+		return 0, validation(path, fmt.Sprintf("must be between %d and %d", min, max))
+	}
+	return value, nil
+}
+
+// boundedBudgetInt 保留 SDK 预算的统一语义：0 使用安全默认值，
+// 任意负数表示不限。输出归一为 -1，避免将“不限”与大数混用。
+func boundedBudgetInt(value, def, max int, path string) (int, error) {
+	if value < 0 {
+		return -1, nil
+	}
+	if value == 0 {
+		return def, nil
+	}
+	if value > max {
+		return 0, validation(path, fmt.Sprintf("must be negative (unlimited), zero (default), or no greater than %d", max))
 	}
 	return value, nil
 }

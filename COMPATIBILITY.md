@@ -22,6 +22,10 @@ third-party integrations may rely on while the API approaches v1.
 - A strict reader rejects unknown fields, duplicate keys, trailing documents,
   and unsupported versions. Lenient parsing is not part of the contract.
 - A new reader must continue to read every schema version it claims to support.
+- AI configuration schema v2 is current and the loader continues to read the
+  frozen v1 shape. Runtime ceilings, retries, tool discovery/budgets,
+  summarization, and application scope are v2-only fields; a strict v1 document
+  rejects them instead of silently adopting semantics introduced later.
 - Secret values are never configuration fields. Only explicit references are
   passed to the host's `SecretResolver`.
 - Store values have snapshot ownership: implementations and callers must not
@@ -35,6 +39,34 @@ third-party integrations may rely on while the API approaches v1.
   methods, because the service layer prefers the versioned one. Third-party
   stores should pass `storetest.Run`; multi-replica deployments require the
   versioned capability.
+- Persistent state has non-disableable structural and aggregate ceilings. One
+  user may have at most 512 Items and 8 MiB of aggregate Item source;
+  `Item.Content` is limited to 512 KiB and each Item has at most 64 metadata
+  entries with 128-byte keys and 1-KiB values (`MaxItemsPerUser`,
+  `MaxUserItemBytes`, `MaxItemContentBytes`, `MaxItemMetaEntries`,
+  `MaxItemMetaKeyBytes`, `MaxItemMetaValueBytes`). One Draft or Published
+  template version is limited to a conservative 1-MiB structural estimate and
+  the per-user template catalog's logical structure to 8 MiB
+  (`MaxTemplateVersionBytes`, `MaxTemplateCatalogBytes`); the encoded internal
+  catalog record has a separate 16-MiB storage envelope
+  (`MaxTemplateCatalogStorageBytes`) for JSON framing and escaping. Public and
+  reserved KV together are limited to 4096 entries and 32 MiB of aggregate
+  key/raw-value source (`MaxKVEntriesPerUser`, `MaxUserKVBytes`); public values
+  retain the separate 64-KiB `MaxKVValueBytes` limit. Revisions are limited to
+  4096 entries and a 64-MiB aggregate Item/Page/Template source estimate
+  (`MaxRevisionsPerUser`, `MaxUserRevisionBytes`).
+- Values returned by either a legacy `Store` or `UserStateStore` are validated
+  before they are cloned, served, snapshotted, or used as a mutation base.
+  Invalid structure or any hard-limit violation fails closed with an error;
+  the SDK does not silently truncate a third-party Store or expose a partial
+  state. Before upgrading a deployment that may contain legacy oversized data,
+  scan and migrate, trim, or remove those records offline. Once rejected, such
+  data may not be readable through ordinary Handler APIs for in-band cleanup.
+- `WithMaxRevisions` is a retention target inside the immutable revision safety
+  envelope. Its default is 50; `WithMaxRevisions(0)` removes that lower
+  count-based target but still trims at `MaxRevisionsPerUser` (4096) and
+  `MaxUserRevisionBytes` (64 MiB). It does not make revision retention
+  unbounded.
 - Version 0 means that a user has never been touched. Every successful mutation
   (including deletion of an absent KV key) must advance the per-user version.
   `EraseUser` clears Items/KV/Revisions but must atomically persist a newer empty
@@ -56,6 +88,14 @@ third-party integrations may rely on while the API approaches v1.
 - Public `KVService`/`ScopedService` calls reject every key beginning with
   `ReservedKVPrefix` for Get, Set and Delete using `ErrReservedKVKey`. Existing
   direct callers must migrate to Page/Template/Error/layout-specific APIs.
+- Conditional KV is additive: existing `KVService`, `Service` and
+  `ScopedService` interfaces are unchanged. `*Handler` implements the separate
+  `VersionedKVService`; values returned by `ScopeService`/`ServiceForRequest`
+  may be asserted to `ScopedVersionedKVService`. HTTP KV GET adds `revision`,
+  while PUT only becomes conditional when `expected_revision` is present, so
+  old clients retain unconditional-write behavior. Built-in versioned Stores
+  provide cross-replica single-key CAS; legacy Stores only provide the existing
+  per-Handler locking guarantee.
 
 ## Browser and event integration
 
@@ -111,6 +151,96 @@ third-party integrations may rely on while the API approaches v1.
   and must not assume more than 20 items in one result. A new server locally
   filters and paginates legacy all-items responses; a new browser answers a
   legacy request in its historical one-shot mode (capped at 200 items).
+- Every server-to-client chat event, including output from a third-party
+  `ChatBackend`, passes through the Handler's final WebSocket egress guard. An
+  encoded event is limited to `MaxChatOutboundFrameBytes` (1 MiB - 1 byte); one
+  accepted user turn is limited to 4096 events and 4 MiB, and one connection to
+  65536 events and 64 MiB. Exceeding any boundary produces a fixed safe error
+  and closes the connection with WebSocket status 1009. Accounting follows the
+  Handler's accepted active/pending turns rather than backend-supplied turn IDs.
+- `content_format` is an additive field on assistant answer events. It applies
+  only to `assistant_delta.delta` and `assistant_done.message`; status,
+  reasoning, error, and tool events remain plain text. An empty field keeps the
+  legacy client auto-detection behavior, and clients must render unknown values
+  as plain text. A non-empty `assistant_done.content_format` is authoritative
+  for its final snapshot; omission preserves the stream format. The built-in
+  Eino backend declares `html`. HTML is untrusted model output, not executable
+  Item code: third-party clients must parse it in an inert document and rebuild
+  it through an element/attribute/style/URL allowlist before DOM insertion;
+  directly assigning it to `innerHTML` is outside the protocol's safety model.
+- `preview_only` is an additive field on `/api/chat/models`. It distinguishes a
+  deterministic integration preview from `model_ready`; preview responses may
+  exercise the chat UI, but must never be presented as real model answers.
+- `assistant_reset` is an additive event emitted when a partially streamed
+  model attempt is rejected before retry. New clients clear the current turn's
+  projected answer; legacy clients may ignore it because
+  `assistant_done.message` remains the authoritative snapshot.
+- `assistant_done.finish_reason`, `usage`, and `repaired` are additive optional
+  diagnostics. Providers may omit counters or use new finish-reason strings;
+  clients must tolerate both. They are not an authorization or reconciled
+  billing source. `repaired=true` means the visible answer was regenerated from
+  already-completed tool evidence without replaying any tool.
+- Persisted Eino history is keyed by an opaque digest of user, browser csid and
+  the effective capability boundary. Changes to read-only access, API/tool
+  catalog, confirmation policy, trusted host prompt or probe forwarding rotate
+  that internal scope; external `SessionStore` implementations must treat the
+  key as opaque and must not attempt to derive an identity from it. The first
+  upgrade to this scheme intentionally starts a new scoped history for existing
+  csids; legacy opaque records may be removed later under the host's retention
+  policy rather than copied across an unknown permission boundary.
+- A custom shared `SessionStore` or `ConfirmNonceStore` requires an explicit
+  stable `SessionNamespace` when constructed through `NewChecked`; replicas of
+  one application use the same value, while different applications or tenants
+  use different values. This scopes both persisted history and confirmation
+  cards, even when applications share a confirmation key and nonce database.
+  `SessionCapabilityVersion` is the host-controlled rotation hook for callback
+  or authorization semantics that cannot be fingerprinted. The unchecked
+  legacy `New` constructor uses a random per-instance namespace when either
+  external Store is present and the namespace is missing, preventing
+  cross-application reuse at the cost of restart/replica continuity.
+- Backend resource ceilings are public configuration: outstanding critical host
+  callbacks, observer callbacks, and model/Service operations default to
+  32/32/64. Zero selects those defaults; explicit values are limited to
+  1..4096. `TurnObserver` delivery is best effort and uses the isolated observer
+  ceiling: accepted snapshots keep per-turn order, but overload or an exporter
+  that ignores its context may drop later snapshots without failing the turn.
+- Model output has local hard boundaries independent of provider token/usage
+  claims. Defaults (and accepted schema-v2 / `NewChecked` ranges) are: provider
+  response body 8 MiB (1..64 MiB), each model call 1 MiB (64 KiB..16 MiB), the
+  shared turn 4 MiB (64 KiB..64 MiB and never below the per-call value), model
+  stream events 4096 (16..65536), the visible final answer 256 KiB
+  (16..512 KiB), and projected reasoning per turn 256 KiB (16..768 KiB) with an
+  additional fixed 64-KiB ceiling per reasoning segment. Content, reasoning,
+  tool calls and extension payloads all participate, including Deep subagents,
+  summarization and final repair calls. Visible answer and reasoning projections
+  are separate from the model-output budget, and streamed text is coalesced
+  into bounded delta frames.
+  Schema-v2 exposes these as `max_provider_response_bytes`,
+  `max_model_output_bytes_per_call`, `max_model_output_bytes_per_turn`,
+  `max_model_output_events_per_turn`, `max_assistant_message_bytes`, and
+  `max_reasoning_bytes_per_turn` under `ai.agent`. Zero selects safe defaults;
+  checked/programmatic and strict JSON configuration reject values outside the
+  ranges above, so these safety boundaries cannot be disabled.
+  Frozen schema-v1 documents cannot name the fields and receive the same safe
+  runtime defaults when loaded by a v2 reader. Programmatic limit failures wrap
+  `chat.ErrModelOutputLimit` and expose `*chat.ModelOutputLimitError`.
+- One `Backend` now enforces a single in-process owner for each scoped session
+  ID. A reconnect takes ownership without waiting in the WebSocket read path,
+  but its turns and confirmations remain behind the previous owner's real
+  model/tool shutdown barrier. This is not a distributed lease: deployments
+  with multiple Backend processes must add sticky routing or an external
+  session-ownership lock. A shared `SessionStore` alone does not serialize
+  execution across replicas.
+- `cancel_tool` is an additive client event in chat protocol version 1. It
+  carries the unchanged signed `tool_call`; the built-in backend verifies the
+  card in its issuing logical-session/application capability scope and
+  atomically consumes the same nonce used by `confirm_tool`. Confirm and cancel
+  share one bounded FIFO so websocket frame order is also nonce-CAS order. The
+  backend replies with additive `cancel_tool_result`, correlated by the card's
+  ID and nonce without echoing its token or arguments. New clients must remain
+  in a disabled "cancelling" state until that acknowledgement succeeds; a
+  failure or missing acknowledgement is not proof that the tool did not run.
+  Old clients safely ignore the new result event.
 
 ## Deprecation
 

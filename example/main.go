@@ -392,6 +392,7 @@ func exampleChatConfig(base, probeBase string, probeQuery []string) chat.Config 
 	hasIHTMLCredential := apiKey != "" || authToken != ""
 	maxTokens := 0
 	thinkingBudget := 0
+	thinking := envBool("IHTML_AI_THINKING")
 	if provider == chat.ProviderClaude {
 		// Do not combine credentials from two independently configured gateways.
 		// Presence of either IHTML credential makes that source authoritative.
@@ -405,7 +406,9 @@ func exampleChatConfig(base, probeBase string, probeQuery []string) chat.Config 
 			model = envFirst("ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL")
 		}
 		maxTokens = envPositiveInt("IHTML_AI_MAX_TOKENS", defaultClaudeMaxTokensForExample)
-		thinkingBudget = envPositiveInt("IHTML_AI_THINKING_BUDGET_TOKENS", defaultClaudeThinkingBudgetForExample)
+		if thinking {
+			thinkingBudget = envPositiveInt("IHTML_AI_THINKING_BUDGET_TOKENS", defaultClaudeThinkingBudgetForExample)
+		}
 	}
 	return chat.Config{
 		Provider:             provider,
@@ -414,7 +417,7 @@ func exampleChatConfig(base, probeBase string, probeQuery []string) chat.Config 
 		AuthToken:            authToken,
 		Model:                model,
 		Stream:               true,
-		Thinking:             envBool("IHTML_AI_THINKING"),
+		Thinking:             thinking,
 		ThinkingBudgetTokens: thinkingBudget,
 		RequestTimeout:       envDurationMS(180*time.Second, "IHTML_AI_REQUEST_TIMEOUT_MS", "API_TIMEOUT_MS"),
 		MaxTokens:            maxTokens,
@@ -608,9 +611,10 @@ func (b *demoBackend) Models(_ context.Context) (ihtml.ChatModels, error) {
 	return ihtml.ChatModels{
 		ProtocolVersion: ihtml.ChatProtocolVersion,
 		Provider:        "demo",
-		ModelReady:      true,
-		CurrentModel:    "demo(演示模式)",
-		Models:          []string{"demo(演示模式)"},
+		ModelReady:      false,
+		PreviewOnly:     true,
+		CurrentModel:    "",
+		Models:          []string{},
 		AgentModes:      []string{chat.AgentModeFast},
 	}, nil
 }
@@ -623,9 +627,6 @@ type demoSession struct {
 	generation uint64
 	closed     bool
 	wg         sync.WaitGroup
-
-	inspectMu sync.Mutex
-	inspects  map[string]chan *ihtml.ChatClientInspection
 }
 
 func (s *demoSession) Close() {
@@ -647,17 +648,6 @@ func (s *demoSession) HandleEvent(ctx context.Context, ev *ihtml.ChatClientEvent
 	}
 	if ev.Type == "cancel" {
 		s.stopRun()
-		return
-	}
-	if ev.Type == ihtml.ChatClientInspectResult {
-		// 内核对 inspect_request 的应答: 与真实后端相同的配对方式。
-		s.inspectMu.Lock()
-		ch := s.inspects[ev.InspectID]
-		delete(s.inspects, ev.InspectID)
-		s.inspectMu.Unlock()
-		if ch != nil && ev.Inspect != nil {
-			ch <- ev.Inspect
-		}
 		return
 	}
 	if ev.Type != "user_message" {
@@ -740,113 +730,42 @@ func demoWait(ctx context.Context, delay time.Duration) bool {
 }
 
 func (s *demoSession) runDemo(ctx context.Context, generation uint64, text string) {
-	if !s.emitRun(ctx, generation, ihtml.ChatStreamEvent{Type: "turn_start", ModelReady: true}) ||
-		!s.emitRun(ctx, generation, ihtml.ChatStreamEvent{Type: "assistant_status", Status: "正在理解需求。", ModelReady: true}) ||
-		!demoWait(ctx, 300*time.Millisecond) ||
-		!s.emitRun(ctx, generation, ihtml.ChatStreamEvent{Type: "assistant_thinking", Thinking: "演示模式: 把用户的话写成一张卡片放到当前页面。", ModelReady: true}) {
+	if !s.emitRun(ctx, generation, ihtml.ChatStreamEvent{Type: "turn_start", ModelReady: false}) ||
+		!s.emitRun(ctx, generation, ihtml.ChatStreamEvent{Type: "assistant_status", Status: "正在展示富文本回答预览。", ModelReady: false}) ||
+		!demoWait(ctx, 180*time.Millisecond) {
 		return
 	}
-	call := &ihtml.ProposedToolCall{
-		ID: fmt.Sprintf("demo_%d", time.Now().UnixNano()), Name: "ui_item_put", Title: "写入/更新 Item",
-		Method: "TOOL", Path: "ui://ui_item_put", Risk: "medium",
+	question := strings.TrimSpace(text)
+	if question == "" {
+		question = "（空消息）"
 	}
-	if !s.emitRun(ctx, generation, ihtml.ChatStreamEvent{Type: "tool_start", ToolCall: call, ToolName: call.Name, ToolTitle: call.Title, ToolStatus: "running", ToolInput: `{"items":[{"id":"ai-note",…}]}`, ModelReady: true}) ||
-		!demoWait(ctx, 300*time.Millisecond) {
-		return
+	answer := []string{
+		"<h3>富文本回答预览</h3>",
+		"<p>当前服务没有连接真实 AI 模型，因此不会猜测问题答案，也不会修改页面。</p>",
+		"<blockquote>收到的问题：" + html.EscapeString(question) + "</blockquote>",
+		"<table><thead><tr><th>能力</th><th>演示状态</th></tr></thead><tbody>" +
+			"<tr><td>普通问答与数据表格</td><td>连接真实模型后可用</td></tr>" +
+			"<tr><td>受控 HTML 展示</td><td>当前正在预览</td></tr>" +
+			"<tr><td>页面写入</td><td>本次未执行</td></tr></tbody></table>",
+		"<p>请在服务端配置 Provider、BaseURL、模型和凭据后再进行真实问答。</p>",
 	}
-	note := text
-	if note == "" {
-		note = "(空消息)"
-	}
-	// 与 cancel/new-turn 在线性化点互斥；取消若先到达，这里不会写入。
-	s.mu.Lock()
-	if s.closed || s.generation != generation || ctx.Err() != nil {
-		s.mu.Unlock()
-		return
-	}
-	err := s.sctx.Service.PutItems(ctx, s.sctx.User, []ihtml.Item{{
-		ID: "ai-note", Type: ihtml.ItemHTML, Order: 26, Title: "AI 回应卡片",
-		Content: `<div class="ui-page" style="padding-top:0;padding-bottom:0"><div class="ui-card"><div class="ui-stat"><span class="label">AI 刚写入的卡片</span><span class="value" style="font-size:17px">` + html.EscapeString("你说: "+note) + `</span></div></div></div>`,
-	}}, "chat", "演示助手写入回应卡片")
-	s.mu.Unlock()
-	if err != nil {
-		_ = s.emitRun(ctx, generation, ihtml.ChatStreamEvent{Type: "tool_result", ToolCall: call, ToolName: call.Name, ToolTitle: call.Title, ToolStatus: "error", ToolSummary: err.Error(), ModelReady: true})
-		_ = s.emitRun(ctx, generation, ihtml.ChatStreamEvent{Type: "turn_error", Error: err.Error(), ModelReady: true})
-		return
-	}
-	if !s.emitRun(ctx, generation, ihtml.ChatStreamEvent{Type: "tool_result", ToolCall: call, ToolName: call.Name, ToolTitle: call.Title, ToolStatus: "success", ToolSummary: "已写入 1 个 Item: ai-note(当前页)", ModelReady: true}) {
-		return
-	}
-	// 写后自检演示: 走与真实后端一致的 inspect_request/inspect_result 往返,
-	// 读取内核回传的实时渲染状态。先等一拍, 让 SSE put 事件先在内核应用。
-	if !demoWait(ctx, 400*time.Millisecond) {
-		return
-	}
-	inspectNote := s.demoInspect(ctx, generation)
-	for _, chunk := range []string{"<p>已把你的话写成一张卡片放进页面。", inspectNote, "接真实模型后我能真正理解需求、取业务数据、改主题、修报错。</p>"} {
+	var full strings.Builder
+	for _, chunk := range answer {
 		if chunk == "" {
 			continue
 		}
-		if !s.emitRun(ctx, generation, ihtml.ChatStreamEvent{Type: "assistant_delta", Delta: chunk, ModelReady: true}) || !demoWait(ctx, 120*time.Millisecond) {
+		full.WriteString(chunk)
+		if !s.emitRun(ctx, generation, ihtml.ChatStreamEvent{
+			Type: ihtml.ChatStreamAssistantDelta, Delta: chunk,
+			ContentFormat: ihtml.ChatContentFormatHTML, ModelReady: false,
+		}) || !demoWait(ctx, 90*time.Millisecond) {
 			return
 		}
 	}
-	_ = s.emitRun(ctx, generation, ihtml.ChatStreamEvent{Type: "assistant_done", ModelReady: true})
-}
-
-// demoInspect 发出 inspect_request 并等待内核应答, 返回一句自检结论。
-// 未应答(超时)时返回空串, 不影响演示流程。
-func (s *demoSession) demoInspect(ctx context.Context, generation uint64) string {
-	inspectID := fmt.Sprintf("demo_ins_%d", time.Now().UnixNano())
-	ch := make(chan *ihtml.ChatClientInspection, 1)
-	s.inspectMu.Lock()
-	if s.inspects == nil {
-		s.inspects = make(map[string]chan *ihtml.ChatClientInspection)
-	}
-	s.inspects[inspectID] = ch
-	s.inspectMu.Unlock()
-	defer func() {
-		s.inspectMu.Lock()
-		delete(s.inspects, inspectID)
-		s.inspectMu.Unlock()
-	}()
-	if !s.emitRun(ctx, generation, ihtml.ChatStreamEvent{
-		Type: ihtml.ChatStreamInspectRequest, InspectID: inspectID,
-		InspectLimit: 1, InspectIDs: []string{"ai-note"}, ModelReady: true,
-	}) {
-		return ""
-	}
-	timer := time.NewTimer(2 * time.Second)
-	defer timer.Stop()
-	select {
-	case inspect := <-ch:
-		return demoInspectionNote(inspect)
-	case <-ctx.Done():
-		return ""
-	case <-timer.C:
-		return ""
-	}
-}
-
-func demoInspectionNote(inspect *ihtml.ChatClientInspection) string {
-	if inspect != nil {
-		for _, item := range inspect.Items {
-			if item.ID != "ai-note" {
-				continue
-			}
-			if !item.Present {
-				return "我又用 ui_page_inspect 自检了一次: 还没有找到 ai-note 的已连接 DOM。"
-			}
-			if strings.TrimSpace(item.Error) != "" {
-				return "我又用 ui_page_inspect 自检了一次: ai-note 已加载, 但检测到运行错误。"
-			}
-			if item.Visible {
-				return "我又用 ui_page_inspect 自检了一次: ai-note 已渲染、在当前视口可见且没有运行错误。"
-			}
-			return "我又用 ui_page_inspect 自检了一次: ai-note 已加载, 但当前视口中不可见。"
-		}
-	}
-	return "我又用 ui_page_inspect 自检了一次: 内核未返回 ai-note, 暂时不能声称它已正常显示。"
+	_ = s.emitRun(ctx, generation, ihtml.ChatStreamEvent{
+		Type: ihtml.ChatStreamAssistantDone, Message: full.String(),
+		ContentFormat: ihtml.ChatContentFormatHTML, ModelReady: false,
+	})
 }
 
 /* ---------- 预置演示数据: 单页默认形态(不建页面/菜单, 用内核组件类) ---------- */

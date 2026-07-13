@@ -429,6 +429,15 @@ func TestChatModelMetadataAndOverrideAreHiddenByDefault(t *testing.T) {
 	}
 }
 
+func TestChatPreviewOnlyCannotAdvertiseRealModelReadiness(t *testing.T) {
+	backend := newCaptureBackend(ChatModels{ModelReady: true, PreviewOnly: true})
+	srv, _ := newTestServer(t, WithChatBackend(backend))
+	status, out := doJSON(t, http.MethodGet, srv.URL+"/api/chat/models?uid=u", "")
+	if status != http.StatusOK || out["preview_only"] != true || out["model_ready"] != false {
+		t.Fatalf("preview capability was not normalized: %d %v", status, out)
+	}
+}
+
 func TestChatDisabledRevocationStopsNewEvents(t *testing.T) {
 	backend := newCaptureBackend(ChatModels{ModelReady: true})
 	var disabled atomic.Bool

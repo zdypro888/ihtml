@@ -758,7 +758,7 @@ func (h *Handler) handleRollback(w http.ResponseWriter, r *http.Request, user st
 
 func (h *Handler) handleKVGet(w http.ResponseWriter, r *http.Request, user string) {
 	key := r.PathValue("key")
-	value, err := h.KVGet(r.Context(), user, key)
+	value, revision, err := h.KVGetWithRevision(r.Context(), user, key)
 	if err != nil {
 		status := http.StatusBadRequest
 		if errors.Is(err, ErrReservedKVKey) {
@@ -769,27 +769,57 @@ func (h *Handler) handleKVGet(w http.ResponseWriter, r *http.Request, user strin
 		h.writeError(w, status, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"value": value})
+	writeJSON(w, http.StatusOK, map[string]any{"value": value, "revision": revision})
 }
 
 func (h *Handler) handleKVSet(w http.ResponseWriter, r *http.Request, user string) {
 	key := r.PathValue("key")
 	var payload struct {
-		Value json.RawMessage `json:"value"`
+		Value            json.RawMessage `json:"value"`
+		ExpectedRevision json.RawMessage `json:"expected_revision,omitempty"`
 	}
 	if err := readJSON(w, r, MaxKVValueBytes+4096, &payload); err != nil {
 		h.writeError(w, http.StatusBadRequest, fmt.Errorf("invalid request body: %w", err))
 		return
 	}
-	if err := h.KVSet(r.Context(), user, key, payload.Value); err != nil {
+	revision := ""
+	var err error
+	if len(payload.ExpectedRevision) != 0 {
+		var expected string
+		if bytes.Equal(bytes.TrimSpace(payload.ExpectedRevision), []byte("null")) || json.Unmarshal(payload.ExpectedRevision, &expected) != nil {
+			h.writeError(w, http.StatusBadRequest, fmt.Errorf("expected_revision must be a non-null string"))
+			return
+		}
+		revision, err = h.KVCompareAndSet(r.Context(), user, key, payload.Value, expected)
+	} else {
+		err = h.KVSet(r.Context(), user, key, payload.Value)
+		if err == nil {
+			revision = kvValueRevision(payload.Value)
+		}
+	}
+	if err != nil {
 		status := http.StatusBadRequest
 		if errors.Is(err, ErrReservedKVKey) {
 			status = http.StatusForbidden
+		} else if errors.Is(err, ErrKVConflict) {
+			var conflict *KVConflictError
+			if errors.As(err, &conflict) {
+				out := map[string]any{
+					"error": err.Error(), "expected_revision": conflict.Expected,
+					"current_revision": conflict.Actual, "exists": conflict.Exists,
+				}
+				if conflict.Exists {
+					out["current"] = conflict.Current
+				}
+				writeJSON(w, http.StatusConflict, out)
+				return
+			}
+			status = http.StatusConflict
 		}
 		h.writeError(w, status, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "revision": revision})
 }
 
 func (h *Handler) handleKVDelete(w http.ResponseWriter, r *http.Request, user string) {

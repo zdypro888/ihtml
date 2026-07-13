@@ -127,11 +127,88 @@
     const templateCore = lib.template;
     const itemLayoutCore = lib.itemLayout;
     const chatTraceCore = lib.chatTrace || null;
+    const chatContentCore = lib.chatContent || (() => {
+      const formats = new Set(['auto', 'html', 'markdown', 'text']);
+      const normalize = (value) => {
+        const raw = String(value == null ? '' : value).trim().toLowerCase();
+        return !raw ? 'auto' : (formats.has(raw) ? raw : 'text');
+      };
+      const encoder = typeof TextEncoder === 'function' ? new TextEncoder() : null;
+      const linkFilters = (() => {
+        try {
+          return {
+            whitespace: new RegExp('\\p{White_Space}+', 'gu'),
+            invisible: new RegExp('[\\p{Default_Ignorable_Code_Point}\\u2800]+', 'gu'),
+            marks: new RegExp('\\p{Mark}+', 'gu'),
+          };
+        } catch {
+          return {
+            whitespace: /\s+/g,
+            invisible: /[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u202a-\u202e\u2060-\u206f\u2800\u3164\ufe00-\ufe0f\ufeff\uffa0]+/g,
+            marks: /[\u0300-\u036f\u0483-\u0489\u0591-\u05bd\u05bf\u05c1-\u05c2\u0610-\u061a\u064b-\u065f\u0670]+/g,
+          };
+        }
+      })();
+      return {
+        normalizeFormat: normalize,
+        mergeFormat: (current, incoming, reset) => {
+          const base = reset ? 'auto' : normalize(current);
+          return base !== 'auto' || incoming == null || String(incoming).trim() === '' ? base : normalize(incoming);
+        },
+        finalizeFormat: (current, incoming) => {
+          const base = normalize(current);
+          return incoming == null || String(incoming).trim() === '' ? base : normalize(incoming);
+        },
+        doneSnapshot: (event) => {
+          const present = !!event && Object.prototype.hasOwnProperty.call(event, 'message') && typeof event.message === 'string';
+          return { present, message: present ? event.message : '' };
+        },
+        resolveFormat: (format, value) => {
+          const resolved = normalize(format);
+          if (resolved !== 'auto') return resolved;
+          return /<\s*\/?\s*(?:article|section|div|span|p|h[1-6]|blockquote|ul|ol|li|dl|table|thead|tbody|tr|th|td|pre|code|strong|em|a|details|summary|figure)\b/i.test(String(value || '')) ? 'html' : 'markdown';
+        },
+        clipUTF8: (value, max) => {
+          const source = String(value == null ? '' : value);
+          const limit = Math.max(0, Math.floor(Number(max) || 0));
+          if (!encoder) {
+            const text = source.slice(0, limit);
+            return { text, bytes: text.length, truncated: text.length < source.length };
+          }
+          const encoded = encoder.encode(source);
+          if (encoded.length <= limit) return { text: source, bytes: encoded.length, truncated: false };
+          let low = 0; let high = Math.min(source.length, limit);
+          while (low < high) {
+            const middle = Math.ceil((low + high) / 2);
+            if (encoder.encode(source.slice(0, middle)).length <= limit) low = middle;
+            else high = middle - 1;
+          }
+          if (low > 0 && /[\uD800-\uDBFF]/.test(source.charAt(low - 1))) low--;
+          const text = source.slice(0, low);
+          return { text, bytes: encoder.encode(text).length, truncated: true };
+        },
+        compactLinkLabel: (value, max) => {
+          let label = String(value == null ? '' : value);
+          try { label = label.normalize('NFKC'); } catch { /* explicit fallback ranges remain active */ }
+          label = label.replace(linkFilters.invisible, '').replace(linkFilters.whitespace, ' ').trim();
+          const visible = !!label.replace(linkFilters.marks, '').trim();
+          const points = Array.from(label);
+          const limit = Math.max(2, Math.min(1024, Math.floor(Number(max) || 320)));
+          const truncated = points.length > limit;
+          if (truncated) label = points.slice(0, limit - 1).join('') + '…';
+          return { text: label, visible, truncated };
+        },
+        markdownToHTML: (value) => '<p>' + String(value || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>') + '</p>',
+      };
+    })();
     const chatAgentCore = lib.chatAgent || {
       normalizeModes: () => ['fast'], selectMode: () => 'fast',
       requestSnapshot: (_modes, _preferred, model, modelSelect) => ({ agentMode: 'fast', model: modelSelect ? String(model || '') : '' }),
+      cancelToolEvent: (call) => ({ type: 'cancel_tool', tool_call: call && typeof call === 'object' ? call : null }),
+      cancelAckMatches: (call, ev) => !!call && !!ev && !!call.confirmation_nonce && ev.confirmation_nonce === call.confirmation_nonce && (!call.id && !ev.tool_id || !!call.id && ev.tool_id === call.id),
+      streamRenderDelay: (last, now) => Math.max(0, 80 - Math.max(0, Number(now || 0) - Number(last || 0))),
       initialState: () => ({ mode: 'fast', plan: [], agents: {}, budget: null, manualPaused: false }),
-      project: (state) => state, budgetParts: () => ({ modelCalls: 0, maxModelCalls: 0, subtasks: 0, maxSubtasks: 0 }),
+      project: (state) => state, budgetParts: () => ({ modelCalls: 0, maxModelCalls: 0, subtasks: 0, maxSubtasks: 0, toolCalls: 0, maxToolCalls: 0 }),
     };
 
     /* ---------- 生命周期: 全部全局副作用登记 disposer, destroy() 时回收 ---------- */
@@ -184,6 +261,38 @@
       const last = nodes[nodes.length - 1];
       if (ev.shiftKey && doc.activeElement === first) { ev.preventDefault(); last.focus(); }
       else if (!ev.shiftKey && doc.activeElement === last) { ev.preventDefault(); first.focus(); }
+    }
+
+    // aria-modal only describes modality to assistive technology; it does not
+    // make the rest of the application non-interactive. Isolate every root
+    // layer and restore its exact previous state so nested dialogs remain safe.
+    function isolateModalLayers(layers) {
+      const allowed = new Set((Array.isArray(layers) ? layers : [layers]).filter(Boolean));
+      const records = [];
+      for (const node of Array.from(rootEl.children)) {
+        if (allowed.has(node)) continue;
+        records.push({
+          node,
+          inertAttribute: node.hasAttribute('inert'),
+          inertProperty: !!node.inert,
+          ariaHidden: node.getAttribute('aria-hidden'),
+        });
+        try { node.inert = true; } catch { node.setAttribute('inert', ''); }
+        node.setAttribute('aria-hidden', 'true');
+      }
+      let restored = false;
+      return () => {
+        if (restored) return;
+        restored = true;
+        for (const record of records) {
+          if (!record.node.isConnected) continue;
+          try { record.node.inert = record.inertProperty; } catch { /* attribute restoration below */ }
+          if (record.inertAttribute) record.node.setAttribute('inert', '');
+          else record.node.removeAttribute('inert');
+          if (record.ariaHidden === null) record.node.removeAttribute('aria-hidden');
+          else record.node.setAttribute('aria-hidden', record.ariaHidden);
+        }
+      };
     }
 
     /* ---------- 参数与模式 ---------- */
@@ -647,6 +756,8 @@
     addDisposer(() => darkMedia.removeEventListener('change', onDarkMedia));
 
     /* ---------- KV ---------- */
+    const KV_MISSING_REVISION = 'missing';
+    const validKVRevision = (value) => value === KV_MISSING_REVISION || /^sha256:[0-9a-f]{64}$/.test(String(value || ''));
     const kv = {
       async get(key, def = null, requestOpts) {
         try {
@@ -657,7 +768,29 @@
           throw e;
         }
       },
+      async getVersioned(key, def = null, requestOpts) {
+        try {
+          const out = await http.get('api/kv/' + encodeURIComponent(key), requestOpts);
+          const revision = String(out && out.revision || '');
+          if (!validKVRevision(revision)) throw new Error('ihtml: server did not return a valid KV revision');
+          return {
+            value: out && Object.prototype.hasOwnProperty.call(out, 'value') ? out.value : def,
+            revision,
+            exists: true,
+          };
+        } catch (e) {
+          if (e.status === 404) return { value: def, revision: KV_MISSING_REVISION, exists: false };
+          throw e;
+        }
+      },
       set: (key, value) => http.put('api/kv/' + encodeURIComponent(key), { value }),
+      async compareAndSet(key, value, expectedRevision, requestOpts) {
+        if (!validKVRevision(expectedRevision)) throw new Error('ihtml: invalid expected KV revision');
+        const out = await http.put('api/kv/' + encodeURIComponent(key), { value, expected_revision: expectedRevision }, requestOpts);
+        const revision = String(out && out.revision || '');
+        if (!validKVRevision(revision) || revision === KV_MISSING_REVISION) throw new Error('ihtml: server did not return the written KV revision');
+        return { value, revision, exists: true };
+      },
       del: (key) => http.del('api/kv/' + encodeURIComponent(key)),
     };
 
@@ -709,10 +842,12 @@
         modal.appendChild(body);
         if (typeof render === 'function') { try { render(body); } catch (e) { body.textContent = String(e); } }
         let closed = false;
+        let restoreIsolation = null;
         const close = (restoreFocus = true) => {
           if (closed) return;
           closed = true;
           modalClosers.delete(close);
+          if (restoreIsolation) { restoreIsolation(); restoreIsolation = null; }
           mask.remove();
           doc.removeEventListener('keydown', onKey);
           if (restoreFocus && previousFocus && previousFocus.isConnected && typeof previousFocus.focus === 'function') previousFocus.focus();
@@ -734,6 +869,7 @@
         modalClosers.add(close);
         mask.appendChild(modal);
         rootEl.appendChild(mask);
+        restoreIsolation = isolateModalLayers(mask);
         const focusable = dialogFocusable(modal)[0];
         if (focusable) focusable.focus();
         else { modal.tabIndex = -1; modal.focus(); }
@@ -2085,6 +2221,12 @@
       saving: false,
       deleting: false,
       conflict: false,
+      remoteKnown: false,
+      remoteRevision: KV_MISSING_REVISION,
+      remoteFingerprint: '',
+      remoteSourceFingerprint: 'missing',
+      remoteChangePending: false,
+      loadError: null,
       loadSeq: 0,
       originalParent: null,
       originalNext: null,
@@ -2213,6 +2355,12 @@
       apply() {
         if (!itemLayoutCore || !this.state) return;
         if (this.interaction) this.cancelInteraction();
+        if (this.page !== (nav.currentPage || '') || !this.remoteKnown) {
+          this.restoreBase();
+          grid.apply();
+          this.updateOverlay();
+          return;
+        }
         const shouldApply = this.persisted || this.editing || this.state.dirty;
         this.restoreBase();
         if (!shouldApply) { grid.apply(); this.updateOverlay(); return; }
@@ -2256,23 +2404,79 @@
       },
       async load(guard, requestOpts) {
         if (!itemLayoutCore) return false;
+        if (this.saving) { this.remoteChangePending = true; return false; }
         const seq = ++this.loadSeq;
         const page = nav.currentPage || '';
-        this.page = page;
-        let remote = null;
-        try { remote = await kv.get(this.key(page), null, requestOpts); } catch (err) {
-          if (guard && !guard() || isStaleError(err) || err && err.name === 'AbortError') return false;
+        const samePage = this.page === page;
+        this.loading = true;
+        if (this.editing) this.render();
+        let remote;
+        try {
+          remote = await kv.getVersioned(this.key(page), null, requestOpts);
+        } catch (err) {
+          if (seq !== this.loadSeq || destroyed || page !== (nav.currentPage || '') || guard && !guard() || isStaleError(err) || err && err.name === 'AbortError') return false;
+          this.loadError = err;
+          if (!samePage) this.remoteKnown = false;
+          if (this.editing) {
+            ui.toast(T('item_editor_load_failed') + ': ' + String(err && err.message || err), 'error');
+            this.render();
+          }
+          return false;
+        } finally {
+          if (seq === this.loadSeq) {
+            this.loading = false;
+            if (this.editing) this.render();
+          }
         }
         if (seq !== this.loadSeq || destroyed || guard && !guard() || page !== (nav.currentPage || '')) return false;
-        if (this.editing && this.state && this.state.dirty) {
-          // resync 会重建 Item 容器；保留本地文档，但必须把样式重新绑定到新节点。
-          this.conflict = true; this.syncRecords(); return false;
+        const remoteState = itemLayoutCore.remoteSnapshot(remote.value, page);
+        if (remote.exists && !remoteState.valid) {
+          const err = new Error('stored Item layout does not match the current page');
+          this.loadError = err;
+          if (!samePage) this.remoteKnown = false;
+          if (this.editing) ui.toast(T('item_editor_load_failed') + ': ' + err.message, 'error');
+          return false;
         }
-        const valid = remote && typeof remote === 'object' && String(remote.page || '') === page;
+        this.page = page;
+        this.remoteKnown = true;
+        this.loadError = null;
+        if (samePage && this.editing && this.state && this.state.dirty) {
+          // resync 会重建 Item 容器；保留本地文档并把样式重新绑定到新节点。
+          // revision 按原始 JSON 字节计算；这里进一步区分无害的键重排、同布局
+          // 并发保存/响应丢失，以及真正的远端修改。source fingerprint 保留未知
+          // 扩展字段，不能仅凭 normalize 后的文档静默覆盖它们。
+          const localState = itemLayoutCore.remoteSnapshot(this.state.doc, page);
+          const classification = itemLayoutCore.classifyRemoteChange({
+            baselineRevision: this.remoteRevision,
+            baselineSourceFingerprint: this.remoteSourceFingerprint,
+            remoteRevision: remote.revision,
+            remoteSourceFingerprint: remoteState.sourceFingerprint,
+            localSourceFingerprint: localState.sourceFingerprint,
+            remoteExists: remote.exists,
+            remoteValid: remoteState.valid,
+          });
+          this.conflict = classification === 'conflict';
+          if (classification === 'equivalent-baseline') {
+            this.persisted = remote.exists;
+            this.remoteRevision = remote.revision;
+            this.remoteFingerprint = remoteState.fingerprint;
+            this.remoteSourceFingerprint = remoteState.sourceFingerprint;
+          } else if (classification === 'matches-local') {
+            this.persisted = true;
+            this.remoteRevision = remote.revision;
+            this.remoteFingerprint = remoteState.fingerprint;
+            this.remoteSourceFingerprint = remoteState.sourceFingerprint;
+            this.state = itemLayoutCore.reduce(this.state, { type: 'markSaved', doc: this.state.doc });
+          }
+          this.syncRecords(); return !this.conflict;
+        }
         const selectedId = this.editing && this.state ? this.state.selectedId : '';
-        this.persisted = !!valid;
+        this.persisted = remote.exists;
+        this.remoteRevision = remote.revision;
+        this.remoteFingerprint = remoteState.fingerprint;
+        this.remoteSourceFingerprint = remoteState.sourceFingerprint;
         this.conflict = false;
-        this.state = itemLayoutCore.initial(page, this.seed(valid ? remote : itemLayoutCore.empty(page)));
+        this.state = itemLayoutCore.initial(page, this.seed(remoteState.valid ? remoteState.doc : itemLayoutCore.empty(page)));
         if (selectedId && this.state.doc.items[selectedId]) this.state = itemLayoutCore.reduce(this.state, { type: 'select', id: selectedId });
         this.apply();
         if (this.editing) this.render();
@@ -2308,7 +2512,7 @@
         const status = el('span', 'ihtml-item-editor-status');
         status.setAttribute('role', 'status');
         const save = el('button', 'primary', T('item_editor_save'));
-        save.onclick = () => { void this.save(); };
+        save.onclick = () => { void (this.conflict ? this.reloadConflict() : this.save()); };
         const done = el('button', '', T('item_editor_done'));
         done.onclick = () => { void this.finish(); };
         toolbar.append(title, modeGroup, history, status, save, done);
@@ -2388,7 +2592,11 @@
         panel.close(); chat.close(); grid.edit(false); templateStudio.close();
         if (!this.dom) this.build();
         const page = nav.currentPage || '';
-        if (this.page !== page || !this.state) await this.load();
+        if (!(await this.load()) || this.page !== page || !this.remoteKnown) {
+          const message = this.loadError && this.loadError.message || 'layout state is unavailable';
+          ui.toast(T('item_editor_load_failed') + ': ' + message, 'error');
+          return;
+        }
         this.page = page;
         this.ensureEditingState();
         this.previousFocus = doc.activeElement;
@@ -2396,6 +2604,8 @@
         this.originalNext = appEl.nextSibling;
         this.dom.stage.insertBefore(appEl, this.dom.overlay);
         this.dom.shell.hidden = false;
+        if (this.restoreIsolation) this.restoreIsolation();
+        this.restoreIsolation = isolateModalLayers(this.dom.shell);
         this.editing = true;
         rootEl.classList.add('ihtml-item-editing');
         this.apply();
@@ -2418,6 +2628,7 @@
           else this.originalParent.appendChild(appEl);
         }
         this.dom.shell.hidden = true;
+        if (this.restoreIsolation) { this.restoreIsolation(); this.restoreIsolation = null; }
         this.dom.overlay.hidden = true;
         this.originalParent = null; this.originalNext = null;
         this.apply();
@@ -2425,23 +2636,44 @@
         this.previousFocus = null;
       },
       async requestClose() {
+        if (this.interaction) this.cancelInteraction();
+        if (this.conflict && (!this.state || !this.state.dirty)) {
+          this.close(true);
+          await this.load();
+          return true;
+        }
         if (this.state && this.state.dirty) {
           const leave = await ui.confirm({ title: T('item_editor_unsaved'), text: T('item_editor_exit_hint'), okText: T('item_editor_discard') });
           if (!leave) return false;
-          this.close(true); return true;
+          this.close(true);
+          await this.load();
+          return true;
         }
         this.close(false); return true;
       },
       async finish() {
+        if (this.conflict) { ui.toast(T('item_editor_conflict'), 'warn'); return; }
         if (this.state && this.state.dirty && !(await this.save())) return;
         this.close(false);
+      },
+      async reloadConflict() {
+        if (!this.conflict || this.loading || this.saving || this.deleting) return false;
+        if (this.state && this.state.dirty) {
+          const discard = await ui.confirm({ title: T('item_editor_conflict'), text: T('item_editor_exit_hint'), okText: T('item_editor_reload') });
+          if (!discard) return false;
+        }
+        if (this.state) {
+          const selectedId = this.state.selectedId;
+          this.state = itemLayoutCore.reduce(this.state, { type: 'replace', page: this.page, doc: this.state.baseline });
+          if (selectedId) this.state = itemLayoutCore.reduce(this.state, { type: 'select', id: selectedId });
+        }
+        return this.load();
       },
       dispatch(action) {
         if (!this.state || this.loading || this.saving || this.deleting || this.interaction) return;
         const next = itemLayoutCore.reduce(this.state, action);
         if (next === this.state) return;
         this.state = next;
-        this.conflict = false;
         this.apply(); this.render();
       },
       select(id) {
@@ -2471,33 +2703,70 @@
         this.dispatch({ type: 'replaceDoc', doc: next, selectedId: this.state.selectedId });
       },
       async save() {
-        if (!this.state || !this.state.dirty || this.saving) return !this.state || !this.state.dirty;
+        if (!this.state || !this.state.dirty || this.loading || this.saving) return !this.state || !this.state.dirty;
+        if (!this.remoteKnown) {
+          ui.toast(T('item_editor_load_failed'), 'error');
+          return false;
+        }
         const page = this.page; const key = this.key(page); const snapshot = itemLayoutCore.normalize(this.state.doc, page);
         this.saving = true; this.render();
         try {
-          const latest = await kv.get(key, null);
-          if (page !== this.page) return false;
-          const remote = latest && typeof latest === 'object' && String(latest.page || '') === page ? itemLayoutCore.normalize(latest, page) : null;
-          const expected = this.persisted ? itemLayoutCore.normalize(this.state.baseline, page) : null;
-          if (JSON.stringify(remote) !== JSON.stringify(expected)) {
-            this.conflict = true; ui.toast(T('item_editor_conflict'), 'warn'); return false;
-          }
-          await kv.set(key, snapshot);
-          if (page !== this.page) return false;
+          const saved = await kv.compareAndSet(key, snapshot, this.remoteRevision);
+          if (page !== this.page || page !== (nav.currentPage || '')) return false;
           this.persisted = true; this.conflict = false;
+          this.remoteKnown = true;
+          this.remoteRevision = saved.revision;
+          const savedState = itemLayoutCore.remoteSnapshot(snapshot, page);
+          this.remoteFingerprint = savedState.fingerprint;
+          this.remoteSourceFingerprint = savedState.sourceFingerprint;
           this.state = itemLayoutCore.reduce(this.state, { type: 'markSaved', doc: snapshot });
+          // Item SSE may have added/removed content or changed its runtime slot
+          // while the CAS request was in flight. Reconcile the acknowledged
+          // layout with the live topology so an older request snapshot cannot
+          // make those Items disappear from the editor until another resync.
+          this.syncRecords();
           ui.toast(T('item_editor_saved'), 'success');
           return true;
         } catch (err) {
+          if (page !== this.page || page !== (nav.currentPage || '') || isStaleError(err) || err && err.name === 'AbortError') return false;
+          if (err && err.status === 409) {
+            const body = err.body && typeof err.body === 'object' ? err.body : {};
+            const currentRevision = String(body.current_revision || '');
+            const hasCurrent = Object.prototype.hasOwnProperty.call(body, 'current');
+            const remoteState = itemLayoutCore.remoteSnapshot(hasCurrent ? body.current : null, page);
+            const localState = itemLayoutCore.remoteSnapshot(snapshot, page);
+            if (body.exists === true && hasCurrent && validKVRevision(currentRevision) && currentRevision !== KV_MISSING_REVISION &&
+                remoteState.valid && remoteState.sourceFingerprint === localState.sourceFingerprint) {
+              // Another writer committed the exact document we intended to save.
+              // Treat it as convergence instead of forcing the user to discard it.
+              this.persisted = true;
+              this.conflict = false;
+              this.remoteKnown = true;
+              this.remoteRevision = currentRevision;
+              this.remoteFingerprint = remoteState.fingerprint;
+              this.remoteSourceFingerprint = remoteState.sourceFingerprint;
+              this.state = itemLayoutCore.reduce(this.state, { type: 'markSaved', doc: snapshot });
+              this.syncRecords();
+              ui.toast(T('item_editor_saved'), 'success');
+              return true;
+            }
+            this.conflict = true;
+            ui.toast(T('item_editor_conflict'), 'warn');
+            return false;
+          }
+          if (!err || !err.status || err.status >= 500) this.remoteChangePending = true;
           ui.toast(T('item_editor_save_failed') + ': ' + String(err && err.message || err), 'error');
           return false;
         } finally {
           this.saving = false; this.render();
+          if (this.remoteChangePending) {
+            this.remoteChangePending = false;
+            await this.load();
+          }
         }
       },
       async remoteChanged() {
-        if (this.saving) return;
-        if (this.state && this.state.dirty) { this.conflict = true; this.render(); return; }
+        if (this.saving) { this.remoteChangePending = true; return; }
         await this.load();
       },
       moveLayer(delta) {
@@ -2515,7 +2784,8 @@
         this.dispatch({ type: 'reorder', slot: item.slot, ids: list });
       },
       async deleteSelected() {
-        if (this.interaction || !this.state || !this.state.selectedId || this.deleting) return;
+        if (this.interaction || this.loading || !this.state || !this.state.selectedId || this.deleting) return;
+        if (this.conflict) { ui.toast(T('item_editor_conflict'), 'warn'); return; }
         const id = this.state.selectedId; const entry = this.entry(id);
         if (!entry) return;
         const global = !entry.rec.item.page;
@@ -2526,18 +2796,19 @@
         });
         if (!ok) return;
         const pendingState = itemLayoutCore.reduce(this.state, { type: 'requestRemove', id });
-        const removedState = itemLayoutCore.reduce(pendingState, { type: 'confirmRemove', id });
         this.state = pendingState; this.deleting = true; this.render();
         try {
+          // Commit any other layout edits first. DeleteItems then removes the
+          // Item and all of its persisted layout references in one server-side
+          // state transaction, so a layout conflict can never delete content.
+          if (this.state.dirty && !(await this.save())) {
+            this.state = itemLayoutCore.reduce(this.state, { type: 'cancelRemove' });
+            return;
+          }
           await items.delete(id);
-          this.state = removedState;
           removeItem(id);
+          await this.load();
           this.apply(); this.render();
-          const saved = !this.state.dirty || await this.save();
-          if (saved) {
-            this.state = itemLayoutCore.initial(this.page, this.state.doc);
-            this.apply(); this.render();
-          } else this.state = Object.assign({}, this.state, { past: [], future: [], selectedId: '' });
           ui.toast(T('item_editor_deleted'), 'success');
         } catch (err) {
           this.state = itemLayoutCore.reduce(this.state, { type: 'cancelRemove' });
@@ -2961,15 +3232,17 @@
           button.setAttribute('aria-checked', String(active)); button.tabIndex = active ? 0 : -1;
         }
         const interacting = !!this.interaction;
-        this.dom.undo.disabled = this.saving || this.deleting || interacting || !this.state.past.length;
-        this.dom.redo.disabled = this.saving || this.deleting || interacting || !this.state.future.length;
-        this.dom.save.disabled = this.saving || this.deleting || interacting || !this.state.dirty;
-        this.dom.done.disabled = this.saving || this.deleting || interacting;
-        for (const button of Object.values(this.dom.modeButtons)) button.disabled = this.saving || this.deleting || interacting;
-        this.dom.up.disabled = this.deleting || interacting; this.dom.down.disabled = this.deleting || interacting;
-        this.dom.remove.disabled = this.deleting || interacting;
-        this.dom.moveHandle.disabled = this.loading || this.saving || this.deleting;
-        this.dom.resizeHandle.disabled = this.loading || this.saving || this.deleting;
+        const busy = this.loading || this.saving || this.deleting;
+        this.dom.undo.disabled = busy || interacting || !this.state.past.length;
+        this.dom.redo.disabled = busy || interacting || !this.state.future.length;
+        this.dom.save.textContent = this.conflict ? T('item_editor_reload') : (this.saving ? T('item_editor_saving') : T('item_editor_save'));
+        this.dom.save.disabled = busy || interacting || (!this.conflict && !this.state.dirty);
+        this.dom.done.disabled = busy || interacting;
+        for (const button of Object.values(this.dom.modeButtons)) button.disabled = busy || interacting;
+        this.dom.up.disabled = busy || interacting; this.dom.down.disabled = busy || interacting;
+        this.dom.remove.disabled = this.conflict || busy || interacting;
+        this.dom.moveHandle.disabled = busy;
+        this.dom.resizeHandle.disabled = busy;
         this.dom.status.classList.toggle('warn', this.conflict);
         this.dom.status.classList.toggle('dirty', !this.conflict && this.state.dirty);
         this.dom.status.textContent = this.conflict ? T('item_editor_conflict') : (this.saving ? T('item_editor_saving') : (this.state.dirty ? T('item_editor_unsaved') : T('item_editor_saved')));
@@ -3053,25 +3326,26 @@
         if (this.state.doc.mode === 'free') layerRow.appendChild(numberField(T('item_editor_z'), 'free', 'z', item.free.z, 0, 999, ''));
         layer.appendChild(layerRow);
         const danger = section(T('item_editor_delete_title')); const remove = el('button', 'danger wide', T('item_editor_delete'));
-        remove.disabled = this.deleting; remove.onclick = () => { void this.deleteSelected(); }; danger.appendChild(remove);
+        remove.disabled = this.conflict || this.loading || this.deleting; remove.onclick = () => { void this.deleteSelected(); }; danger.appendChild(remove);
       },
       syncRecords() {
         if (!this.state || this.page !== (nav.currentPage || '')) return;
-        const doc2 = this.seed(this.state.doc); const baseline = this.seed(this.state.baseline);
-        const selectedId = doc2.items[this.state.selectedId] ? this.state.selectedId : Object.keys(doc2.items)[0] || '';
-        this.state = Object.assign({}, this.state, {
-          doc: doc2, baseline, selectedId,
-          dirty: JSON.stringify(doc2) !== JSON.stringify(baseline),
-        });
+        const liveDoc = this.seed(this.state.doc);
+        this.state = itemLayoutCore.reconcileState(this.state, liveDoc);
+        if (!this.state.selectedId) this.state = itemLayoutCore.reduce(this.state, { type: 'select', id: Object.keys(this.state.doc.items)[0] || '' });
         this.apply(); if (this.editing) this.render();
       },
       async reset() {
         if (readOnly || !itemLayoutCore) return false;
-        if (this.page !== (nav.currentPage || '') || !this.state) await this.load();
+        if (this.loading || this.saving || this.deleting || this.interaction) return false;
+        if (this.page !== (nav.currentPage || '') || !this.state || !this.remoteKnown) {
+          if (!(await this.load())) return false;
+        }
+        if (this.conflict) { ui.toast(T('item_editor_conflict'), 'warn'); return false; }
         const fresh = this.seed(itemLayoutCore.empty(this.page));
         const selectedId = fresh.items[this.state && this.state.selectedId] ? this.state.selectedId : Object.keys(fresh.items)[0] || '';
         this.state = itemLayoutCore.reduce(this.state || itemLayoutCore.initial(this.page), { type: 'replaceDoc', doc: fresh, selectedId });
-        this.conflict = false; this.apply(); if (this.editing) this.render();
+        this.apply(); if (this.editing) this.render();
         return this.save();
       },
       destroy() {
@@ -3081,6 +3355,12 @@
         this.close(true); this.clearParents();
         if (this.dom) this.dom.shell.remove();
         this.dom = null; this.state = itemLayoutCore ? itemLayoutCore.initial('') : null;
+        this.remoteKnown = false;
+        this.remoteRevision = KV_MISSING_REVISION;
+        this.remoteFingerprint = '';
+        this.remoteSourceFingerprint = 'missing';
+        this.remoteChangePending = false;
+        this.loadError = null;
       },
     };
 
@@ -3099,6 +3379,7 @@
       loadSeq: 0,
       idSeq: 0,
       draggedId: '',
+      interaction: null,
       previousFocus: null,
       page: '',
 
@@ -3110,6 +3391,8 @@
         if (!this.dom) this.build();
         this.previousFocus = doc.activeElement;
         this.dom.shell.hidden = false;
+        if (this.restoreIsolation) this.restoreIsolation();
+        this.restoreIsolation = isolateModalLayers(this.dom.shell);
         rootEl.classList.add('ihtml-template-open');
         this.dom.shell.focus();
         const nextPage = nav.currentPage || '';
@@ -3128,7 +3411,9 @@
       },
       close() {
         if (!this.dom || this.dom.shell.hidden) return;
+        if (this.interaction) this.cancelInteraction();
         this.dom.shell.hidden = true;
+        if (this.restoreIsolation) { this.restoreIsolation(); this.restoreIsolation = null; }
         rootEl.classList.remove('ihtml-template-open');
         if (this.previousFocus && this.previousFocus.isConnected && typeof this.previousFocus.focus === 'function') this.previousFocus.focus();
         this.previousFocus = null;
@@ -3139,6 +3424,7 @@
         return prefix + '-' + this.idSeq;
       },
       async load(page) {
+        if (this.interaction) this.cancelInteraction();
         const seq = ++this.loadSeq;
         this.loading = true;
         this.loadError = null;
@@ -3308,6 +3594,10 @@
       },
       render() {
         if (!this.dom || this.dom.shell.hidden) return;
+        // Remote updates or toolbar actions may render while a pointer is
+        // captured. End the preview first so window listeners never outlive
+        // the DOM nodes they target.
+        if (this.interaction) this.cancelInteraction();
         this.renderToolbar();
         this.dom.layers.textContent = '';
         this.dom.canvas.textContent = '';
@@ -3438,6 +3728,8 @@
         );
       },
       renderTreeRow(entry) {
+        const item = el('div', 'ihtml-template-tree-item');
+        item.dataset.selected = String(entry.id === this.state.selectedId);
         const row = el('button', 'ihtml-template-tree-row');
         row.type = 'button';
         row.dataset.templateId = entry.id;
@@ -3455,7 +3747,31 @@
         row.addEventListener('dragover', (ev) => { if (this.draggedId && this.draggedId !== entry.id) { ev.preventDefault(); ev.dataTransfer.dropEffect = 'move'; } });
         row.addEventListener('drop', (ev) => this.dropOnTree(ev, entry.id));
         row.addEventListener('keydown', (ev) => this.treeKey(ev, entry.id));
-        return row;
+        item.appendChild(row);
+        if (entry.id !== 'root') {
+          item.classList.add('has-actions');
+          const controls = el('div', 'ihtml-template-tree-actions');
+          controls.setAttribute('role', 'group');
+          controls.setAttribute('aria-label', T('template_reorder_actions', { title: entry.node.name }));
+          const actions = templateCore.reorderActions(this.state.doc, entry.id);
+          for (const [key, label, glyph] of [
+            ['up', T('template_move_up'), '↑'], ['down', T('template_move_down'), '↓'],
+            ['outdent', T('template_outdent'), '←'], ['indent', T('template_indent'), '→'],
+          ]) {
+            const button = el('button', '', glyph);
+            button.type = 'button';
+            button.title = label;
+            button.setAttribute('aria-label', label + ' · ' + entry.node.name);
+            button.disabled = !actions[key];
+            button.onclick = (ev) => {
+              ev.preventDefault(); ev.stopPropagation();
+              if (actions[key]) this.dispatch(actions[key], { focus: entry.id, focusKey: 'tree' });
+            };
+            controls.appendChild(button);
+          }
+          item.appendChild(controls);
+        }
+        return item;
       },
       dropOnTree(ev, targetId) {
         ev.preventDefault();
@@ -3599,9 +3915,10 @@
           }
         }
         if (interactive && id === this.state.selectedId && id !== 'root') {
-          const resize = el('button', 'ihtml-template-resize', '↘');
+          const widthOnly = !!parentLayout && parentLayout.mode === 'grid';
+          const resize = el('button', 'ihtml-template-resize' + (widthOnly ? ' width-only' : ''), widthOnly ? '↔' : '↘');
           resize.dataset.templateFocus = 'canvas-resize'; resize.dataset.templateId = id;
-          resize.setAttribute('aria-label', T('layout_resize', { title: node.name }));
+          resize.setAttribute('aria-label', T(widthOnly ? 'layout_resize_width' : 'layout_resize', { title: node.name }));
           resize.addEventListener('pointerdown', (ev) => this.beginResize(ev, id, box, breakpoint, parentLayout));
           resize.addEventListener('keydown', (ev) => {
             if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home'].includes(ev.key) || !parentLayout) return;
@@ -3642,65 +3959,157 @@
           if (frame.h) box.style.minHeight = frame.h + 'px';
         }
       },
-      beginMove(ev, id, box, breakpoint) {
-        if (ev.button !== 0) return;
-        ev.preventDefault();
-        const frame = templateCore.resolveFrame(this.state.doc.nodes[id], breakpoint);
-        const start = { x: ev.clientX, y: ev.clientY, left: frame.x || 0, top: frame.y || 0 };
-        const pointer = ev.pointerId;
-        const target = ev.currentTarget;
-        // Pointer capture may be unavailable for synthetic input or embedded
-        // webviews. Listen on the owning window as well so movement continues
-        // after the small handle itself is left.
-        const eventTarget = target.ownerDocument && target.ownerDocument.defaultView || target;
-        try { target.setPointerCapture(pointer); } catch { /* window fallback below */ }
-        const move = (event) => {
-          const x = Math.max(0, Math.round((start.left + event.clientX - start.x) / 8) * 8);
-          const y = Math.max(0, Math.round((start.top + event.clientY - start.y) / 8) * 8);
-          box.style.left = x + 'px'; box.style.top = y + 'px';
+      beginInteraction(ev, session) {
+        if (this.interaction) this.cancelInteraction();
+        const handle = ev.currentTarget;
+        if (!handle) return;
+        const pointerId = ev.pointerId;
+        const eventTarget = handle.ownerDocument && handle.ownerDocument.defaultView || window;
+        const start = { x: ev.clientX, y: ev.clientY };
+        session.pointerId = pointerId;
+        session.handle = handle;
+        session.latest = start;
+        session.active = false;
+        session.raf = 0;
+        session.threshold = ev.pointerType === 'touch' ? 8 : 4;
+        const movedEnough = (point) => templateCore.pointerMoved(
+          start,
+          session.axis === 'x' ? { x: point.x, y: start.y } : point,
+          session.threshold,
+        );
+        const activate = () => {
+          if (session.active || this.interaction !== session) return;
+          session.active = true;
+          rootEl.classList.add('ihtml-template-interacting', session.kind === 'move' ? 'ihtml-template-moving' : 'ihtml-template-resizing');
+          if (session.onActivate) session.onActivate();
+        };
+        const tick = () => {
+          session.raf = 0;
+          if (this.interaction !== session) return;
+          if (!session.active) {
+            if (!movedEnough(session.latest)) return;
+            activate();
+          }
+          if (session.onFrame) session.onFrame(session.latest);
+        };
+        const schedule = (moveEv) => {
+          if (this.interaction !== session || moveEv.pointerId !== pointerId) return;
+          if (moveEv.cancelable) moveEv.preventDefault();
+          session.latest = { x: moveEv.clientX, y: moveEv.clientY };
+          if (!session.raf) session.raf = requestAnimationFrame(tick);
         };
         const cleanup = () => {
-          eventTarget.removeEventListener('pointermove', move);
-          eventTarget.removeEventListener('pointerup', done);
-          eventTarget.removeEventListener('pointercancel', cancel);
+          eventTarget.removeEventListener('pointermove', schedule, true);
+          eventTarget.removeEventListener('pointerup', onUp, true);
+          eventTarget.removeEventListener('pointercancel', onCancel, true);
+          eventTarget.removeEventListener('blur', onBlur, true);
+          handle.removeEventListener('lostpointercapture', onLostCapture);
         };
-        const done = (event) => {
+        const finish = (commit, finishEv) => {
+          if (this.interaction !== session || finishEv && finishEv.pointerId !== pointerId) return;
+          if (commit && finishEv && Number.isFinite(finishEv.clientX) && Number.isFinite(finishEv.clientY)) {
+            session.latest = { x: finishEv.clientX, y: finishEv.clientY };
+          }
+          if (session.raf) { cancelAnimationFrame(session.raf); session.raf = 0; }
+          if (commit && !session.active && movedEnough(session.latest)) activate();
+          if (commit && session.active && session.onFrame) session.onFrame(session.latest);
+          const shouldCommit = !!(commit && session.active);
+          this.interaction = null;
           cleanup();
-          const x = Math.max(0, Math.round((start.left + event.clientX - start.x) / 8) * 8);
-          const y = Math.max(0, Math.round((start.top + event.clientY - start.y) / 8) * 8);
-          this.dispatch({ type: 'patchFrame', id, breakpoint, patch: { x, y } });
+          rootEl.classList.remove('ihtml-template-interacting', 'ihtml-template-moving', 'ihtml-template-resizing');
+          if (handle.releasePointerCapture) { try { handle.releasePointerCapture(pointerId); } catch { /* capture already gone */ } }
+          if (session.onFinish) session.onFinish(shouldCommit);
         };
-        const cancel = () => { cleanup(); this.render(); };
-        eventTarget.addEventListener('pointermove', move);
-        eventTarget.addEventListener('pointerup', done);
-        eventTarget.addEventListener('pointercancel', cancel);
+        const onUp = (upEv) => finish(true, upEv);
+        const onCancel = (cancelEv) => finish(false, cancelEv);
+        const onBlur = () => finish(false);
+        const onLostCapture = (lostEv) => { if (lostEv.pointerId === pointerId) finish(false, lostEv); };
+        session.finish = finish;
+        this.interaction = session;
+        if (handle.setPointerCapture) { try { handle.setPointerCapture(pointerId); } catch { /* window listeners remain the fallback */ } }
+        eventTarget.addEventListener('pointermove', schedule, { capture: true, passive: false });
+        eventTarget.addEventListener('pointerup', onUp, true);
+        eventTarget.addEventListener('pointercancel', onCancel, true);
+        eventTarget.addEventListener('blur', onBlur, true);
+        handle.addEventListener('lostpointercapture', onLostCapture);
+      },
+      cancelInteraction() {
+        if (this.interaction && this.interaction.finish) this.interaction.finish(false);
+      },
+      gridGeometry(parent, parentLayout) {
+        const styles = parent && parent.ownerDocument && parent.ownerDocument.defaultView
+          ? parent.ownerDocument.defaultView.getComputedStyle(parent)
+          : null;
+        const number = (value, fallback) => Number.isFinite(Number.parseFloat(value)) ? Number.parseFloat(value) : fallback;
+        return {
+          clientWidth: parent ? parent.clientWidth : 0,
+          paddingLeft: number(styles && styles.paddingLeft, Number(parentLayout && parentLayout.padding) || 0),
+          paddingRight: number(styles && styles.paddingRight, Number(parentLayout && parentLayout.padding) || 0),
+          gap: number(styles && (styles.columnGap || styles.gap), Number(parentLayout && parentLayout.gap) || 0),
+          columns: Math.max(1, Number(parentLayout && parentLayout.columns) || 12),
+        };
+      },
+      beginMove(ev, id, box, breakpoint) {
+        if (ev.button !== 0 || ev.isPrimary === false || !this.state || !this.state.doc.nodes[id]) return;
+        ev.preventDefault(); ev.stopPropagation();
+        const frame = templateCore.resolveFrame(this.state.doc.nodes[id], breakpoint);
+        const originalStyle = box.getAttribute('style');
+        const start = { x: ev.clientX, y: ev.clientY };
+        let next = { x: frame.x || 0, y: frame.y || 0 };
+        let changed = false;
+        const restore = () => {
+          if (originalStyle == null) box.removeAttribute('style'); else box.setAttribute('style', originalStyle);
+          box.classList.remove('pointer-preview');
+        };
+        this.beginInteraction(ev, {
+          kind: 'move',
+          onActivate: () => box.classList.add('pointer-preview'),
+          onFrame: (point) => {
+            next = templateCore.moveFrame(frame, { x: point.x - start.x, y: point.y - start.y }, 8);
+            changed = next.x !== (frame.x || 0) || next.y !== (frame.y || 0);
+            box.style.left = next.x + 'px'; box.style.top = next.y + 'px';
+          },
+          onFinish: (commit) => {
+            restore();
+            if (commit && changed) this.dispatch({ type: 'patchFrame', id, breakpoint, patch: next });
+          },
+        });
       },
       beginResize(ev, id, box, breakpoint, parentLayout) {
-        if (ev.button !== 0 || !parentLayout) return;
+        if (ev.button !== 0 || ev.isPrimary === false || !parentLayout || !box.parentElement || !this.state || !this.state.doc.nodes[id]) return;
         ev.preventDefault(); ev.stopPropagation();
         const frame = templateCore.resolveFrame(this.state.doc.nodes[id], breakpoint);
         const rect = box.getBoundingClientRect();
-        const startX = ev.clientX; const startY = ev.clientY;
-        const target = ev.currentTarget;
-        const eventTarget = target.ownerDocument && target.ownerDocument.defaultView || target;
-        try { target.setPointerCapture(ev.pointerId); } catch { /* synthetic pointer */ }
-        let patch = {};
-        const move = (event) => {
-          const width = Math.max(48, Math.round((rect.width + event.clientX - startX) / 8) * 8);
-          const height = Math.max(48, Math.round((rect.height + event.clientY - startY) / 8) * 8);
-          if (parentLayout.mode === 'grid') {
-            const parent = box.parentElement;
-            const colWidth = parent.clientWidth / Math.max(1, parentLayout.columns || 12);
-            patch = { span: Math.min(parentLayout.columns || 12, Math.max(1, Math.round(width / colWidth))), h: height };
-            box.style.gridColumn = 'span ' + patch.span;
-          } else patch = { w: width, h: height };
-          box.style.width = parentLayout.mode === 'grid' ? '' : width + 'px';
-          box.style.minHeight = height + 'px';
+        const start = { x: ev.clientX, y: ev.clientY };
+        const originalStyle = box.getAttribute('style');
+        const mode = parentLayout.mode;
+        const current = mode === 'grid'
+          ? { span: Math.min(parentLayout.columns || 12, frame.span || parentLayout.columns || 12) }
+          : { w: frame.w || Math.round(rect.width), h: frame.h || Math.round(rect.height) };
+        const geometry = this.gridGeometry(box.parentElement, parentLayout);
+        let next = current;
+        let changed = false;
+        const restore = () => {
+          if (originalStyle == null) box.removeAttribute('style'); else box.setAttribute('style', originalStyle);
+          box.classList.remove('pointer-preview');
         };
-        const cleanup = () => { eventTarget.removeEventListener('pointermove', move); eventTarget.removeEventListener('pointerup', done); eventTarget.removeEventListener('pointercancel', cancel); };
-        const done = () => { cleanup(); this.dispatch({ type: 'patchFrame', id, breakpoint, patch: Object.keys(patch).length ? patch : { w: frame.w || rect.width, h: frame.h || rect.height } }); };
-        const cancel = () => { cleanup(); this.render(); };
-        eventTarget.addEventListener('pointermove', move); eventTarget.addEventListener('pointerup', done); eventTarget.addEventListener('pointercancel', cancel);
+        this.beginInteraction(ev, {
+          kind: 'resize', axis: mode === 'grid' ? 'x' : '',
+          onActivate: () => box.classList.add('pointer-preview'),
+          onFrame: (point) => {
+            next = templateCore.resizeFrame(mode, rect, { x: point.x - start.x, y: point.y - start.y }, geometry, 8);
+            changed = Object.keys(next).some((key) => next[key] !== current[key]);
+            if (mode === 'grid') box.style.gridColumn = 'span ' + next.span;
+            else {
+              box.style.width = mode === 'free' ? next.w + 'px' : 'min(100%, ' + next.w + 'px)';
+              box.style.minHeight = next.h + 'px';
+            }
+          },
+          onFinish: (commit) => {
+            restore();
+            if (commit && changed) this.dispatch({ type: 'patchFrame', id, breakpoint, patch: next });
+          },
+        });
       },
       renderInspector() {
         const node = this.state.doc.nodes[this.state.selectedId] || this.state.doc.nodes.root;
@@ -3933,6 +4342,8 @@
         this.previousFocus = doc.activeElement;
         this.dom.mask.style.display = '';
         this.dom.box.style.display = '';
+        if (this.restoreIsolation) this.restoreIsolation();
+        this.restoreIsolation = isolateModalLayers([this.dom.mask, this.dom.box]);
         this.switch(tab || 'theme');
         const selected = this.dom.tabs.find((b) => b.getAttribute('aria-selected') === 'true');
         if (selected) selected.focus();
@@ -3941,6 +4352,7 @@
         if (!this.dom) return;
         this.dom.mask.style.display = 'none';
         this.dom.box.style.display = 'none';
+        if (this.restoreIsolation) { this.restoreIsolation(); this.restoreIsolation = null; }
         if (this.previousFocus && this.previousFocus.isConnected && typeof this.previousFocus.focus === 'function') this.previousFocus.focus();
         this.previousFocus = null;
       },
@@ -4297,37 +4709,262 @@
     }
     addDisposer(stopSSE);
 
-    /* ---------- 助手回复 HTML 白名单清洗 ---------- */
-    function sanitizeAssistantHTML(html) {
-      const ALLOW = new Set(['P', 'BR', 'HR', 'STRONG', 'EM', 'B', 'I', 'U', 'S', 'DEL', 'CODE', 'PRE',
-        'BLOCKQUOTE', 'UL', 'OL', 'LI', 'TABLE', 'THEAD', 'TBODY', 'TFOOT', 'TR', 'TH', 'TD',
-        'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'A', 'SPAN', 'DIV', 'SMALL', 'SUB', 'SUP']);
-      const DROP = new Set(['SCRIPT', 'STYLE', 'IFRAME', 'OBJECT', 'EMBED', 'LINK', 'META', 'FORM',
-        'INPUT', 'BUTTON', 'TEXTAREA', 'SELECT', 'SVG', 'MATH', 'TEMPLATE', 'BASE']);
-      const parsed = new DOMParser().parseFromString(String(html || ''), 'text/html');
-      function walk(srcNode, dst) {
-        for (const child of Array.from(srcNode.childNodes)) {
-          if (child.nodeType === Node.TEXT_NODE) { dst.appendChild(doc.createTextNode(child.nodeValue)); continue; }
-          if (child.nodeType !== Node.ELEMENT_NODE) continue;
-          const tag = child.tagName.toUpperCase();
-          if (DROP.has(tag)) continue;
-          if (!ALLOW.has(tag)) { walk(child, dst); continue; }
-          const node = doc.createElement(tag.toLowerCase());
-          if (tag === 'A') {
-            const href = String(child.getAttribute('href') || '');
-            if (/^(https?:|mailto:)/i.test(href)) {
-              node.setAttribute('href', href);
-              node.setAttribute('target', '_blank');
-              node.setAttribute('rel', 'noopener noreferrer');
-            }
-          }
-          dst.appendChild(node);
-          walk(child, node);
+    /* ---------- 助手回答画布：不可信 HTML 的 DOM 重建边界 ---------- */
+    const MAX_ASSISTANT_BYTES = chatContentCore.maxRenderBytes;
+    const MAX_ASSISTANT_NODES = 5000;
+    const MAX_ASSISTANT_DEPTH = 64;
+    const ASSISTANT_TAGS = new Set([
+      'P', 'BR', 'WBR', 'HR', 'STRONG', 'EM', 'B', 'I', 'U', 'S', 'DEL', 'INS', 'CODE', 'PRE',
+      'BLOCKQUOTE', 'UL', 'OL', 'LI', 'DL', 'DT', 'DD', 'TABLE', 'CAPTION', 'COLGROUP', 'COL',
+      'THEAD', 'TBODY', 'TFOOT', 'TR', 'TH', 'TD', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
+      'A', 'SPAN', 'DIV', 'SMALL', 'SUB', 'SUP', 'ARTICLE', 'SECTION', 'HEADER', 'FOOTER', 'ASIDE',
+      'FIGURE', 'FIGCAPTION', 'DETAILS', 'SUMMARY', 'TIME', 'MARK', 'KBD', 'SAMP', 'VAR', 'CITE',
+      'ABBR', 'Q', 'DATA', 'PROGRESS', 'METER', 'RUBY', 'RT', 'RP',
+    ]);
+    const ASSISTANT_DROP_TAGS = new Set([
+      'SCRIPT', 'STYLE', 'IFRAME', 'OBJECT', 'EMBED', 'LINK', 'META', 'FORM', 'FIELDSET', 'LEGEND',
+      'INPUT', 'BUTTON', 'TEXTAREA', 'SELECT', 'OPTION', 'OPTGROUP', 'SVG', 'MATH', 'TEMPLATE', 'BASE',
+      'IMG', 'PICTURE', 'SOURCE', 'VIDEO', 'AUDIO', 'CANVAS', 'NOSCRIPT', 'XMP', 'PLAINTEXT',
+    ]);
+    const ASSISTANT_STYLE_PROPERTIES = new Set([
+      'color', 'background-color', 'text-align', 'vertical-align', 'font-weight', 'font-style',
+      'font-size', 'line-height', 'letter-spacing', 'text-decoration-line', 'text-decoration-color',
+      'text-decoration-style', 'white-space', 'overflow-wrap', 'word-break', 'border-collapse',
+      'caption-side', 'margin', 'margin-top', 'margin-right', 'margin-bottom', 'margin-left', 'padding',
+      'padding-top', 'padding-right', 'padding-bottom', 'padding-left', 'border-width',
+      'border-top-width', 'border-right-width', 'border-bottom-width', 'border-left-width',
+      'border-style', 'border-top-style', 'border-right-style', 'border-bottom-style', 'border-left-style',
+      'border-color', 'border-top-color', 'border-right-color', 'border-bottom-color', 'border-left-color',
+      'border-radius', 'border-top-left-radius', 'border-top-right-radius', 'border-bottom-left-radius',
+      'border-bottom-right-radius',
+    ]);
+    function safeAssistantLengthToken(raw, limits, minimums) {
+      raw = String(raw || '').trim().toLowerCase();
+      if (raw === '0') return !minimums || !Object.values(minimums).some((value) => value > 0);
+      const match = /^(\d{1,4}(?:\.\d{1,4})?|\.\d{1,4})(px|em|rem|%|ch|ex)$/.exec(raw);
+      if (!match || !Object.prototype.hasOwnProperty.call(limits, match[2])) return false;
+      const number = Number(match[1]);
+      const minimum = minimums && minimums[match[2]] || 0;
+      return Number.isFinite(number) && number >= minimum && number <= limits[match[2]];
+    }
+    function safeAssistantLengthList(value, limits, minimums, maxParts = 4) {
+      const parts = String(value || '').trim().split(/\s+/);
+      return parts.length > 0 && parts.length <= maxParts && parts.every((part) => safeAssistantLengthToken(part, limits, minimums));
+    }
+    function supportsCSS(property, value) {
+      try { return !window.CSS || typeof window.CSS.supports !== 'function' || window.CSS.supports(property, value); }
+      catch { return false; }
+    }
+    function safeAssistantStyleValue(property, value) {
+      value = String(value || '').trim();
+      if (!value || value.length > 160 || /url\s*\(|@import|expression\s*\(|javascript:|data:|behavior\s*:|-moz-binding|var\s*\(|attr\s*\(|[{}<>]/i.test(value)) return false;
+      if (!supportsCSS(property, value)) return false;
+      if (property === 'color' || property === 'background-color' || property.endsWith('-color')) return value.length <= 120;
+      if (property === 'text-align') return /^(?:start|end|left|right|center|justify|match-parent)$/i.test(value);
+      if (property === 'vertical-align') return /^(?:baseline|sub|super|text-top|text-bottom|middle|top|bottom)$/i.test(value) ||
+        safeAssistantLengthList(value, { px: 24, em: 1.5, rem: 1.5 }, null, 1);
+      if (property === 'font-weight') return /^(?:normal|bold|bolder|lighter|[1-9]00|[1-9]\d{0,2}|1000)$/i.test(value);
+      if (property === 'font-style') return /^(?:normal|italic|oblique)$/i.test(value);
+      if (property === 'text-decoration-line') return /^(?:(?:none|underline|overline|line-through)(?:\s+|$)){1,3}$/i.test(value);
+      if (property === 'text-decoration-style') return /^(?:solid|double|dotted|dashed|wavy)$/i.test(value);
+      if (property === 'white-space') return /^(?:normal|pre|pre-wrap|pre-line|break-spaces)$/i.test(value);
+      if (property === 'overflow-wrap') return /^(?:normal|break-word|anywhere)$/i.test(value);
+      if (property === 'word-break') return /^(?:normal|break-all|keep-all|break-word)$/i.test(value);
+      if (property === 'border-collapse') return /^(?:collapse|separate)$/i.test(value);
+      if (property === 'caption-side') return /^(?:top|bottom)$/i.test(value);
+      if (property === 'font-size') return safeAssistantLengthList(value,
+        { px: 32, rem: 2 }, { px: 10, rem: 0.7 }, 1);
+      if (property === 'line-height') {
+        if (value === 'normal') return true;
+        if (/^(?:\d+(?:\.\d+)?|\.\d+)$/.test(value)) return Number(value) >= 0.8 && Number(value) <= 3;
+        return safeAssistantLengthList(value,
+          { px: 48, em: 3, rem: 3, '%': 300 }, { px: 10, em: 0.7, rem: 0.7, '%': 70 }, 1);
+      }
+      if (property === 'letter-spacing') return value === 'normal' || safeAssistantLengthList(value, { px: 4, em: 0.25, rem: 0.25 }, null, 1);
+      if (/^border(?:-(?:top|right|bottom|left))?-style$/.test(property)) return /^(?:(?:none|hidden|dotted|dashed|solid|double|groove|ridge|inset|outset)(?:\s+|$)){1,4}$/i.test(value);
+      if (/^border(?:-(?:top|right|bottom|left))?-width$/.test(property)) {
+        return /^(?:(?:thin|medium|thick)(?:\s+|$)){1,4}$/i.test(value) ||
+          safeAssistantLengthList(value, { px: 8, em: 0.5, rem: 0.5 });
+      }
+      if (/^border(?:-(?:top-left|top-right|bottom-left|bottom-right))?-radius$/.test(property)) {
+        return safeAssistantLengthList(value, { px: 64, em: 4, rem: 4, '%': 50 });
+      }
+      if (/^(?:margin|padding)(?:-(?:top|right|bottom|left))?$/.test(property)) {
+        return safeAssistantLengthList(value, { px: 64, em: 4, rem: 4, '%': 10 });
+      }
+      return false;
+    }
+    function copyAssistantStyle(source, target, allowed) {
+      if (!allowed) return;
+      const raw = String(source.getAttribute('style') || '');
+      if (!raw || raw.length > 2000 || /url\s*\(|@import|expression\s*\(|javascript:|data:|behavior\s*:|-moz-binding/i.test(raw)) return;
+      const style = source.style;
+      for (let index = 0; index < style.length; index++) {
+        const property = String(style[index] || '').toLowerCase();
+        if (!ASSISTANT_STYLE_PROPERTIES.has(property) || style.getPropertyPriority(property)) continue;
+        const value = style.getPropertyValue(property);
+        if (safeAssistantStyleValue(property, value)) target.style.setProperty(property, value);
+      }
+    }
+    function safeAssistantURL(raw) {
+      raw = String(raw || '').trim();
+      if (!raw || raw.length > 2048 || /[\u0000-\u001f\u007f]/.test(raw)) return '';
+      try {
+        const parsed = new URL(raw, location.href);
+        if (!['http:', 'https:', 'mailto:'].includes(parsed.protocol) || parsed.username || parsed.password) return '';
+        return parsed.href;
+      } catch { return ''; }
+    }
+    function safeInteger(raw, min, max) {
+      if (!/^-?\d+$/.test(String(raw || '').trim())) return '';
+      const value = Number(raw);
+      return Number.isSafeInteger(value) && value >= min && value <= max ? String(value) : '';
+    }
+    function safeNumber(raw) {
+      const value = Number(String(raw || '').trim());
+      return Number.isFinite(value) && Math.abs(value) <= 1000000 ? String(value) : '';
+    }
+    function copyAssistantAttributes(source, target, tag, allowStyle) {
+      const label = String(source.getAttribute('aria-label') || '').trim();
+      const title = String(source.getAttribute('title') || '').trim();
+      const lang = String(source.getAttribute('lang') || '').trim();
+      const dir = String(source.getAttribute('dir') || '').trim().toLowerCase();
+      if (label) target.setAttribute('aria-label', clip(label, 240));
+      if (title) target.setAttribute('title', clip(title, 240));
+      if (/^[A-Za-z]{1,8}(?:-[A-Za-z0-9]{1,8})*$/.test(lang)) target.setAttribute('lang', lang);
+      if (['ltr', 'rtl', 'auto'].includes(dir)) target.setAttribute('dir', dir);
+      copyAssistantStyle(source, target, allowStyle);
+
+      if (tag === 'A') {
+        const href = safeAssistantURL(source.getAttribute('href'));
+        if (href) {
+          target.setAttribute('href', href);
+          target.setAttribute('target', '_blank');
+          target.setAttribute('rel', 'noopener noreferrer nofollow');
         }
       }
-      const frag = doc.createDocumentFragment();
-      walk(parsed.body, frag);
-      return frag;
+      if (tag === 'BLOCKQUOTE' || tag === 'Q') {
+        const cite = safeAssistantURL(source.getAttribute('cite'));
+        if (cite) target.setAttribute('cite', cite);
+      }
+      if (tag === 'TH') {
+        const scope = String(source.getAttribute('scope') || '').toLowerCase();
+        if (['row', 'col', 'rowgroup', 'colgroup'].includes(scope)) target.setAttribute('scope', scope);
+      }
+      if (tag === 'TD' || tag === 'TH') {
+        for (const attr of ['colspan', 'rowspan']) {
+          const value = safeInteger(source.getAttribute(attr), 1, 100);
+          if (value) target.setAttribute(attr, value);
+        }
+      }
+      if (tag === 'COL' || tag === 'COLGROUP') {
+        const span = safeInteger(source.getAttribute('span'), 1, 100);
+        if (span) target.setAttribute('span', span);
+      }
+      if (tag === 'OL') {
+        const start = safeInteger(source.getAttribute('start'), -100000, 100000);
+        if (start) target.setAttribute('start', start);
+        if (source.hasAttribute('reversed')) target.setAttribute('reversed', '');
+      }
+      if (tag === 'LI') {
+        const value = safeInteger(source.getAttribute('value'), -100000, 100000);
+        if (value) target.setAttribute('value', value);
+      }
+      if (tag === 'DETAILS' && source.hasAttribute('open')) target.setAttribute('open', '');
+      if (tag === 'TIME') {
+        const datetime = String(source.getAttribute('datetime') || '').trim();
+        if (/^[0-9A-Za-z:+.,\-TZ ]{1,80}$/.test(datetime)) target.setAttribute('datetime', datetime);
+      }
+      if (tag === 'DATA') {
+        const value = String(source.getAttribute('value') || '').trim();
+        if (value) target.setAttribute('value', clip(value, 240));
+      }
+      if (tag === 'PROGRESS' || tag === 'METER') {
+        for (const attr of ['value', 'min', 'max', 'low', 'high', 'optimum']) {
+          if (!source.hasAttribute(attr)) continue;
+          const value = safeNumber(source.getAttribute(attr));
+          if (value) target.setAttribute(attr, value);
+        }
+      }
+    }
+    function appendAssistantTruncation(fragment) {
+      const note = el('p', 'ihtml-answer-truncated', T('answer_truncated'));
+      note.setAttribute('role', 'note');
+      fragment.appendChild(note);
+    }
+    function postprocessAssistantFragment(fragment) {
+      for (const table of Array.from(fragment.querySelectorAll('table'))) {
+        for (const heading of table.querySelectorAll('thead th:not([scope])')) heading.setAttribute('scope', 'col');
+        for (const row of table.querySelectorAll('tbody tr, tfoot tr')) {
+          const heading = row.querySelector(':scope > th:first-child:not([scope])');
+          if (heading) heading.setAttribute('scope', 'row');
+        }
+        const wrapper = el('div', 'ihtml-answer-table-wrap');
+        const caption = table.querySelector(':scope > caption');
+        wrapper.tabIndex = 0;
+        wrapper.setAttribute('role', 'region');
+        wrapper.setAttribute('aria-label', clip(table.getAttribute('aria-label') || caption && caption.textContent.trim() || T('answer_table'), 240));
+        table.parentNode.insertBefore(wrapper, table);
+        wrapper.appendChild(table);
+      }
+      for (const pre of fragment.querySelectorAll('pre')) {
+        pre.tabIndex = 0;
+        if (!pre.hasAttribute('aria-label')) pre.setAttribute('aria-label', T('answer_code'));
+      }
+      for (const link of fragment.querySelectorAll('a[href][target="_blank"]')) {
+        // A navigation target is always a compact inline affordance. Flatten
+        // block/line-break descendants so model HTML cannot turn one visible
+        // label into a large mostly-empty click region.
+        const compact = chatContentCore.compactLinkLabel(link.textContent, 320);
+        // Links are deliberately plain text. Keeping arbitrary descendants
+        // would let thousands of otherwise-empty inline/list boxes expand the
+        // hit area even when every copied style is safe.
+        link.replaceChildren(doc.createTextNode(compact.text));
+        if (!compact.visible) {
+          link.removeAttribute('href');
+          link.removeAttribute('target');
+          link.removeAttribute('rel');
+          link.removeAttribute('aria-label');
+          continue;
+        }
+        const label = link.getAttribute('aria-label') || link.textContent.trim();
+        if (label) link.setAttribute('aria-label', clip(label + ' · ' + T('opens_new_window'), 240));
+      }
+    }
+    function sanitizeAssistantHTML(html, forceTruncated) {
+      // Parsing inside template.content is inert and cannot start image/iframe
+      // fetches. DOMParser's detached HTML document is script-inert but may
+      // still fetch subresources before the DROP list gets a chance to run.
+      const template = doc.createElement('template');
+      template.innerHTML = String(html || '');
+      const state = { nodes: 0, truncated: !!forceTruncated };
+      function walk(source, target, depth, blockedByInteractiveAncestor) {
+        if (depth > MAX_ASSISTANT_DEPTH) { state.truncated = true; return; }
+        for (const child of Array.from(source.childNodes)) {
+          if (state.nodes >= MAX_ASSISTANT_NODES) { state.truncated = true; return; }
+          if (child.nodeType === Node.TEXT_NODE) {
+            target.appendChild(doc.createTextNode(child.nodeValue || ''));
+            state.nodes++;
+            continue;
+          }
+          if (child.nodeType !== Node.ELEMENT_NODE) continue;
+          const tag = child.tagName.toUpperCase();
+          if (ASSISTANT_DROP_TAGS.has(tag)) continue;
+          if (!ASSISTANT_TAGS.has(tag)) { walk(child, target, depth + 1, blockedByInteractiveAncestor); continue; }
+          const node = doc.createElement(tag.toLowerCase());
+          const blockStyle = blockedByInteractiveAncestor || tag === 'A' || tag === 'SUMMARY';
+          copyAssistantAttributes(child, node, tag, !blockStyle);
+          target.appendChild(node);
+          state.nodes++;
+          walk(child, node, depth + 1, blockStyle);
+          if (state.nodes >= MAX_ASSISTANT_NODES) { state.truncated = true; return; }
+        }
+      }
+      const fragment = doc.createDocumentFragment();
+      walk(template.content, fragment, 0, false);
+      postprocessAssistantFragment(fragment);
+      if (state.truncated) appendAssistantTruncation(fragment);
+      return fragment;
     }
 
     /* ---------- AI 对话抽屉 ---------- */
@@ -4373,18 +5010,73 @@
       const text = pretty(redactTechnical(value));
       return text.length > max ? text.slice(0, max) + '\n…' : text;
     }
-    function renderAssistant(text) {
-      let html = String(text || '');
-      if (!/<[a-z][^>]*>/i.test(html)) {
-        html = html
-          .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-          .replace(/```([\s\S]*?)```/g, (_, code) => '<pre>' + code.replace(/^\w*\n/, '') + '</pre>')
-          .replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>')
-          .replace(/`([^`\n]+)`/g, '<code>$1</code>')
-          .replace(/^[-•] (.+)$/gm, '· $1')
-          .replace(/\n/g, '<br>');
+    function renderAssistant(text, contentFormat, answer, truncated) {
+      const resolved = chatContentCore.resolveFormat(contentFormat, text);
+      if (answer) answer.dataset.contentFormat = resolved;
+      if (resolved === 'text') {
+        const fragment = doc.createDocumentFragment();
+        fragment.appendChild(doc.createTextNode(String(text || '')));
+        if (truncated) appendAssistantTruncation(fragment);
+        return fragment;
       }
-      return sanitizeAssistantHTML(html);
+      const html = resolved === 'html' ? String(text || '') : chatContentCore.markdownToHTML(text);
+      return sanitizeAssistantHTML(html, truncated);
+    }
+
+    function assistantNodePath(root, node) {
+      if (node === root) return [];
+      const path = [];
+      for (let current = node; current && current !== root && path.length <= MAX_ASSISTANT_DEPTH; current = current.parentNode) {
+        const parent = current.parentNode;
+        if (!parent) return null;
+        path.unshift(Array.prototype.indexOf.call(parent.childNodes, current));
+      }
+      return path.length && root.contains(node) ? path : null;
+    }
+
+    function assistantNodeAtPath(root, path) {
+      let node = root;
+      for (const index of Array.isArray(path) ? path : []) {
+        if (!node || !node.childNodes || index < 0 || index >= node.childNodes.length) return null;
+        node = node.childNodes[index];
+      }
+      return node;
+    }
+
+    function captureAssistantView(answer) {
+      const state = { details: [], scroll: [], focus: null };
+      if (!answer) return state;
+      for (const node of Array.from(answer.querySelectorAll('details')).slice(0, 64)) {
+        state.details.push({ path: assistantNodePath(answer, node), open: node.open });
+      }
+      for (const node of [answer, ...Array.from(answer.querySelectorAll('*')).slice(0, MAX_ASSISTANT_NODES)]) {
+        if (state.scroll.length >= 64) break;
+        if (node.scrollTop || node.scrollLeft) state.scroll.push({ path: assistantNodePath(answer, node), top: node.scrollTop, left: node.scrollLeft });
+      }
+      if (doc.activeElement && answer.contains(doc.activeElement)) state.focus = assistantNodePath(answer, doc.activeElement);
+      return state;
+    }
+
+    function replaceAssistantPreservingView(answer, fragment) {
+      const state = captureAssistantView(answer);
+      answer.replaceChildren(fragment);
+      for (const detail of state.details) {
+        const node = assistantNodeAtPath(answer, detail.path);
+        if (node && node.nodeType === Node.ELEMENT_NODE && node.tagName === 'DETAILS') node.open = detail.open;
+      }
+      for (const scroll of state.scroll) {
+        const node = assistantNodeAtPath(answer, scroll.path);
+        if (node && typeof node.scrollTo === 'function') node.scrollTo(scroll.left, scroll.top);
+        else if (node) { node.scrollLeft = scroll.left; node.scrollTop = scroll.top; }
+      }
+      const focus = assistantNodeAtPath(answer, state.focus);
+      if (focus && typeof focus.focus === 'function') focus.focus({ preventScroll: true });
+    }
+
+    function cancelAssistantRender(turn) {
+      if (!turn || !turn.renderFrame) return;
+      clearTimeout(turn.renderFrame);
+      turn.renderFrame = 0;
     }
 
     // 稳定会话号: 存 sessionStorage, 断线/刷新重连恢复上下文; 新会话=换号
@@ -4423,13 +5115,15 @@
       turnsByRun: new Map(),
       toolDomSeq: 0,
       scrollFrame: 0,
+      composerResizeFrame: 0,
       announcementTimer: 0,
       lastAnnouncement: '',
       announcementQueue: [],
       announcementBusy: false,
       everConnected: false,
       previousFocus: null,
-      obscuredStudio: null,
+      restoreIsolation: null,
+      confirmationBusy: null,
 
       init(cfg) {
         this.enabled = !!(cfg && cfg.chat);
@@ -4454,14 +5148,10 @@
         panel.close();
         if (!this.dom) this.build();
         this.previousFocus = doc.activeElement;
-        const studioShell = templateStudio.dom && templateStudio.dom.shell;
-        if (studioShell && !studioShell.hidden) {
-          studioShell.inert = true;
-          studioShell.setAttribute('aria-hidden', 'true');
-          this.obscuredStudio = studioShell;
-        }
         this.dom.mask.style.display = '';
         this.dom.panel.style.display = '';
+        if (this.restoreIsolation) this.restoreIsolation();
+        this.restoreIsolation = isolateModalLayers([this.dom.mask, this.dom.panel]);
         rootEl.classList.add('ihtml-chat-open');
         this.dom.input.focus();
         if (!this.modelInfo) void this.loadModels().catch((err) => {
@@ -4473,11 +5163,7 @@
         this.dom.mask.style.display = 'none';
         this.dom.panel.style.display = 'none';
         rootEl.classList.remove('ihtml-chat-open');
-        if (this.obscuredStudio) {
-          this.obscuredStudio.inert = false;
-          this.obscuredStudio.removeAttribute('aria-hidden');
-          this.obscuredStudio = null;
-        }
+        if (this.restoreIsolation) { this.restoreIsolation(); this.restoreIsolation = null; }
         if (this.previousFocus && this.previousFocus.isConnected && typeof this.previousFocus.focus === 'function') this.previousFocus.focus();
         this.previousFocus = null;
       },
@@ -4612,6 +5298,13 @@
         rootEl.append(mask, panelEl);
         this.dom = { mask, panel: panelEl, log, foot, input, sendBtn, providerBadge, modelInput, dataList, freshBtn, toolbar, modebar, modeButtons, modeHint, live, readonlyBadge };
         this.log = log;
+        on(window, 'resize', () => {
+          if (this.composerResizeFrame) return;
+          this.composerResizeFrame = requestAnimationFrame(() => {
+            this.composerResizeFrame = 0;
+            if (!destroyed && this.dom) this.resizeComposer();
+          });
+        });
         this.resizeComposer(); this.syncChatControls();
         this.notice(T('welcome'));
       },
@@ -4654,17 +5347,19 @@
         }, 20);
       },
 
-      setAvailabilityNote(show) {
+      setAvailabilityNote(show, preview = false) {
         if (!this.log) return;
         if (!show) {
           if (this.availabilityNote) this.availabilityNote.remove();
           this.availabilityNote = null;
           return;
         }
+        const message = T(preview ? 'ai_preview' : 'ai_unavailable');
         if (!this.availabilityNote || !this.availabilityNote.isConnected) {
-          this.availabilityNote = el('div', 'ihtml-sysnote ihtml-ai-unavailable', T('ai_unavailable'));
+          this.availabilityNote = el('div', 'ihtml-sysnote ihtml-ai-unavailable', message);
           this.log.appendChild(this.availabilityNote);
-        } else this.availabilityNote.textContent = T('ai_unavailable');
+        } else this.availabilityNote.textContent = message;
+        this.availabilityNote.classList.toggle('ihtml-ai-preview', preview);
         this.scroll();
       },
       setAgentMode(mode, persist) {
@@ -4712,12 +5407,15 @@
           button.disabled = busy || !this.agentModes.includes(mode);
         }
         if (this.log) {
+          const confirmationBusy = busy || !!this.confirmationBusy;
           for (const message of Array.from(this.log.children)) {
             const owner = message._turn;
             if (!owner) continue;
             for (const rec of owner.tools.values()) {
               if (rec.status !== 'pending') continue;
-              const disabled = busy && owner !== this.turn;
+              const disabled = confirmationBusy || !!rec.cancelPending || !!rec.confirmPending;
+              rec.card.classList.toggle('confirmation-busy', disabled);
+              rec.body.setAttribute('aria-busy', String(!!rec.cancelPending || !!rec.confirmPending));
               rec.body.querySelectorAll('.t-actions button').forEach((button) => { button.disabled = disabled; });
             }
           }
@@ -4766,7 +5464,8 @@
           let savedMode = '';
           try { savedMode = localStorage.getItem(storageKey('agent_mode')) || ''; } catch { /* 忽略 */ }
           this.setAgentMode(chatAgentCore.selectMode(this.agentModes, savedMode || this.agentMode), true);
-          this.setAvailabilityNote(info.model_ready === false);
+          const previewOnly = info.preview_only === true;
+          this.setAvailabilityNote(previewOnly || info.model_ready === false, previewOnly);
           this.syncChatControls();
           return info;
         })();
@@ -4832,6 +5531,9 @@
               if (generation !== this.wsGeneration || this.ws !== ws) return;
               this.ws = null;
               this.wsPromise = null;
+              if (this.confirmationBusy && this.confirmationBusy.cancelPending && this.confirmationBusy.cancelSent) {
+                this.failCancellation(this.confirmationBusy, T('cancellation_ack_timeout'), true);
+              }
               if (this.dom && !destroyed) this.systemNote(T('chat_disconnected'));
               if (this.active && this.turn && !this.turn.done) this.turnError(T('chat_disconnected'));
               else this.setActive(false);
@@ -4860,6 +5562,7 @@
       reset() {
         this.sendGeneration++;
         this.sending = false;
+        this.confirmationBusy = null;
         this.disconnect();
         chatSessionID(true); // 换会话号 = 服务端上下文重开
         this.clearTurnTimers();
@@ -4870,11 +5573,15 @@
         this.everConnected = false;
         this.setActive(false);
         this.notice(T('session_reset'));
-        if (this.modelInfo && this.modelInfo.model_ready === false) this.setAvailabilityNote(true);
+        if (this.modelInfo && (this.modelInfo.preview_only === true || this.modelInfo.model_ready === false)) {
+          this.setAvailabilityNote(true, this.modelInfo.preview_only === true);
+        }
       },
       clearTurnTimers() {
         if (this.scrollFrame) cancelAnimationFrame(this.scrollFrame);
         this.scrollFrame = 0;
+        if (this.composerResizeFrame) cancelAnimationFrame(this.composerResizeFrame);
+        this.composerResizeFrame = 0;
         clearTimeout(this.announcementTimer);
         this.announcementTimer = 0;
         this.lastAnnouncement = '';
@@ -4884,8 +5591,7 @@
         for (const card of Array.from(this.log.children)) {
           const turn = card._turn;
           if (!turn) continue;
-          if (turn.renderFrame) cancelAnimationFrame(turn.renderFrame);
-          turn.renderFrame = 0;
+          cancelAssistantRender(turn);
           for (const segment of (turn.thinkingSegments || new Map()).values()) {
             if (segment.frame) cancelAnimationFrame(segment.frame);
             segment.frame = 0;
@@ -4893,6 +5599,8 @@
           for (const rec of turn.tools.values()) {
             if (rec.countdown) clearInterval(rec.countdown);
             rec.countdown = 0;
+            if (rec.cancelAckTimer) clearTimeout(rec.cancelAckTimer);
+            rec.cancelAckTimer = 0;
           }
         }
       },
@@ -4900,6 +5608,7 @@
         this.sendGeneration++;
         this.modelLoadSeq++;
         this.sending = false;
+        this.confirmationBusy = null;
         this.clearTurnTimers();
         this.disconnect();
         this.modelInfo = null;
@@ -5154,10 +5863,10 @@
           card, process, processSummary: summary, processDot, note, pBody, answer,
           agentMode: chatAgentCore.selectMode(this.agentModes, agentMode),
           agentState: chatAgentCore.initialState(agentMode), agentOverview: null,
-          text: '', lastKind: '', lastStatusNode: null,
+          text: '', textBytes: 0, textTruncated: false, contentFormat: 'auto', lastKind: '', lastStatusNode: null,
           tools: new Map(), toolCount: 0, pendingCount: 0, errorCount: 0, done: false,
           turnFailed: false,
-          runSeq: new Map(), acceptNextRun: false, renderFrame: 0,
+          runSeq: new Map(), acceptNextRun: false, renderFrame: 0, lastRenderAt: 0,
           cancelled: false, confirmingTool: false,
           thinkingSegments: new Map(), activeThinkingID: '', legacyThinkingSeq: 0,
           anonymousToolQueues: new Map(), anonymousToolAliases: new Map(), anonymousToolSeq: 0,
@@ -5195,17 +5904,17 @@
       finishCancelled(t) {
         if (!t || t.done) { this.setActive(false); return; }
         t.cancelled = true;
-        if (t.renderFrame) cancelAnimationFrame(t.renderFrame);
-        t.renderFrame = 0;
-        if (t.text) t.answer.replaceChildren(renderAssistant(t.text));
+        cancelAssistantRender(t);
+        if (t.text || t.textTruncated) replaceAssistantPreservingView(t.answer, renderAssistant(t.text, t.contentFormat, t.answer, t.textTruncated));
         t.answer.classList.remove('streaming');
         this.clearTransientStatus(t);
         this.finalizeThinking(t);
         for (const rec of t.tools.values()) {
-          if (rec.status !== 'running' && rec.status !== 'pending') continue;
-          this.setToolStatus(rec, 'cancelled', t);
+          const nextStatus = chatAgentCore.statusAfterTurnStop(rec.status);
+          if (nextStatus === rec.status) continue;
+          this.setToolStatus(rec, nextStatus, t);
           this.releaseAnonymousTool(t, rec.id);
-          rec.lastEvent = Object.assign({}, rec.lastEvent, { tool_summary: T('turn_stopped') });
+          rec.lastEvent = Object.assign({}, rec.lastEvent, { tool_summary: T('turn_stop_unknown') });
           this.renderToolRecord(rec, rec.lastEvent, t);
         }
         if (!t.pBody.childNodes.length) this.appendStatus(T('turn_stopped'), false, t);
@@ -5352,21 +6061,49 @@
         this.updateProcess(t);
         this.scroll();
       },
-      appendDelta(delta, t = this.turn) {
-        if (!t || !delta) return;
+      appendDelta(delta, contentFormat, t = this.turn) {
+        if (!t) return;
+        t.contentFormat = chatContentCore.mergeFormat(t.contentFormat, contentFormat, false);
+        if (!delta || t.textTruncated) return;
         this.clearTransientStatus(t);
         // 正文和 reasoning 可能交错到达。正文开始只收起视觉详情，真正的
         // “分析完成”必须等待 thinking_done、工具边界或本轮终态。
         this.collapseThinking(t);
-        t.text += delta;
+        const limited = chatContentCore.clipUTF8(delta, Math.max(0, MAX_ASSISTANT_BYTES - t.textBytes));
+        t.text += limited.text;
+        t.textBytes += limited.bytes;
+        if (limited.truncated) t.textTruncated = true;
         t.answer.style.display = '';
         t.answer.classList.add('streaming');
         if (!t.renderFrame) {
-          t.renderFrame = requestAnimationFrame(() => {
+          const clock = typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now();
+          const delay = chatAgentCore.streamRenderDelay(t.lastRenderAt, clock, 80);
+          t.renderFrame = setTimeout(() => {
             t.renderFrame = 0;
-            if (!t.done) t.answer.textContent = t.text;
-          });
+            if (t.done) return;
+            t.lastRenderAt = typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now();
+            // Render at a bounded cadence and restore user-owned disclosure,
+            // scroll and focus state after rebuilding the sanitized fragment.
+            replaceAssistantPreservingView(t.answer, renderAssistant(t.text, t.contentFormat, t.answer, t.textTruncated));
+          }, delay);
         }
+        t.lastKind = 'answer';
+        this.updateProcess(t);
+        this.scroll();
+      },
+      resetAssistant(ev, t = this.turn) {
+        if (!t || t.done) return;
+        cancelAssistantRender(t);
+        t.text = '';
+        t.textBytes = 0;
+        t.textTruncated = false;
+        t.contentFormat = chatContentCore.mergeFormat('auto', ev && ev.content_format, true);
+        t.answer.replaceChildren();
+        t.answer.classList.remove('streaming');
+        t.answer.removeAttribute('data-content-format');
+        t.answer.style.display = 'none';
+        t.process.open = true;
+        if (t.lastKind === 'answer') t.lastKind = '';
         this.updateProcess(t);
         this.scroll();
       },
@@ -5399,6 +6136,7 @@
         if (state.budget) {
           budgetText.push(T('agent_model_budget', { used: budget.modelCalls, max: budget.maxModelCalls || '∞' }));
           budgetText.push(T('agent_subtask_budget', { used: budget.subtasks, max: budget.maxSubtasks || '∞' }));
+          budgetText.push(T('agent_tool_budget', { used: budget.toolCalls, max: budget.maxToolCalls || '∞' }));
         }
         const completed = state.plan.filter((item) => item.status === 'completed').length;
         const summaryBits = [];
@@ -5410,7 +6148,9 @@
         if (state.plan.length) summaryBits.push(T('agent_plan') + ' ' + completed + '/' + state.plan.length);
         const budgetNearLimit = state.budget && (
           budget.maxModelCalls > 0 && budget.modelCalls / budget.maxModelCalls >= 0.8 ||
-          budget.maxSubtasks > 0 && budget.subtasks / budget.maxSubtasks >= 0.8
+          budget.maxSubtasks > 0 && budget.subtasks / budget.maxSubtasks >= 0.8 ||
+          budget.maxToolCalls > 0 && budget.toolCalls / budget.maxToolCalls >= 0.8 ||
+          !!budget.toolBudgetCode
         );
         if (budgetNearLimit && budgetText.length) summaryBits.push(budgetText.join(' · '));
         if (state.manualPaused) summaryBits.push(T('agent_plan_paused'));
@@ -5474,16 +6214,27 @@
         }
         const source = view && typeof view === 'object' ? view : {};
         const body = call && call.body && typeof call.body === 'object' ? call.body : {};
+        const safeVisible = (value, limit) => {
+          if (chatTraceCore && typeof chatTraceCore.safeText === 'function') {
+            try { return chatTraceCore.safeText(value, limit); } catch { /* use fail-closed fallback */ }
+          }
+          const redacted = String(value == null ? '' : value)
+            .replace(/\bBearer\s+[^\s,;]+/gi, 'Bearer [redacted]')
+            .replace(/((?:authorization|confirmation[_-]?token|access[_-]?token|refresh[_-]?token|auth[_-]?token|session[_-]?(?:id|key|token)|private[_-]?key|client[_-]?secret|api[_-]?key|password|secret|cookie)\s*["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;&}]+)/gi, '$1[redacted]')
+            .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, '');
+          return clip(redacted, limit);
+        };
         const fallbackFacts = [];
         if (Array.isArray(body.items)) fallbackFacts.push({ label: 'Items', value: body.items.map((item) => item && item.id).filter(Boolean).join(', ') });
         else if (Array.isArray(body.ids)) fallbackFacts.push({ label: 'Items', value: body.ids.join(', ') });
         else if (body.id) fallbackFacts.push({ label: 'ID', value: body.id });
         return {
-          title: clip(String(source.title || ev.tool_title || call.title || ev.tool_name || call.name || 'tool'), 160),
-          action: clip(String(source.action || ''), 320),
-          summary: clip(String(source.summary || ev.tool_summary || ''), 500),
+          title: safeVisible(source.title || ev.tool_title || call.title || ev.tool_name || call.name || 'tool', 160),
+          action: safeVisible(source.action || '', 320),
+          summary: safeVisible(source.summary || (!view && ev.tool_summary) || '', 500),
+          reason: safeVisible(source.reason || (!view && call.reason) || '', 500),
           facts: (Array.isArray(source.facts) ? source.facts : fallbackFacts).slice(0, 8).map((fact) => ({
-            label: clip(String(fact && fact.label || ''), 80), value: clip(String(fact && fact.value || ''), 320),
+            label: safeVisible(fact && fact.label || '', 80), value: safeVisible(fact && fact.value || '', 320),
           })).filter((fact) => fact.label && fact.value),
           request: source.request !== undefined ? source.request : { method: call.method, path: call.path, query: call.query, body: call.body },
           result: source.result !== undefined ? source.result : ev.tool_result,
@@ -5525,26 +6276,41 @@
         const view = this.toolView(rec.call, ev || {});
         rec.view = view;
         rec.title.textContent = view.title;
-        const resultSummary = clip(String(ev && ev.tool_summary || view.summary || view.action || ''), 500);
+        // toolView is the single redaction boundary for every visible field.
+        // Never prefer raw protocol values again in this DOM projection.
+        const resultSummary = view.summary || view.action || '';
         rec.note.textContent = resultSummary;
         rec.body.replaceChildren();
         rec.body.removeAttribute('role');
         rec.body.removeAttribute('aria-labelledby');
         rec.body.removeAttribute('aria-describedby');
+        rec.body.setAttribute('aria-busy', String(!!rec.cancelPending || !!rec.confirmPending));
+        rec.card.classList.toggle('confirmation-busy', !!rec.cancelPending || !!rec.confirmPending);
+        if (rec.cancelPending) {
+          rec.chip.textContent = T('tool_cancelling');
+          rec.chip.className = 'ihtml-chip t-status running';
+        }
 
-        const primaryText = rec.status === 'pending'
+        const primaryText = rec.cancelPending
+          ? T('cancellation_waiting')
+          : (rec.confirmPending ? T('confirmation_connecting') : (rec.status === 'pending'
           ? (view.action || resultSummary)
-          : (resultSummary || view.action);
+          : (resultSummary || view.action)));
         let primary = null;
         if (primaryText) {
           primary = el('div', 't-primary' + (rec.status === 'success' || rec.status === 'error' ? ' t-live-result' : ''), primaryText);
           primary.id = rec.domID + '-primary';
           rec.body.appendChild(primary);
         }
-        if (rec.status === 'pending' && rec.call.reason) {
+        if (rec.status === 'pending' && view.reason) {
           const reason = el('div', 't-reason');
-          reason.append(el('strong', '', T('tool_reason')), doc.createTextNode(String(rec.call.reason)));
+          reason.append(el('strong', '', T('tool_reason')), doc.createTextNode(view.reason));
           rec.body.appendChild(reason);
+        }
+        if (rec.interactionError) {
+          const failure = el('div', 't-reason t-interaction-error', rec.interactionError);
+          failure.setAttribute('role', 'alert');
+          rec.body.appendChild(failure);
         }
         if (view.facts.length) {
           const facts = el('dl', 't-facts');
@@ -5607,6 +6373,9 @@
           const noBtn = el('button', '', T('dismiss_tool'));
           okBtn.setAttribute('aria-label', T('confirm_this_action') + ' · ' + view.title);
           noBtn.setAttribute('aria-label', T('dismiss_tool') + ' · ' + view.title);
+          const interactionBusy = !!this.confirmationBusy || this.active || this.sending || !!rec.cancelPending || !!rec.confirmPending;
+          okBtn.disabled = interactionBusy;
+          noBtn.disabled = interactionBusy;
           okBtn.onclick = (event) => { event.preventDefault(); okBtn.disabled = true; noBtn.disabled = true; this.confirmTool(rec); };
           noBtn.onclick = (event) => { event.preventDefault(); okBtn.disabled = true; noBtn.disabled = true; this.cancelTool(rec); };
           bar.append(okBtn, noBtn);
@@ -5669,7 +6438,11 @@
           const body = el('div', 'tbody');
           card.append(summary, body);
           t.pBody.appendChild(card);
-          rec = { id, card, summary, chip, title, note, body, domID, call, status: '', ownerTurn: t, countedPending: false, countedError: false, countdown: 0, lastEvent: {} };
+          rec = {
+            id, card, summary, chip, title, note, body, domID, call, status: '', ownerTurn: t,
+            countedPending: false, countedError: false, countdown: 0, cancelAckTimer: 0,
+            cancelPending: false, cancelSent: false, confirmPending: false, interactionError: '', lastEvent: {},
+          };
           t.tools.set(id, rec);
           t.toolCount++;
         }
@@ -5697,22 +6470,43 @@
         this.updateProcess(t);
         this.scroll();
       },
-      confirmTool(rec) {
+      async confirmTool(rec) {
         if (!rec || rec.status !== 'pending') return;
-        if ((this.active || this.sending) && this.turn !== rec.ownerTurn) {
-          rec.body.querySelectorAll('.t-actions button').forEach((button) => { button.disabled = true; });
+        if (this.active || this.sending || this.confirmationBusy) {
+          this.syncChatControls();
           ui.toast(T('confirmation_busy'), 'warn');
           this.announce(T('confirmation_busy'));
           return;
         }
-        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-          rec.body.querySelectorAll('.t-actions button').forEach((button) => { button.disabled = false; });
-          ui.toast(T('ws_lost'), 'error');
+        this.confirmationBusy = rec;
+        rec.confirmPending = true;
+        rec.interactionError = '';
+        this.renderToolRecord(rec, rec.lastEvent, rec.ownerTurn);
+        this.syncChatControls();
+        let ws;
+        try {
+          ws = await this.ensureWS();
+          if (this.confirmationBusy !== rec || rec.status !== 'pending') return;
+          ws.send(JSON.stringify({ type: 'confirm_tool', tool_call: rec.call }));
+        } catch {
+          if (this.confirmationBusy !== rec) return;
+          this.confirmationBusy = null;
+          rec.confirmPending = false;
+          rec.interactionError = T('confirmation_send_failed');
+          this.renderToolRecord(rec, rec.lastEvent, rec.ownerTurn);
+          this.syncChatControls();
+          ui.toast(T('confirmation_send_failed'), 'error');
           return;
         }
+        this.confirmationBusy = null;
+        rec.confirmPending = false;
         const t = rec.ownerTurn;
         this.turn = t;
         t.done = false;
+        // A preserved confirmation card is an independent, explicit user
+        // action. Confirming it after a normal turn stop starts a new tool run
+        // and should no longer project the owner turn as merely stopped.
+        t.cancelled = false;
         t.acceptNextRun = true;
         t.confirmingTool = true;
         this.setToolStatus(rec, 'running', t);
@@ -5722,17 +6516,99 @@
         this.setActive(true);
         this.updateProcess(t);
         queueMicrotask(() => { if (rec.summary.isConnected) rec.summary.focus({ preventScroll: true }); });
-        this.ws.send(JSON.stringify({ type: 'confirm_tool', tool_call: rec.call }));
       },
-      cancelTool(rec) {
+      async cancelTool(rec) {
         if (!rec || rec.status !== 'pending') return;
+        if (this.active || this.sending || this.confirmationBusy) {
+          this.syncChatControls();
+          ui.toast(T('confirmation_busy'), 'warn');
+          this.announce(T('confirmation_busy'));
+          return;
+        }
+        const t = rec.ownerTurn;
+        const cancelEvent = chatAgentCore.cancelToolEvent(rec.call);
+        this.confirmationBusy = rec;
+        rec.cancelPending = true;
+        rec.cancelSent = false;
+        rec.interactionError = '';
+        this.renderToolRecord(rec, rec.lastEvent, t);
+        this.syncChatControls();
+        try {
+          const ws = await this.ensureWS();
+          if (this.confirmationBusy !== rec || rec.status !== 'pending') return;
+          ws.send(JSON.stringify(cancelEvent));
+          rec.cancelSent = true;
+          rec.cancelAckTimer = setTimeout(() => {
+            if (rec.cancelPending) this.failCancellation(rec, T('cancellation_ack_timeout'), true);
+          }, 12000);
+        } catch {
+          if (this.confirmationBusy === rec) this.failCancellation(rec, T('cancellation_send_failed'), false);
+        }
+      },
+      failCancellation(rec, message, terminal) {
+        if (!rec) return;
+        terminal = chatAgentCore.cancellationFailureTerminal(rec.cancelSent, terminal);
+        if (rec.cancelAckTimer) clearTimeout(rec.cancelAckTimer);
+        rec.cancelAckTimer = 0;
+        if (this.confirmationBusy === rec) this.confirmationBusy = null;
+        rec.cancelPending = false;
+        rec.cancelSent = false;
+        rec.interactionError = message || T('cancellation_failed');
+        const t = rec.ownerTurn;
+        if (terminal && t) {
+          this.setToolStatus(rec, 'error', t);
+          this.releaseAnonymousTool(t, rec.id);
+        }
+        if (t) {
+          rec.lastEvent = Object.assign({}, rec.lastEvent, { tool_summary: rec.interactionError });
+          this.renderToolRecord(rec, rec.lastEvent, t);
+          this.updateProcess(t);
+          if (terminal) this.announce(rec.interactionError);
+          if (t.done && t.pendingCount === 0) this.releaseTurnRuns(t);
+        }
+        this.syncChatControls();
+      },
+      findCancellationRecord(ev) {
+        if (!this.log) return null;
+        for (const message of Array.from(this.log.children)) {
+          const owner = message._turn;
+          if (!owner) continue;
+          for (const rec of owner.tools.values()) {
+            if (chatAgentCore.cancelAckMatches(rec.call, ev)) return rec;
+          }
+        }
+        return null;
+      },
+      handleCancellationResult(ev) {
+        const rec = this.findCancellationRecord(ev);
+        if (!rec) return;
+        if (rec.cancelAckTimer) clearTimeout(rec.cancelAckTimer);
+        rec.cancelAckTimer = 0;
+        if (String(ev.tool_status || '') !== 'cancelled') {
+          const rawError = String(ev.error || '');
+          let visibleError = T('cancellation_failed');
+          // Error text from third-party ChatBackend implementations is
+          // untrusted. Keep credential-bearing URLs/headers fail-closed and use
+          // the shared chat redaction boundary for ordinary short messages.
+          if (rawError && !/(?:\bBearer\b|\b(?:https?|postgres(?:ql)?|mysql|redis):\/\/|(?:token|secret|password|cookie|authorization)\s*[:=])/i.test(rawError)
+            && chatTraceCore && typeof chatTraceCore.safeText === 'function') {
+            try { visibleError = chatTraceCore.safeText(rawError, 400) || visibleError; } catch { /* keep generic */ }
+          }
+          this.failCancellation(rec, visibleError, true);
+          return;
+        }
+        if (this.confirmationBusy === rec) this.confirmationBusy = null;
+        rec.cancelPending = false;
+        rec.cancelSent = false;
+        rec.interactionError = '';
         const t = rec.ownerTurn;
         this.setToolStatus(rec, 'cancelled', t);
         this.releaseAnonymousTool(t, rec.id);
-        rec.lastEvent = Object.assign({}, rec.lastEvent, { tool_summary: T('cancelled_not_run') });
+        rec.lastEvent = Object.assign({}, rec.lastEvent, ev, { tool_summary: ev.tool_summary || T('cancelled_not_run') });
         this.renderToolRecord(rec, rec.lastEvent, t);
         this.announce(T('tool_dismissed_announced', { name: rec.title.textContent }));
         this.updateProcess(t);
+        this.syncChatControls();
         queueMicrotask(() => {
           const target = t.process.open ? rec.summary : t.processSummary;
           if (target && target.isConnected) target.focus({ preventScroll: true });
@@ -5768,6 +6644,9 @@
         // inspect_request 是服务端的带外请求, 不依赖轮次归属与序号去重:
         // 即使本地轮次已收尾也应答, 否则服务端工具只能等到超时。
         if (ev.type === 'inspect_request') { this.sendInspectResult(ev); return; }
+        // cancel_tool_result is connection-scoped rather than a model turn. Its
+        // id/nonce pair resolves the exact historical confirmation card.
+        if (ev.type === 'cancel_tool_result') { this.handleCancellationResult(ev); return; }
         const t = this.eventTurn(ev);
         if (!t) return;
         if (ev.agent || ev.budget || ev.type === 'assistant_plan' || ev.tool_call && ev.tool_call.approval_resume === 'manual_tool_only') {
@@ -5777,7 +6656,8 @@
           case 'turn_start': this.appendStatus(T('analyzing'), false, t); break;
           case 'assistant_status': this.appendStatus(ev.status, false, t); break;
           case 'assistant_thinking': this.appendThinking(ev.thinking || '', ev, t); break;
-          case 'assistant_delta': this.appendDelta(ev.delta || '', t); break;
+          case 'assistant_reset': this.resetAssistant(ev, t); break;
+          case 'assistant_delta': this.appendDelta(ev.delta || '', ev.content_format, t); break;
           case 'assistant_plan':
           case 'assistant_agent':
           case 'assistant_budget': break;
@@ -5793,23 +6673,32 @@
           if (this.turn === t && this.active) this.setActive(false);
           return;
         }
-        if (t.renderFrame) cancelAnimationFrame(t.renderFrame);
-        t.renderFrame = 0;
+        cancelAssistantRender(t);
         this.clearTransientStatus(t);
         this.finalizeThinking(t);
-        const finalMessage = ev && typeof ev.message === 'string' && ev.message.trim() ? ev.message : '';
+        t.contentFormat = chatContentCore.finalizeFormat(t.contentFormat, ev && ev.content_format);
+        const finalSnapshot = chatContentCore.doneSnapshot(ev);
         // assistant_done.message 是本轮的权威快照。Deep 在确认边界会重写
         // 最终文案，不能让此前的流式草稿继续冒充最终结果。
-        if (finalMessage) {
-          t.answer.style.display = '';
-          t.text = finalMessage;
+        if (finalSnapshot.present) {
+          const limited = chatContentCore.clipUTF8(finalSnapshot.message, MAX_ASSISTANT_BYTES);
+          t.text = limited.text;
+          t.textBytes = limited.bytes;
+          t.textTruncated = limited.truncated;
         }
         t.confirmingTool = false;
-        if (t.text) t.answer.replaceChildren(renderAssistant(t.text));
+        if ((t.text && t.text.trim()) || t.textTruncated) {
+          t.answer.style.display = '';
+          replaceAssistantPreservingView(t.answer, renderAssistant(t.text, t.contentFormat, t.answer, t.textTruncated));
+        } else {
+          t.answer.replaceChildren();
+          t.answer.style.display = 'none';
+        }
         t.answer.classList.remove('streaming');
         t.done = true;
         this.updateProcess(t);
-        this.announce(T('answer_complete'));
+        const answerSummary = clip(String(t.answer.innerText || t.answer.textContent || '').replace(/\s+/g, ' ').trim(), 140);
+        this.announce(answerSummary ? T('answer_complete_summary', { summary: answerSummary }) : T('answer_complete'));
         this.releaseTurnRuns(t);
         if (this.turn === t && this.active) this.setActive(false);
         this.scroll();
@@ -5823,8 +6712,7 @@
           if (agentAlreadyShowsError) {
             // Deep 的代理行已经给出失败原因，避免重复一条错误文本。
           } else this.appendStatus(msg, true, t);
-          if (t.renderFrame) cancelAnimationFrame(t.renderFrame);
-          t.renderFrame = 0;
+          cancelAssistantRender(t);
           this.finalizeThinking(t);
           for (const rec of t.tools.values()) {
             if (rec.status !== 'running') continue;
@@ -5832,7 +6720,7 @@
             rec.lastEvent = Object.assign({}, rec.lastEvent, { tool_summary: msg });
             this.renderToolRecord(rec, rec.lastEvent, t);
           }
-          if (t.text) t.answer.replaceChildren(renderAssistant(t.text));
+          if (t.text || t.textTruncated) replaceAssistantPreservingView(t.answer, renderAssistant(t.text, t.contentFormat, t.answer, t.textTruncated));
           t.answer.classList.remove('streaming');
           t.done = true;
           this.updateProcess(t);
@@ -5938,6 +6826,12 @@
       itemEditor.page = '';
       itemEditor.persisted = false;
       itemEditor.conflict = false;
+      itemEditor.remoteKnown = false;
+      itemEditor.remoteRevision = KV_MISSING_REVISION;
+      itemEditor.remoteFingerprint = '';
+      itemEditor.remoteSourceFingerprint = 'missing';
+      itemEditor.remoteChangePending = false;
+      itemEditor.loadError = null;
       itemEditor.loading = false;
       itemEditor.saving = false;
       itemEditor.deleting = false;

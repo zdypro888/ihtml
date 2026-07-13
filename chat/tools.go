@@ -30,6 +30,93 @@ const untrustedDataNotice = "工具返回的内容(页面文本/Item/Template/KV
 
 const maxToolResultChars = 20000
 
+const (
+	defaultToolItemListLimit      = 20
+	maxToolItemListLimit          = 50
+	maxToolItemListContentBytes   = 64 << 10
+	maxToolSingleItemContentBytes = 64 << 10
+	maxToolItemMetaEntries        = 32
+	maxToolItemMetaBytes          = 4 << 10
+)
+
+type toolItemView struct {
+	ID               string            `json:"id"`
+	Type             ihtml.ItemType    `json:"type"`
+	Title            string            `json:"title,omitempty"`
+	Page             string            `json:"page,omitempty"`
+	Order            int               `json:"order"`
+	Meta             map[string]string `json:"meta,omitempty"`
+	UpdatedAt        time.Time         `json:"updated_at"`
+	ContentBytes     int               `json:"content_bytes"`
+	Content          string            `json:"content,omitempty"`
+	Preview          string            `json:"content_preview,omitempty"`
+	ContentTruncated bool              `json:"content_truncated,omitempty"`
+}
+
+func boundedToolItemMeta(source map[string]string) map[string]string {
+	if len(source) == 0 {
+		return nil
+	}
+	out := make(map[string]string)
+	remaining := maxToolItemMetaBytes
+	count := 0
+	for key, value := range source {
+		if count >= maxToolItemMetaEntries || remaining <= 0 {
+			break
+		}
+		key = clipRunes(key, min(len(key), 128))
+		remaining -= len(key)
+		if remaining <= 0 {
+			break
+		}
+		if len(value) > remaining {
+			value = clipRunes(value, remaining) + "…"
+		}
+		remaining -= len(value)
+		out[key] = value
+		count++
+	}
+	return out
+}
+
+func boundedToolItemView(item ihtml.Item, includeContent bool, contentBudget *int) toolItemView {
+	view := toolItemView{
+		ID: clipRunes(item.ID, min(len(item.ID), 256)), Type: item.Type,
+		Title: clipRunes(item.Title, min(len(item.Title), 256)),
+		Page:  clipRunes(item.Page, min(len(item.Page), 128)), Order: item.Order,
+		Meta: boundedToolItemMeta(item.Meta), UpdatedAt: item.UpdatedAt, ContentBytes: len(item.Content),
+	}
+	if !includeContent {
+		if len(item.Content) > 200 {
+			view.Preview = clipRunes(item.Content, 200) + "…"
+			view.ContentTruncated = true
+		} else {
+			view.Preview = item.Content
+		}
+		return view
+	}
+	allowed := maxToolSingleItemContentBytes
+	if contentBudget != nil && *contentBudget < allowed {
+		allowed = *contentBudget
+	}
+	if allowed < 0 {
+		allowed = 0
+	}
+	if len(item.Content) > allowed {
+		view.Content = clipRunes(item.Content, allowed)
+		view.ContentTruncated = true
+	} else {
+		view.Content = item.Content
+	}
+	if contentBudget != nil {
+		*contentBudget -= len(view.Content)
+		if *contentBudget < 0 {
+			*contentBudget = 0
+		}
+	}
+	return view
+}
+
 /* ---------- timeline: 一轮内的工具事件与摘要 ---------- */
 
 type timeline struct {
@@ -38,16 +125,19 @@ type timeline struct {
 
 	mu        sync.Mutex
 	pending   []ihtml.ProposedToolCall
-	completed []string
-	plan      []ihtml.ChatPlanItem
-	paused    bool
+	completed []toolEvidence
+	// completedBytes bounds retained repair evidence independently of entry
+	// count; a third-party Service cannot keep twelve oversized summaries alive.
+	completedBytes int
+	plan           []ihtml.ChatPlanItem
+	paused         bool
 }
 
 func (t *timeline) write(ev ihtml.ChatStreamEvent) {
 	if t == nil || t.emit == nil {
 		return
 	}
-	_ = t.emit(ev)
+	_ = t.emit(boundedToolStreamEvent(ev))
 }
 
 func (t *timeline) recordPending(call ihtml.ProposedToolCall) {
@@ -63,23 +153,68 @@ func (t *timeline) pendingCalls() []ihtml.ProposedToolCall {
 	return append([]ihtml.ProposedToolCall(nil), t.pending...)
 }
 
-func (t *timeline) recordCompleted(summary string) {
-	summary = strings.TrimSpace(summary)
-	if summary == "" {
+func (t *timeline) recordCompleted(toolName, summary string, body json.RawMessage) {
+	toolName = boundedToolName(toolName)
+	summary = boundedToolSummary(summary)
+	if toolName == "" && summary == "" {
 		return
 	}
+	evidence := toolEvidence{Tool: toolName, Summary: summary}
+	if len(body) > 0 {
+		evidence.Body = boundedToolEventResult(body, maxTimelineEvidenceBody)
+	}
+	evidenceBytes := timelineEvidenceWeight(evidence)
 	t.mu.Lock()
-	t.completed = append(t.completed, summary)
-	if len(t.completed) > 12 {
-		t.completed = t.completed[len(t.completed)-12:]
+	t.completed = append(t.completed, evidence)
+	t.completedBytes += evidenceBytes
+	for len(t.completed) > maxTimelineEvidenceEntries || t.completedBytes > maxTimelineEvidenceBytes {
+		removed := t.completed[0]
+		t.completedBytes -= timelineEvidenceWeight(removed)
+		t.completed[0] = toolEvidence{}
+		t.completed = t.completed[1:]
 	}
 	t.mu.Unlock()
+}
+
+func timelineEvidenceWeight(evidence toolEvidence) int {
+	toolBytes, toolOK := jsonEncodedStringSize(evidence.Tool, maxTimelineEvidenceBytes)
+	summaryBytes, summaryOK := jsonEncodedStringSize(evidence.Summary, maxTimelineEvidenceBytes)
+	if !toolOK || !summaryOK || len(evidence.Body) > maxTimelineEvidenceBytes-64-toolBytes-summaryBytes {
+		return maxTimelineEvidenceBytes + 1
+	}
+	return toolBytes + summaryBytes + len(evidence.Body) + 64
 }
 
 func (t *timeline) completedSummary() string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return strings.Join(t.completed, "\n")
+	var out strings.Builder
+	for _, evidence := range t.completed {
+		if evidence.Summary == "" {
+			continue
+		}
+		if out.Len() > 0 {
+			out.WriteByte('\n')
+		}
+		out.WriteString(evidence.Summary)
+	}
+	return out.String()
+}
+
+func (t *timeline) completedEvidence() []toolEvidence {
+	if t == nil {
+		return nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make([]toolEvidence, len(t.completed))
+	for i, evidence := range t.completed {
+		out[i] = toolEvidence{Tool: evidence.Tool, Summary: evidence.Summary}
+		if len(evidence.Body) > 0 {
+			out[i].Body = append(json.RawMessage(nil), evidence.Body...)
+		}
+	}
+	return out
 }
 
 func (t *timeline) isPaused() bool {
@@ -130,19 +265,24 @@ func (t *timeline) pausePlan(summary string) {
 
 // runtime 是工具的执行环境: 绑定用户、服务与本轮 timeline。
 type runtime struct {
-	svc          ihtml.Service
-	user         string
-	cfg          Config
-	mode         string
-	signer       *confirmSigner
-	timeline     *timeline
-	apis         []ihtml.APISpec // 宿主声明的业务 API 目录
-	apiBase      string          // 探测工具的同源基址, 如 http://localhost:8899
-	inbound      http.Header     // WS 握手请求头副本，仅按显式白名单转发
-	inboundQuery url.Values      // WS 握手查询副本，仅按显式白名单转发
-	access       ihtml.Access    // 访问策略(只读时写工具全部拒绝)
-	writeLimiter *userWriteLimiter
-	inspect      *inspectBroker // 实时页面检查: 经会话 WS 请求内核回传状态
+	svc           ihtml.Service
+	user          string
+	confirmation  confirmationScope
+	cfg           Config
+	mode          string
+	signer        *confirmSigner
+	timeline      *timeline
+	apis          []ihtml.APISpec // 宿主声明的业务 API 目录
+	apiBase       string          // 探测工具的同源基址, 如 http://localhost:8899
+	inbound       http.Header     // WS 握手请求头副本，仅按显式白名单转发
+	inboundQuery  url.Values      // WS 握手查询副本，仅按显式白名单转发
+	access        ihtml.Access    // 访问策略(只读时写工具全部拒绝)
+	writeLimiter  *userWriteLimiter
+	hostCallbacks *hostCallbackLimiter // 宿主扩展真实返回前占槽，限制忽略 ctx 的泄漏
+	inspect       *inspectBroker       // 实时页面检查: 经会话 WS 请求内核回传状态
+	budget        *turnBudget          // 根 Agent 与 Deep 子 Agent 共享的语义工具安全预算
+	session       *session             // 会话级真实执行屏障；防忽略 ctx 的宿主实现并发穿透
+	writeMu       sync.Mutex           // 同一轮的写入/确认签发严格串行
 }
 
 type toolDef struct {
@@ -158,6 +298,25 @@ type toolDef struct {
 	// 在这里 fail closed，避免让用户确认一个服务端注定会拒绝的载荷。
 	Validate func(args map[string]any) error
 	Execute  func(ctx context.Context, rt *runtime, args map[string]any) (result any, summary string, err error)
+}
+
+var errToolExecutionPanic = errors.New("tool execution panicked")
+
+// executeToolDef isolates third-party Service panics reached through built-in
+// tools. A panic may happen after a host write has begun, so callers must
+// report an unknown final state rather than claiming that nothing executed.
+func executeToolDef(ctx context.Context, def toolDef, rt *runtime, args map[string]any) (result any, summary string, err error) {
+	if def.Execute == nil {
+		return nil, "", errors.New("tool implementation is unavailable")
+	}
+	defer func() {
+		if recover() != nil {
+			result = nil
+			summary = ""
+			err = errToolExecutionPanic
+		}
+	}()
+	return def.Execute(ctx, rt, args)
 }
 
 // clipRunes 按 rune 边界截断, 避免把多字节字符切成非法 UTF-8 喂给模型/网关。
@@ -280,11 +439,42 @@ func argItems(args map[string]any, key string) ([]ihtml.Item, error) {
 }
 
 func itemIDs(items []ihtml.Item) string {
-	ids := make([]string, 0, len(items))
-	for _, it := range items {
-		ids = append(ids, it.ID)
+	var out strings.Builder
+	for _, item := range items {
+		if !appendBoundedJoined(&out, item.ID, ", ", maxToolSummaryBytes-128) {
+			break
+		}
 	}
-	return strings.Join(ids, ", ")
+	return out.String()
+}
+
+func appendBoundedJoined(out *strings.Builder, value, separator string, maxBytes int) bool {
+	if out == nil || maxBytes <= out.Len() {
+		return false
+	}
+	if out.Len() > 0 {
+		if len(separator) > maxBytes-out.Len() {
+			return false
+		}
+		out.WriteString(separator)
+	}
+	remaining := maxBytes - out.Len()
+	if len(value) <= remaining {
+		out.WriteString(value)
+		return true
+	}
+	out.WriteString(clippedUTF8(value, remaining))
+	return false
+}
+
+func boundedJoinStrings(values []string, separator string, maxBytes int) string {
+	var out strings.Builder
+	for _, value := range values {
+		if !appendBoundedJoined(&out, value, separator, maxBytes) {
+			break
+		}
+	}
+	return out.String()
 }
 
 func aiKVKeyReserved(key string) bool {
@@ -302,9 +492,11 @@ func toolDefs() []toolDef {
 		{
 			Name:  "ui_item_list",
 			Title: "查看页面 Item",
-			Desc:  "列出当前用户页面的全部 UI Item(含内容预览)。做任何修改前先调用它了解现状。",
+			Desc:  "分页列出当前用户页面的 UI Item。默认返回内容预览；include_content 只在本页共享的固定字节预算内返回源码，超出会明确标记截断。做任何修改前先调用它了解现状。",
 			Params: objSchema(nil,
-				prop{"include_content", anySchema("true 时返回完整 content(可能很长), 默认只给预览")},
+				prop{"include_content", anySchema("true 时在本页固定总预算内返回 content；默认只给预览")},
+				prop{"offset", intSchema("分页起点，默认 0；后续使用 next_offset")},
+				prop{"limit", intSchema("本页数量，默认 20，最大 50")},
 			),
 			Risk: "low",
 			Execute: func(ctx context.Context, rt *runtime, args map[string]any) (any, string, error) {
@@ -312,33 +504,40 @@ func toolDefs() []toolDef {
 				if err != nil {
 					return nil, "", err
 				}
-				full, _ := args["include_content"].(bool)
-				type itemView struct {
-					ID           string            `json:"id"`
-					Type         ihtml.ItemType    `json:"type"`
-					Title        string            `json:"title,omitempty"`
-					Page         string            `json:"page,omitempty"`
-					Order        int               `json:"order"`
-					Meta         map[string]string `json:"meta,omitempty"`
-					UpdatedAt    time.Time         `json:"updated_at"`
-					ContentChars int               `json:"content_chars"`
-					Content      string            `json:"content,omitempty"`
-					Preview      string            `json:"content_preview,omitempty"`
+				includeContent, _ := args["include_content"].(bool)
+				offset := argInt(args, "offset", 0)
+				if offset < 0 {
+					return nil, "", errors.New("offset 不能为负数")
 				}
-				views := make([]itemView, 0, len(items))
-				for _, it := range items {
-					v := itemView{ID: it.ID, Type: it.Type, Title: it.Title, Page: it.Page, Order: it.Order, Meta: it.Meta, UpdatedAt: it.UpdatedAt, ContentChars: len(it.Content)}
-					if full {
-						v.Content = it.Content
-					} else if len(it.Content) > 200 {
-						v.Preview = clipRunes(it.Content, 200) + "…"
-					} else {
-						v.Preview = it.Content
-					}
-					views = append(views, v)
+				if offset > len(items) {
+					offset = len(items)
 				}
-				return map[string]any{"count": len(items), "items": views},
-					fmt.Sprintf("当前共 %d 个 Item", len(items)), nil
+				limit := argInt(args, "limit", defaultToolItemListLimit)
+				if limit <= 0 {
+					limit = defaultToolItemListLimit
+				}
+				if limit > maxToolItemListLimit {
+					limit = maxToolItemListLimit
+				}
+				end := offset + limit
+				if end > len(items) {
+					end = len(items)
+				}
+				contentBudget := maxToolItemListContentBytes
+				views := make([]toolItemView, 0, end-offset)
+				contentTruncated := false
+				for index := offset; index < end; index++ {
+					view := boundedToolItemView(items[index], includeContent, &contentBudget)
+					contentTruncated = contentTruncated || view.ContentTruncated
+					views = append(views, view)
+				}
+				nextOffset := end
+				truncated := end < len(items) || contentTruncated
+				return map[string]any{
+					"count": len(items), "returned": len(views), "offset": offset,
+					"next_offset": nextOffset, "truncated": truncated,
+					"content_budget_bytes": maxToolItemListContentBytes, "items": views,
+				}, fmt.Sprintf("当前共 %d 个 Item，本页返回 %d 个", len(items), len(views)), nil
 			},
 		},
 		{
@@ -355,7 +554,8 @@ func toolDefs() []toolDef {
 				}
 				for _, it := range items {
 					if it.ID == id {
-						return it, "已读取 " + id, nil
+						view := boundedToolItemView(it, true, nil)
+						return view, "已读取 " + id, nil
 					}
 				}
 				return nil, "", fmt.Errorf("item %q 不存在", id)
@@ -411,12 +611,12 @@ func toolDefs() []toolDef {
 				if len(ids) == 0 {
 					return nil, "", errors.New("ids 为空")
 				}
-				removed, err := rt.svc.DeleteItems(ctx, rt.user, ids, "chat", "AI 删除 "+strings.Join(ids, ", "))
+				removed, err := rt.svc.DeleteItems(ctx, rt.user, ids, "chat", "AI 删除 "+boundedJoinStrings(ids, ", ", 1024))
 				if err != nil {
 					return nil, "", err
 				}
 				return map[string]any{"ok": true, "removed": removed},
-					fmt.Sprintf("已删除 %d 个 Item: %s", len(removed), strings.Join(removed, ", ")), nil
+					fmt.Sprintf("已删除 %d 个 Item: %s", len(removed), boundedJoinStrings(removed, ", ", maxToolSummaryBytes-128)), nil
 			},
 		},
 		{
@@ -604,7 +804,7 @@ func toolDefs() []toolDef {
 		{
 			Name:  "api_probe",
 			Title: "探测业务 API",
-			Desc:  "使用宿主显式配置的探测身份实调一次业务 API 目录里的 GET 接口, 查看真实返回结构。写取数 UI 前先探测, 保证字段名正确。只允许目录内的路径。",
+			Desc:  "使用宿主显式配置的探测身份实调业务 API 目录里的 GET 接口，查看真实数据与返回结构。可用于直接回答业务数据问题或编写取数 UI；直接问答时只在对话中总结结果，不创建页面内容。只允许目录内的路径。",
 			Params: objSchema([]string{"path"},
 				prop{"path", strSchema("目录中某个 API 的路径, 如 /capi/players")},
 				prop{"query", &einoJSONSchema.Schema{Type: "object", Description: "查询参数键值对", AdditionalProperties: &einoJSONSchema.Schema{}}},
@@ -914,9 +1114,16 @@ func addProbeIdentity(ctx context.Context, rt *runtime, req *http.Request) error
 	wantHost := req.Host
 	wantContentLength := req.ContentLength
 	if rt.cfg.ProbeRequest != nil {
-		if err := rt.cfg.ProbeRequest(ctx, rt.user, rt.inbound.Clone(), req.Header); err != nil {
+		// The callback receives a private candidate. If it times out, panics or
+		// fails, a late callback cannot race with the HTTP transport or mutate the
+		// request after this function has returned.
+		candidate := req.Header.Clone()
+		if err := runHostInterceptorBounded(ctx, func(callCtx context.Context) error {
+			return rt.cfg.ProbeRequest(callCtx, rt.user, rt.inbound.Clone(), candidate)
+		}, rt.hostCallbacks); err != nil {
 			return err
 		}
+		req.Header = candidate
 	}
 	for name := range req.Header {
 		canonical := textproto.CanonicalMIMEHeaderKey(name)
@@ -955,10 +1162,13 @@ func forbiddenProbeHeader(name string) bool {
 
 func secureProbeClient(rt *runtime, base *url.URL) *http.Client {
 	source := rt.cfg.ProbeHTTPClient
-	if source == nil {
-		source = http.DefaultClient
+	client := http.Client{Transport: http.DefaultTransport}
+	if source != nil {
+		// An explicitly injected client may intentionally carry mTLS, a private
+		// cookie jar or timeout policy. Ambient process-global identity is never
+		// inherited when the host did not opt in.
+		client = *source
 	}
-	client := *source
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 5 {
 			return errors.New("api_probe 重定向次数过多")
@@ -1050,7 +1260,7 @@ func toolsNodeConfigFiltered(rt *runtime, readOnly bool) compose.ToolsNodeConfig
 		}
 		tools = append(tools, &semanticTool{rt: rt, def: defs[i]})
 	}
-	return compose.ToolsNodeConfig{Tools: tools}
+	return compose.ToolsNodeConfig{Tools: tools, ExecuteSequentially: !readOnly}
 }
 
 func confirmationReturnDirectly(cfg Config) map[string]bool {
@@ -1099,30 +1309,30 @@ func toolJSON(v any) string {
 }
 
 func inputSummary(args map[string]any) string {
-	raw, err := json.Marshal(args)
-	if err != nil {
-		return ""
-	}
-	s := string(raw)
-	if len(s) > 400 {
-		s = clipRunes(s, 400) + "…"
-	}
-	return s
+	return boundedJSONPreview(args, maxToolInputPreviewBytes)
 }
 
 // InvokableRun 实现 tool.InvokableTool: 低风险直接执行,
 // 需确认的操作签发确认卡并把 pending 状态返回给模型。
 func (t *semanticTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
+	done, err := t.rt.session.tryBeginOperation()
+	if err != nil {
+		return "", err
+	}
+	defer done()
 	args := map[string]any{}
 	if strings.TrimSpace(argumentsInJSON) == "" {
 		argumentsInJSON = "{}"
 	}
+	if err := validateToolArgumentsJSON(argumentsInJSON); err != nil {
+		return "", fmt.Errorf("invalid %s arguments: payload exceeds safety limits", t.def.Name)
+	}
 	if err := json.Unmarshal([]byte(argumentsInJSON), &args); err != nil {
-		return "", fmt.Errorf("invalid %s arguments: %w", t.def.Name, err)
+		return "", fmt.Errorf("invalid %s arguments", t.def.Name)
 	}
 	rt := t.rt
 	call := ihtml.ProposedToolCall{
-		ID:        strings.TrimSpace(compose.GetToolCallID(ctx)),
+		ID:        normalizeToolCallID(compose.GetToolCallID(ctx), t.def.Name),
 		Name:      t.def.Name,
 		Title:     t.def.Title,
 		Method:    "TOOL",
@@ -1131,14 +1341,32 @@ func (t *semanticTool) InvokableRun(ctx context.Context, argumentsInJSON string,
 		Risk:      t.def.Risk,
 		AgentMode: orDefault(rt.mode, AgentModeFast),
 	}
-	if call.ID == "" {
-		call.ID = t.def.Name + "_" + strconv.FormatInt(time.Now().UnixNano(), 10)
-	}
 	summaryIn := inputSummary(args)
+	if err := rt.budget.takeToolCallWithPolicy(ctx, t.def.Name, args, t.def.Write); err != nil {
+		var exhausted *toolBudgetError
+		if errors.As(err, &exhausted) {
+			msg := exhausted.Error()
+			rt.timeline.write(ihtml.ChatStreamEvent{
+				Type: "tool_result", ModelReady: true, ToolCall: toolEventCallReference(&call),
+				ToolName: call.Name, ToolTitle: call.Title, ToolStatus: "error",
+				ToolInput: summaryIn, ToolSummary: msg,
+			})
+			return toolJSON(map[string]any{
+				"status": toolBudgetExhaustedStatus, "code": toolBudgetExhaustedCode,
+				"limit_kind": exhausted.kind, "limit": exhausted.limit,
+				"tool": call.Name, "error": msg,
+			}), nil
+		}
+		return "", err
+	}
+	if t.def.Write {
+		rt.writeMu.Lock()
+		defer rt.writeMu.Unlock()
+	}
 	if rt.timeline.isPaused() {
 		msg := "本轮已有待确认变更，Deep 执行已暂停；确认或取消后请继续。"
 		rt.timeline.write(ihtml.ChatStreamEvent{
-			Type: "tool_result", ModelReady: true, ToolCall: &call,
+			Type: "tool_result", ModelReady: true, ToolCall: toolEventCallReference(&call),
 			ToolName: call.Name, ToolTitle: call.Title, ToolStatus: "cancelled", ToolSummary: msg,
 		})
 		return toolJSON(map[string]any{
@@ -1148,7 +1376,7 @@ func (t *semanticTool) InvokableRun(ctx context.Context, argumentsInJSON string,
 	rt.timeline.write(ihtml.ChatStreamEvent{
 		Type:       "tool_start",
 		ModelReady: true,
-		ToolCall:   &call,
+		ToolCall:   toolEventCallReference(&call),
 		ToolName:   call.Name,
 		ToolTitle:  call.Title,
 		ToolStatus: "running",
@@ -1158,16 +1386,16 @@ func (t *semanticTool) InvokableRun(ctx context.Context, argumentsInJSON string,
 	if t.def.Write && rt.access.ReadOnly {
 		msg := "当前是只读访问, 不允许修改页面。"
 		rt.timeline.write(ihtml.ChatStreamEvent{
-			Type: "tool_result", ModelReady: true, ToolCall: &call,
+			Type: "tool_result", ModelReady: true, ToolCall: toolEventCallReference(&call),
 			ToolName: call.Name, ToolTitle: call.Title, ToolStatus: "error", ToolSummary: msg,
 		})
 		return toolJSON(map[string]any{"status": "forbidden", "tool": call.Name, "error": msg}), nil
 	}
 	if t.def.Validate != nil {
 		if err := t.def.Validate(args); err != nil {
-			msg := "参数校验失败: " + err.Error()
+			msg := validationFailureMessage(err)
 			rt.timeline.write(ihtml.ChatStreamEvent{
-				Type: "tool_result", ModelReady: true, ToolCall: &call,
+				Type: "tool_result", ModelReady: true, ToolCall: toolEventCallReference(&call),
 				ToolName: call.Name, ToolTitle: call.Title, ToolStatus: "error", ToolSummary: msg,
 				ToolDebug: debugJSON(args, "error", msg),
 			})
@@ -1185,16 +1413,37 @@ func (t *semanticTool) InvokableRun(ctx context.Context, argumentsInJSON string,
 		} else {
 			call.Reason = "该操作影响较大, 需要用户在页面上确认后才会执行。"
 		}
-		prepared, err := rt.signer.prepareContext(ctx, rt.user, call)
+		if !confirmationFrameFits(call, summaryIn) {
+			msg := "确认内容过大，未签发确认卡；请缩小单次操作范围后重试。"
+			rt.timeline.write(ihtml.ChatStreamEvent{
+				Type: "tool_result", ModelReady: true, ToolCall: toolEventCallReference(&call),
+				ToolName: call.Name, ToolTitle: call.Title, ToolStatus: "error", ToolSummary: msg,
+			})
+			return toolJSON(map[string]any{"status": "payload_too_large", "tool": call.Name, "error": msg}), nil
+		}
+		prepared, err := runHostValueBounded(ctx, rt.hostCallbacks, hostInterceptorTimeout, func(callCtx context.Context) (ihtml.ProposedToolCall, error) {
+			return rt.signer.prepareContext(callCtx, rt.user, rt.confirmation, call)
+		})
 		if err != nil {
 			msg := "确认卡签发失败，请稍后重试。"
 			rt.timeline.write(ihtml.ChatStreamEvent{
-				Type: "tool_result", ModelReady: true, ToolCall: &call,
+				Type: "tool_result", ModelReady: true, ToolCall: toolEventCallReference(&call),
 				ToolName: call.Name, ToolTitle: call.Title, ToolStatus: "error", ToolSummary: msg,
 			})
 			return toolJSON(map[string]any{"status": "error", "tool": call.Name, "error": msg}), nil
 		}
 		call = prepared
+		if !confirmationFrameFits(call, summaryIn) {
+			_, _ = runHostValueBounded(ctx, rt.hostCallbacks, hostInterceptorTimeout, func(callCtx context.Context) (bool, error) {
+				return rt.signer.revokeContext(callCtx, rt.user, rt.confirmation, call)
+			})
+			msg := "确认内容过大，确认卡未生效；请缩小单次操作范围后重试。"
+			rt.timeline.write(ihtml.ChatStreamEvent{
+				Type: "tool_result", ModelReady: true, ToolCall: toolEventCallReference(&call),
+				ToolName: call.Name, ToolTitle: call.Title, ToolStatus: "error", ToolSummary: msg,
+			})
+			return toolJSON(map[string]any{"status": "payload_too_large", "tool": call.Name, "error": msg}), nil
+		}
 		rt.timeline.recordPending(call)
 		rt.timeline.write(ihtml.ChatStreamEvent{
 			Type:        "confirmation_required",
@@ -1217,43 +1466,54 @@ func (t *semanticTool) InvokableRun(ctx context.Context, argumentsInJSON string,
 		if err := rt.allowWrite(ctx, t.def.Name); err != nil {
 			msg := userFacingError(err)
 			rt.timeline.write(ihtml.ChatStreamEvent{
-				Type: "tool_result", ModelReady: true, ToolCall: &call,
+				Type: "tool_result", ModelReady: true, ToolCall: toolEventCallReference(&call),
 				ToolName: call.Name, ToolTitle: call.Title, ToolStatus: "error", ToolSummary: msg,
 			})
 			return toolJSON(map[string]any{"status": "rate_limited", "tool": call.Name, "error": msg}), nil
 		}
 	}
 
-	result, summary, err := t.def.Execute(ctx, rt, args)
+	result, summary, err := executeToolDef(ctx, t.def, rt, args)
 	if err != nil {
+		msg := toolFailureMessage(err)
 		rt.timeline.write(ihtml.ChatStreamEvent{
 			Type:        "tool_result",
 			ModelReady:  true,
-			ToolCall:    &call,
+			ToolCall:    toolEventCallReference(&call),
 			ToolName:    call.Name,
 			ToolTitle:   call.Title,
 			ToolStatus:  "error",
-			ToolSummary: err.Error(),
-			ToolDebug:   debugJSON(args, "error", err.Error()),
+			ToolSummary: msg,
+			ToolDebug:   debugJSON(args, "error", msg),
 		})
-		return toolJSON(map[string]any{"status": "error", "tool": call.Name, "error": err.Error()}), nil
+		return toolJSON(map[string]any{"status": "error", "tool": call.Name, "error": msg}), nil
 	}
-	rt.timeline.recordCompleted(summary)
-	resultRaw, _ := json.Marshal(result)
+	summary = boundedToolSummary(summary)
+	resultRaw, resultTruncated, marshalErr := marshalBoundedToolResult(result)
+	if marshalErr != nil {
+		msg := "工具结果无法安全编码，请缩小查询范围后重试。"
+		rt.timeline.write(ihtml.ChatStreamEvent{
+			Type: "tool_result", ModelReady: true, ToolCall: toolEventCallReference(&call),
+			ToolName: call.Name, ToolTitle: call.Title, ToolStatus: "error", ToolSummary: msg,
+		})
+		return toolJSON(map[string]any{"status": "error", "tool": call.Name, "error": msg}), nil
+	}
+	rt.timeline.recordCompleted(call.Name, summary, boundedToolEventResult(resultRaw, 12<<10))
 	rt.timeline.write(ihtml.ChatStreamEvent{
 		Type:        "tool_result",
 		ModelReady:  true,
-		ToolCall:    &call,
+		ToolCall:    toolEventCallReference(&call),
 		ToolName:    call.Name,
 		ToolTitle:   call.Title,
 		ToolStatus:  "success",
 		ToolSummary: summary,
-		ToolResult:  clipRaw(resultRaw, 32000),
+		ToolResult:  boundedToolEventResult(resultRaw, 32000),
 		ToolDebug:   debugJSON(args, "ok", ""),
 	})
 	body := any(json.RawMessage(resultRaw))
 	if len(resultRaw) > maxToolResultChars {
-		body = string(resultRaw[:maxToolResultChars]) + "\n\n[结果过长已截断; 请缩小查询范围。]"
+		body = clipRaw(resultRaw, maxToolResultChars)
+		resultTruncated = true
 	}
 	return toolJSON(map[string]any{
 		"status":                "ok",
@@ -1261,20 +1521,18 @@ func (t *semanticTool) InvokableRun(ctx context.Context, argumentsInJSON string,
 		"summary":               summary,
 		"untrusted_data_notice": untrustedDataNotice,
 		"body":                  body,
+		"result_truncated":      resultTruncated,
 	}), nil
 }
 
 func clipRaw(raw []byte, max int) json.RawMessage {
-	if len(raw) <= max {
-		return append(json.RawMessage(nil), raw...)
-	}
-	clipped, _ := json.Marshal(clipRunes(string(raw), max) + "…(截断)")
-	return clipped
+	return boundedToolEventResult(json.RawMessage(raw), max)
 }
 
 // debugJSON 组装工具卡"调试详情"折叠里的内容。
 func debugJSON(args map[string]any, status, errMsg string) json.RawMessage {
-	payload := map[string]any{"tool_args": args, "status": status}
+	preview, _ := boundedJSONValue(args, maxToolDebugPreviewBytes/2, 256, 8, 32)
+	payload := map[string]any{"tool_args_preview": preview, "status": status}
 	if errMsg != "" {
 		payload["error"] = errMsg
 	}
@@ -1285,17 +1543,72 @@ func debugJSON(args map[string]any, status, errMsg string) json.RawMessage {
 	return clipRaw(raw, 8000)
 }
 
+func validationFailureMessage(err error) string {
+	detail := ""
+	if err != nil {
+		detail = sanitizeUserFacingMessage(err.Error(), 240)
+	}
+	if detail == "" {
+		return "参数校验失败，请检查字段格式和范围。"
+	}
+	return "参数校验失败: " + detail
+}
+
+func toolFailureMessage(err error) (message string) {
+	defer func() {
+		if recover() != nil {
+			message = "工具执行失败，请稍后重试。"
+		}
+	}()
+	if errors.Is(err, errToolExecutionPanic) {
+		return "工具执行异常，最终状态无法确认，请核对实际数据后再操作。"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "操作已取消。"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "工具执行超时，请稍后重试。"
+	}
+	switch {
+	case errors.Is(err, ihtml.ErrConflict):
+		return "revision conflict：数据已更新，请重新读取后再试。"
+	case errors.Is(err, ihtml.ErrNotFound):
+		return "目标不存在或已经被删除。"
+	case errors.Is(err, ihtml.ErrAccessDenied), errors.Is(err, ihtml.ErrServiceScope):
+		return "当前会话无权执行该操作。"
+	case errors.Is(err, ihtml.ErrWriteRateLimited):
+		return "写入操作过于频繁，请稍后重试。"
+	}
+	var public UserFacingError
+	if errors.As(err, &public) {
+		if message := sanitizeUserFacingMessage(public.UserFacingMessage(), 400); message != "" {
+			return message
+		}
+	}
+	return "工具执行失败，请稍后重试。"
+}
+
 // executeConfirmedTool 核销确认卡并真正执行工具。
 func executeConfirmedTool(ctx context.Context, rt *runtime, call *ihtml.ProposedToolCall, emit func(ihtml.ChatStreamEvent) error) error {
+	if emit == nil {
+		return errors.New("confirmation event emitter is unavailable")
+	}
+	baseEmit := emit
+	emit = func(event ihtml.ChatStreamEvent) error {
+		return baseEmit(boundedToolStreamEvent(event))
+	}
 	if call == nil {
 		return emit(ihtml.ChatStreamEvent{Type: "turn_error", Error: "缺少要确认执行的工具。", ModelReady: true})
+	}
+	if !confirmationCardStructurallySafe(call) {
+		return emit(ihtml.ChatStreamEvent{Type: "turn_error", Error: "确认请求无效或内容过大，操作未执行。", ModelReady: true})
 	}
 	confirmed := *call
 	fail := func(msg string) error {
 		if err := emit(ihtml.ChatStreamEvent{
 			Type:        "tool_result",
 			ModelReady:  true,
-			ToolCall:    &confirmed,
+			ToolCall:    toolEventCallReference(&confirmed),
 			ToolName:    confirmed.Name,
 			ToolTitle:   confirmed.Title,
 			ToolStatus:  "error",
@@ -1312,14 +1625,22 @@ func executeConfirmedTool(ctx context.Context, rt *runtime, call *ihtml.Proposed
 				},
 			})
 		}
-		return emit(ihtml.ChatStreamEvent{Type: "assistant_done", ModelReady: true, Message: msg})
+		return emit(ihtml.ChatStreamEvent{
+			Type: ihtml.ChatStreamAssistantDone, ModelReady: true,
+			Message: msg, ContentFormat: ihtml.ChatContentFormatText,
+		})
 	}
-	valid, consumeErr := rt.signer.consumeContext(ctx, rt.user, confirmed)
+	valid, consumeErr := runHostValueUntilReturn(ctx, rt.hostCallbacks, hostInterceptorTimeout, func(callCtx context.Context) (bool, error) {
+		return rt.signer.consumeContext(callCtx, rt.user, rt.confirmation, confirmed)
+	})
 	if consumeErr != nil {
 		return fail("确认状态校验失败，未执行。请稍后重试。")
 	}
 	if !valid {
 		return fail("确认卡已失效或内容被修改, 未执行。请让 AI 重新生成。")
+	}
+	if ctx.Err() != nil {
+		return fail("确认处理已超时，操作未执行。请让 AI 重新生成确认卡。")
 	}
 	def, ok := findToolDef(confirmed.Name)
 	if !ok {
@@ -1336,7 +1657,7 @@ func executeConfirmedTool(ctx context.Context, rt *runtime, call *ihtml.Proposed
 	}
 	if def.Validate != nil {
 		if err := def.Validate(args); err != nil {
-			return fail("参数校验失败: " + err.Error())
+			return fail(validationFailureMessage(err))
 		}
 	}
 	if def.Write {
@@ -1347,7 +1668,7 @@ func executeConfirmedTool(ctx context.Context, rt *runtime, call *ihtml.Proposed
 	if err := emit(ihtml.ChatStreamEvent{
 		Type:       "tool_start",
 		ModelReady: true,
-		ToolCall:   &confirmed,
+		ToolCall:   toolEventCallReference(&confirmed),
 		ToolName:   confirmed.Name,
 		ToolTitle:  confirmed.Title,
 		ToolStatus: "running",
@@ -1355,24 +1676,31 @@ func executeConfirmedTool(ctx context.Context, rt *runtime, call *ihtml.Proposed
 	}); err != nil {
 		return err
 	}
-	result, summary, err := def.Execute(ctx, rt, args)
+	result, summary, err := executeToolDef(ctx, def, rt, args)
 	if err != nil {
-		return fail("执行失败: " + err.Error())
+		return fail(toolFailureMessage(err))
 	}
-	resultRaw, _ := json.Marshal(result)
+	summary = boundedToolSummary(summary)
+	resultRaw, resultTruncated, marshalErr := marshalBoundedToolResult(result)
+	if marshalErr != nil {
+		return fail("工具结果无法安全编码，最终状态无法确认，请核对实际数据。")
+	}
 	if err := emit(ihtml.ChatStreamEvent{
 		Type:        "tool_result",
 		ModelReady:  true,
-		ToolCall:    &confirmed,
+		ToolCall:    toolEventCallReference(&confirmed),
 		ToolName:    confirmed.Name,
 		ToolTitle:   confirmed.Title,
 		ToolStatus:  "success",
 		ToolSummary: summary,
-		ToolResult:  clipRaw(resultRaw, 32000),
+		ToolResult:  boundedToolEventResult(resultRaw, 32000),
 	}); err != nil {
 		return err
 	}
 	message := summary
+	if resultTruncated {
+		message += "（返回详情已按安全上限截断）"
+	}
 	if confirmed.AgentMode == AgentModeDeep {
 		message = summary + "。本次只执行了已确认的操作，Deep 计划不会自动恢复；如需继续验收，请发送“继续”。"
 		if err := emit(ihtml.ChatStreamEvent{
@@ -1385,5 +1713,9 @@ func executeConfirmedTool(ctx context.Context, rt *runtime, call *ihtml.Proposed
 			return err
 		}
 	}
-	return emit(ihtml.ChatStreamEvent{Type: "assistant_done", ModelReady: true, Message: message})
+	message = boundedToolSummary(message)
+	return emit(ihtml.ChatStreamEvent{
+		Type: ihtml.ChatStreamAssistantDone, ModelReady: true,
+		Message: message, ContentFormat: ihtml.ChatContentFormatText,
+	})
 }

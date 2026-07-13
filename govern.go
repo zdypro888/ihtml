@@ -279,6 +279,22 @@ func (s *governedService) KVDelete(ctx context.Context, user, key string) error 
 	return s.h.KVDelete(ctx, user, key)
 }
 
+func (s *governedService) KVGetWithRevision(ctx context.Context, user, key string) (json.RawMessage, string, error) {
+	ctx, err := s.check(ctx, user, false)
+	if err != nil {
+		return nil, "", err
+	}
+	return s.h.KVGetWithRevision(ctx, user, key)
+}
+
+func (s *governedService) KVCompareAndSet(ctx context.Context, user, key string, value json.RawMessage, expectedRevision string) (string, error) {
+	ctx, err := s.check(ctx, user, true)
+	if err != nil {
+		return "", err
+	}
+	return s.h.KVCompareAndSet(ctx, user, key, value, expectedRevision)
+}
+
 func (s *governedService) PageErrors(ctx context.Context, user string) ([]PageError, error) {
 	ctx, err := s.check(ctx, user, false)
 	if err != nil {

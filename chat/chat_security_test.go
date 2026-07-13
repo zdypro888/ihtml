@@ -7,6 +7,13 @@ import (
 	"testing"
 )
 
+type panickingUserFacingError struct{}
+
+func (panickingUserFacingError) Error() string { return "host error" }
+func (panickingUserFacingError) UserFacingMessage() string {
+	panic("broken host error formatter")
+}
+
 func TestSelectTurnModelIsServerAuthoritativeWhenSelectorDisabled(t *testing.T) {
 	cfg := Config{Model: "server-model"}
 	selected, err := selectTurnModel(cfg, "server-model")
@@ -48,10 +55,26 @@ func TestUserFacingErrorHidesRuntimeAndNetworkInternals(t *testing.T) {
 	if got := userFacingError(errors.New("Deep 模式需要启用工具")); got != "Deep 模式需要启用工具" {
 		t.Fatalf("safe validation error changed = %q", got)
 	}
+	if got := userFacingError(errors.New(`db failed at postgres://admin:secret@internal/orders?token=leak`)); got != "操作失败，请稍后重试。" {
+		t.Fatalf("unknown internal error leaked = %q", got)
+	}
+	if got := userFacingError(NewUserFacingError("本月额度已用完，请联系管理员。")); got != "本月额度已用完，请联系管理员。" {
+		t.Fatalf("explicit safe host error = %q", got)
+	}
 	if got := userFacingError(errors.New(`create new streaming message fail: 400 Bad Request {"error":{"type":"invalid_request_error","message":"模型不存在"}}`)); got != "模型不存在或当前账号无权使用，请检查模型名称。" {
 		t.Fatalf("missing model error = %q", got)
 	}
 	if got := userFacingError(errors.New(`create new streaming message fail: 400 Bad Request {"error":{"type":"invalid_request_error","message":"bad tools"}}`)); got != "模型服务拒绝了请求，请检查模型名称与参数配置。" {
 		t.Fatalf("invalid request error = %q", got)
+	}
+}
+
+func TestPanickingHostErrorFormatterIsContained(t *testing.T) {
+	err := panickingUserFacingError{}
+	if got := userFacingError(err); got != "操作失败，请稍后重试。" {
+		t.Fatalf("user-facing panic fallback = %q", got)
+	}
+	if got := toolFailureMessage(err); got != "工具执行失败，请稍后重试。" {
+		t.Fatalf("tool panic fallback = %q", got)
 	}
 }

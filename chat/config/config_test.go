@@ -22,7 +22,7 @@ const secretSentinel = "sdk-config-secret-sentinel"
 
 func claudeConfig(auth string) string {
 	return fmt.Sprintf(`{
-  "schema_version": 1,
+	  "schema_version": 2,
   "enabled": true,
   "provider": "claude",
   "base_url": "https://gateway.example/api/anthropic",
@@ -92,6 +92,77 @@ func TestExternalConsumerResolvesClaudeDefaults(t *testing.T) {
 	}
 	if result.Config.MaxHistorySessions != 128 || result.Config.MaxHistoryEvents != 256 || result.Config.HistoryTTL != 12*time.Hour {
 		t.Fatal("history defaults were not applied")
+	}
+	if result.Config.MaxOutstandingHostCallbacks != 32 || result.Config.MaxOutstandingObservations != 32 || result.Config.MaxOutstandingOperations != 64 {
+		t.Fatalf("runtime capacity defaults = %d/%d/%d", result.Config.MaxOutstandingHostCallbacks, result.Config.MaxOutstandingObservations, result.Config.MaxOutstandingOperations)
+	}
+	if result.Config.MaxProviderResponseBytes != 8<<20 || result.Config.MaxModelOutputBytesPerCall != 1<<20 ||
+		result.Config.MaxModelOutputBytesPerTurn != 4<<20 || result.Config.MaxModelOutputEventsPerTurn != 4096 ||
+		result.Config.MaxAssistantMessageBytes != 256<<10 || result.Config.MaxReasoningBytesPerTurn != 256<<10 {
+		t.Fatalf("output defaults = provider:%d call:%d turn:%d events:%d visible:%d reasoning:%d",
+			result.Config.MaxProviderResponseBytes, result.Config.MaxModelOutputBytesPerCall,
+			result.Config.MaxModelOutputBytesPerTurn, result.Config.MaxModelOutputEventsPerTurn,
+			result.Config.MaxAssistantMessageBytes, result.Config.MaxReasoningBytesPerTurn)
+	}
+}
+
+func TestSchemaV2StrictlyPreservesV1Compatibility(t *testing.T) {
+	if chatconfig.CurrentSchemaVersion != 2 {
+		t.Fatalf("current schema version = %d, want 2", chatconfig.CurrentSchemaVersion)
+	}
+	legacy := strings.Replace(claudeConfig(`{"type":"auth_token","ref":"legacy"}`), `"schema_version": 2`, `"schema_version": 1`, 1)
+	result, err := chatconfig.NewLoader(chatconfig.Options{Secrets: staticSecrets(secretSentinel)}).Decode(context.Background(), strings.NewReader(legacy))
+	if err != nil {
+		t.Fatalf("decode schema v1: %v", err)
+	}
+	if result.Config.MaxModelRetries != 1 || result.Config.MaxToolCallsPerTurn != 32 || result.Config.MaxOutstandingOperations != 64 ||
+		result.Config.MaxProviderResponseBytes != 8<<20 || result.Config.MaxAssistantMessageBytes != 256<<10 {
+		t.Fatalf("schema v1 upgraded defaults = retries:%d tools:%d operations:%d provider:%d visible:%d", result.Config.MaxModelRetries, result.Config.MaxToolCallsPerTurn, result.Config.MaxOutstandingOperations, result.Config.MaxProviderResponseBytes, result.Config.MaxAssistantMessageBytes)
+	}
+
+	v2OnlyUnderV1 := strings.Replace(legacy, `"agent": {}`, `"agent":{"max_outstanding_operations":8}`, 1)
+	_, err = chatconfig.NewLoader(chatconfig.Options{Secrets: staticSecrets(secretSentinel)}).Decode(context.Background(), strings.NewReader(v2OnlyUnderV1))
+	var typed *chatconfig.Error
+	if !errors.As(err, &typed) || typed.Kind != chatconfig.ErrorUnknownField {
+		t.Fatalf("schema v1 accepted v2 field: %#v (%v)", typed, err)
+	}
+	v2OutputUnderV1 := strings.Replace(legacy, `"agent": {}`, `"agent":{"max_assistant_message_bytes":65536}`, 1)
+	_, err = chatconfig.NewLoader(chatconfig.Options{Secrets: staticSecrets(secretSentinel)}).Decode(context.Background(), strings.NewReader(v2OutputUnderV1))
+	if !errors.As(err, &typed) || typed.Kind != chatconfig.ErrorUnknownField {
+		t.Fatalf("schema v1 accepted v2 output field: %#v (%v)", typed, err)
+	}
+}
+
+func TestSchemaV2ResolvesExplicitOutputBoundaries(t *testing.T) {
+	raw := strings.Replace(claudeConfig(`{"type":"auth_token","ref":"limits"}`), `"agent": {}`, `"agent":{
+		"max_provider_response_bytes":2097152,
+		"max_model_output_bytes_per_call":131072,
+		"max_model_output_bytes_per_turn":524288,
+		"max_model_output_events_per_turn":128,
+		"max_assistant_message_bytes":65536,
+		"max_reasoning_bytes_per_turn":131072
+	}`, 1)
+	result, err := chatconfig.NewLoader(chatconfig.Options{Secrets: staticSecrets(secretSentinel)}).Decode(context.Background(), strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Config.MaxProviderResponseBytes != 2<<20 || result.Config.MaxModelOutputBytesPerCall != 128<<10 ||
+		result.Config.MaxModelOutputBytesPerTurn != 512<<10 || result.Config.MaxModelOutputEventsPerTurn != 128 ||
+		result.Config.MaxAssistantMessageBytes != 64<<10 || result.Config.MaxReasoningBytesPerTurn != 128<<10 {
+		t.Fatalf("resolved output limits = %#v", result.Config)
+	}
+
+	for name, replacement := range map[string]string{
+		"negative provider bytes": `"agent":{"max_provider_response_bytes":-1}`,
+		"turn smaller than call":  `"agent":{"max_model_output_bytes_per_call":131072,"max_model_output_bytes_per_turn":65536}`,
+		"too many events":         `"agent":{"max_model_output_events_per_turn":65537}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			invalid := strings.Replace(claudeConfig(`{"type":"auth_token","ref":"limits"}`), `"agent": {}`, replacement, 1)
+			if _, err := chatconfig.NewLoader(chatconfig.Options{Secrets: staticSecrets(secretSentinel)}).Decode(context.Background(), strings.NewReader(invalid)); !errors.Is(err, chatconfig.ErrInvalidConfig) {
+				t.Fatalf("error = %v", err)
+			}
+		})
 	}
 }
 
@@ -191,7 +262,7 @@ func TestStrictJSONAndTypedErrors(t *testing.T) {
 		{"unknown root", `{"schema_version":1,"enabled":false,"future":true}`, chatconfig.ErrorUnknownField},
 		{"unknown nested", `{"schema_version":1,"enabled":false,"generation":{"future":true}}`, chatconfig.ErrorUnknownField},
 		{"trailing", `{"schema_version":1,"enabled":false} {}`, chatconfig.ErrorSyntax},
-		{"wrong version", `{"schema_version":2,"enabled":false}`, chatconfig.ErrorUnsupportedVersion},
+		{"wrong version", `{"schema_version":3,"enabled":false}`, chatconfig.ErrorUnsupportedVersion},
 		{"missing enabled", `{"schema_version":1}`, chatconfig.ErrorValidation},
 	}
 	loader := chatconfig.NewLoader(chatconfig.Options{})

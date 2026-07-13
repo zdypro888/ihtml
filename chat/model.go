@@ -38,12 +38,10 @@ func newChatModel(ctx context.Context, cfg Config) (einoModel.ToolCallingChatMod
 
 func newOpenAIChatModel(ctx context.Context, cfg Config) (einoModel.ToolCallingChatModel, error) {
 	chatCfg := &openai.ChatModelConfig{
-		APIKey:  cfg.APIKey,
-		BaseURL: strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/"),
-		Model:   cfg.Model,
-	}
-	if cfg.RequestTimeout > 0 {
-		chatCfg.Timeout = cfg.RequestTimeout
+		APIKey:     cfg.APIKey,
+		BaseURL:    strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/"),
+		Model:      cfg.Model,
+		HTTPClient: newProviderHTTPClient(cfg.BaseURL, cfg.RequestTimeout, nil, cfg.MaxProviderResponseBytes),
 	}
 	if cfg.MaxTokens > 0 {
 		maxTokens := cfg.MaxTokens
@@ -85,6 +83,12 @@ func newClaudeChatModel(ctx context.Context, cfg Config) (einoModel.ToolCallingC
 		AuthToken: cfg.AuthToken,
 		Model:     cfg.Model,
 		MaxTokens: maxTokens,
+		// eino-ext's Claude adapter does not expose anthropic's
+		// option.WithMaxRetries. The SDK defaults to two hidden retries, which
+		// would multiply the ADK retry policy and bypass the per-turn model-call
+		// budget. Keep the provider transport single-attempt; ADK is the only
+		// retry owner and every retry therefore passes through withTurnBudget.
+		HTTPClient: newClaudeSingleAttemptHTTPClient(cfg.BaseURL, cfg.RequestTimeout, cfg.MaxProviderResponseBytes),
 	}
 	if baseURL != "" {
 		chatCfg.BaseURL = &baseURL
@@ -101,6 +105,173 @@ func newClaudeChatModel(ctx context.Context, cfg Config) (einoModel.ToolCallingC
 		return base, nil
 	}
 	return &claudeThinkingChatModel{base: base, budgetTokens: thinkingBudget}, nil
+}
+
+const claudeSDKShouldRetryHeader = "x-should-retry"
+
+// newClaudeSingleAttemptHTTPClient disables the Anthropic SDK's implicit
+// request retries without forking eino-ext's Claude adapter. anthropic-sdk-go
+// treats x-should-retry:false on a response as authoritative while retaining
+// the original status code, so the outer ADK policy can still classify 429 and
+// transient 5xx responses correctly.
+//
+// A transport error has no response on which to set that signal. Convert it to
+// one safe synthetic response (except when the request context has ended), so
+// the SDK returns immediately and ADK alone decides whether another actual HTTP
+// attempt is allowed. The response body intentionally excludes the underlying
+// URL and transport error.
+func newClaudeSingleAttemptHTTPClient(baseURL string, timeout time.Duration, responseLimit ...int64) *http.Client {
+	transport := http.DefaultTransport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	return newProviderHTTPClient(baseURL, timeout, claudeSingleAttemptRoundTripper{base: transport}, responseLimit...)
+}
+
+// newProviderHTTPClient keeps credential-bearing generation requests on the
+// exact configured origin. Go's default redirect policy only recognizes a
+// small set of sensitive header names; provider-specific credentials such as
+// x-api-key could otherwise be copied to a redirected host. Same-origin
+// redirects are retained for compatible gateways, but may not change method
+// and are bounded to prevent loops.
+func newProviderHTTPClient(baseURL string, timeout time.Duration, transport http.RoundTripper, responseLimit ...int64) *http.Client {
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	limit := defaultMaxProviderResponseBytes
+	if len(responseLimit) > 0 && responseLimit[0] >= minMaxProviderResponseBytes && responseLimit[0] <= maxMaxProviderResponseBytes {
+		limit = responseLimit[0]
+	}
+	transport = providerResponseLimitRoundTripper{base: transport, limit: limit}
+	client := http.Client{Transport: transport}
+	if timeout > 0 {
+		client.Timeout = timeout
+	}
+	origin, parseErr := url.Parse(strings.TrimSpace(baseURL))
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 5 {
+			return errors.New("provider redirect limit exceeded")
+		}
+		if parseErr != nil || origin == nil || origin.Scheme == "" || origin.Host == "" ||
+			req == nil || req.URL == nil || len(via) == 0 ||
+			!strings.EqualFold(req.URL.Scheme, origin.Scheme) ||
+			!strings.EqualFold(req.URL.Host, origin.Host) ||
+			req.Method != via[0].Method {
+			return errors.New("provider rejected unsafe redirect")
+		}
+		return nil
+	}
+	return &client
+}
+
+type providerResponseLimitRoundTripper struct {
+	base  http.RoundTripper
+	limit int64
+}
+
+func (t providerResponseLimitRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.base.RoundTrip(req)
+	if err != nil || resp == nil || resp.Body == nil {
+		return resp, err
+	}
+	if resp.ContentLength > t.limit {
+		resp.ContentLength = -1
+		if resp.Header != nil {
+			resp.Header = resp.Header.Clone()
+			resp.Header.Del("Content-Length")
+		}
+	}
+	resp.Body = &providerResponseLimitBody{base: resp.Body, remaining: t.limit, limit: t.limit}
+	return resp, nil
+}
+
+// providerResponseLimitBody permits at most limit response bytes and performs
+// one non-retained probe read at the boundary. The probe distinguishes an exact
+// length response from an over-limit response without buffering the body.
+type providerResponseLimitBody struct {
+	base      io.ReadCloser
+	remaining int64
+	limit     int64
+}
+
+func (b *providerResponseLimitBody) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if b == nil || b.base == nil {
+		return 0, io.EOF
+	}
+	if b.remaining > 0 {
+		if int64(len(p)) > b.remaining {
+			p = p[:b.remaining]
+		}
+		n, err := b.base.Read(p)
+		b.remaining -= int64(n)
+		return n, err
+	}
+	var probe [1]byte
+	n, err := b.base.Read(probe[:])
+	if n > 0 {
+		return 0, &ModelOutputLimitError{Scope: ModelOutputLimitProviderResponseBytes, Limit: b.limit}
+	}
+	return 0, err
+}
+
+func (b *providerResponseLimitBody) Close() error {
+	if b == nil || b.base == nil {
+		return nil
+	}
+	return b.base.Close()
+}
+
+type claudeSingleAttemptRoundTripper struct {
+	base http.RoundTripper
+}
+
+func (t claudeSingleAttemptRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.base.RoundTrip(req)
+	if err == nil {
+		if resp.Header == nil {
+			resp.Header = make(http.Header)
+		} else {
+			resp.Header = resp.Header.Clone()
+		}
+		resp.Header.Set(claudeSDKShouldRetryHeader, "false")
+		return resp, nil
+	}
+	if req.Context().Err() != nil {
+		return nil, err
+	}
+
+	status := http.StatusBadRequest
+	errorType := "invalid_request_error"
+	message := "provider transport request failed"
+	if isRetryableModelError(req.Context(), err) {
+		status = http.StatusBadGateway
+		errorType = "api_error"
+		message = "provider transport temporarily unavailable"
+	}
+	body, _ := json.Marshal(map[string]any{
+		"type": "error",
+		"error": map[string]string{
+			"type":    errorType,
+			"message": message,
+		},
+	})
+	headers := make(http.Header)
+	headers.Set("Content-Type", "application/json")
+	headers.Set(claudeSDKShouldRetryHeader, "false")
+	return &http.Response{
+		Status:        fmt.Sprintf("%d %s", status, http.StatusText(status)),
+		StatusCode:    status,
+		Proto:         "HTTP/1.1",
+		ProtoMajor:    1,
+		ProtoMinor:    1,
+		Header:        headers,
+		Body:          io.NopCloser(strings.NewReader(string(body))),
+		ContentLength: int64(len(body)),
+		Request:       req,
+	}, nil
 }
 
 // Anthropic SDK 会自行追加 v1/messages。兼容用户沿用 OpenAI 风格把 /v1
@@ -156,7 +327,10 @@ func (b *Backend) Models(ctx context.Context) (ihtml.ChatModels, error) {
 		out.AgentModes = append(out.AgentModes, AgentModeDeep)
 		out.DeepApprovalResume = "manual_tool_only"
 	}
-	if !out.ModelReady || strings.TrimSpace(b.cfg.Provider) != ProviderOpenAI {
+	// Model discovery is an operational capability, not a prerequisite for
+	// using the server-locked model. Avoid an unnecessary credential-bearing
+	// network request when the host has not exposed model selection.
+	if !out.ModelReady || !b.cfg.AllowModelSelect || strings.TrimSpace(b.cfg.Provider) != ProviderOpenAI {
 		return out, nil
 	}
 	models, err := listLoadedModels(ctx, b.cfg)
@@ -200,7 +374,7 @@ func fetchLoadedModels(ctx context.Context, cfg Config, endpoint string) ([]stri
 	if cfg.APIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
 	}
-	res, err := http.DefaultClient.Do(req)
+	res, err := modelDiscoveryClient(base).Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -241,7 +415,11 @@ func listOpenAIModels(ctx context.Context, cfg Config) ([]string, error) {
 	if cfg.APIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
 	}
-	res, err := http.DefaultClient.Do(req)
+	origin, parseErr := url.Parse(base)
+	if parseErr != nil {
+		return nil, parseErr
+	}
+	res, err := modelDiscoveryClient(origin).Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -267,4 +445,25 @@ func listOpenAIModels(ctx context.Context, cfg Config) ([]string, error) {
 		}
 	}
 	return models, nil
+}
+
+// Model discovery carries the provider credential. Keep redirects on the
+// exact configured origin so a compromised or misconfigured gateway cannot
+// bounce the request (and its Authorization header) to another host. Model
+// listing never needs method-changing redirects or an unbounded redirect chain.
+func modelDiscoveryClient(origin *url.URL) *http.Client {
+	// Never inherit http.DefaultClient.Jar: model discovery has an explicit
+	// Authorization policy and must not silently attach ambient process cookies.
+	client := http.Client{Transport: http.DefaultTransport}
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 5 {
+			return errors.New("model discovery redirect limit exceeded")
+		}
+		if req == nil || req.URL == nil || req.Method != http.MethodGet || origin == nil ||
+			!strings.EqualFold(req.URL.Scheme, origin.Scheme) || !strings.EqualFold(req.URL.Host, origin.Host) {
+			return errors.New("model discovery rejected cross-origin redirect")
+		}
+		return nil
+	}
+	return &client
 }

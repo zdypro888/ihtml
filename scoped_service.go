@@ -36,6 +36,14 @@ type ScopedKVService interface {
 	KVDelete(context.Context, string) error
 }
 
+// ScopedVersionedKVService 是绑定用户后的可选条件 KV 能力。底层 Service 同时
+// 实现 VersionedKVService 时，ScopeService 返回值才可通过类型断言取得它，
+// 因而无需扩展既有 ScopedService 或破坏第三方旧实现。
+type ScopedVersionedKVService interface {
+	KVGetWithRevision(context.Context, string) (json.RawMessage, string, error)
+	KVCompareAndSet(context.Context, string, json.RawMessage, string) (string, error)
+}
+
 // ScopedErrorService is ErrorService with the user already bound.
 type ScopedErrorService interface {
 	PageErrors(context.Context) ([]PageError, error)
@@ -77,6 +85,11 @@ type boundService struct {
 	user    string
 }
 
+type boundVersionedService struct {
+	*boundService
+	versioned VersionedKVService
+}
+
 // ScopeService binds a trusted Service to one user. It does not add an access
 // policy by itself; use Handler.ServiceForRequest when handling an HTTP request.
 func ScopeService(service Service, user string) (ScopedService, error) {
@@ -87,7 +100,11 @@ func ScopeService(service Service, user string) (ScopedService, error) {
 	if user == "" {
 		return nil, errors.Join(ErrInvalidServiceScope, errors.New("user is required"))
 	}
-	return &boundService{service: service, user: user}, nil
+	bound := &boundService{service: service, user: user}
+	if versioned, ok := service.(VersionedKVService); ok {
+		return &boundVersionedService{boundService: bound, versioned: versioned}, nil
+	}
+	return bound, nil
 }
 
 // ServiceForRequest resolves and binds the authenticated user, then returns a
@@ -144,6 +161,14 @@ func (s *boundService) KVSet(ctx context.Context, key string, value json.RawMess
 
 func (s *boundService) KVDelete(ctx context.Context, key string) error {
 	return s.service.KVDelete(ctx, s.user, key)
+}
+
+func (s *boundVersionedService) KVGetWithRevision(ctx context.Context, key string) (json.RawMessage, string, error) {
+	return s.versioned.KVGetWithRevision(ctx, s.user, key)
+}
+
+func (s *boundVersionedService) KVCompareAndSet(ctx context.Context, key string, value json.RawMessage, expectedRevision string) (string, error) {
+	return s.versioned.KVCompareAndSet(ctx, s.user, key, value, expectedRevision)
 }
 
 func (s *boundService) PageErrors(ctx context.Context) ([]PageError, error) {

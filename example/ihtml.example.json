@@ -5,7 +5,7 @@
     "data_dir": "../uidata"
   },
   "ai": {
-    "schema_version": 1,
+    "schema_version": 2,
     "enabled": true,
     "provider": "claude",
     "base_url": "https://open.bigmodel.cn/api/anthropic",
@@ -24,10 +24,27 @@
     },
     "agent": {
       "deep_enabled": true,
+      "dynamic_tool_search": true,
+      "context_summarization": true,
+      "summarize_after_tokens": 24000,
+      "summarize_after_messages": 80,
       "allow_model_select": true,
       "max_iterations": 16,
       "max_model_calls": 24,
+      "max_model_retries": 1,
       "max_subtasks": 3,
+      "max_tool_calls": 32,
+      "max_tool_calls_per_tool": 8,
+      "max_repeated_tool_calls": 2,
+      "max_provider_response_bytes": 8388608,
+      "max_model_output_bytes_per_call": 1048576,
+      "max_model_output_bytes_per_turn": 4194304,
+      "max_model_output_events_per_turn": 4096,
+      "max_assistant_message_bytes": 262144,
+      "max_reasoning_bytes_per_turn": 262144,
+      "max_outstanding_host_callbacks": 32,
+      "max_outstanding_observations": 32,
+      "max_outstanding_operations": 64,
       "request_timeout": "5m",
       "max_turn_duration": "3m"
     },
@@ -36,6 +53,8 @@
       "writes_per_minute": 240
     },
     "history": {
+      "namespace": "example-app",
+      "capability_version": "v1",
       "max_sessions": 128,
       "max_events_per_session": 256,
       "max_bytes_per_session": 2097152,

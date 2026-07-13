@@ -167,8 +167,30 @@ func TestHandlerKVAndErrors(t *testing.T) {
 		t.Fatalf("kv set: %d %v", status, out)
 	}
 	status, out = doJSON(t, "GET", base+"/kv/theme?uid=u", "")
-	if status != 200 || out["value"].(map[string]any)["mode"] != "dark" {
+	if status != 200 || out["value"].(map[string]any)["mode"] != "dark" || out["revision"] == "" {
 		t.Fatalf("kv get: %d %v", status, out)
+	}
+	revision := out["revision"].(string)
+	status, out = doJSON(t, "PUT", base+"/kv/theme?uid=u", `{"value":{"mode":"light"},"expected_revision":"`+revision+`"}`)
+	if status != http.StatusOK || out["revision"] == "" || out["revision"] == revision {
+		t.Fatalf("conditional kv set: %d %v", status, out)
+	}
+	currentRevision := out["revision"].(string)
+	status, out = doJSON(t, "PUT", base+"/kv/theme?uid=u", `{"value":{"mode":"stale"},"expected_revision":"`+revision+`"}`)
+	if status != http.StatusConflict || out["current_revision"] != currentRevision || out["expected_revision"] != revision || out["current"].(map[string]any)["mode"] != "light" {
+		t.Fatalf("stale conditional kv set: %d %v", status, out)
+	}
+	status, _ = doJSON(t, "PUT", base+"/kv/new-key?uid=u", `{"value":1,"expected_revision":"missing"}`)
+	if status != http.StatusOK {
+		t.Fatalf("conditional kv create: %d", status)
+	}
+	status, _ = doJSON(t, "PUT", base+"/kv/invalid-revision?uid=u", `{"value":1,"expected_revision":"bogus"}`)
+	if status != http.StatusBadRequest {
+		t.Fatalf("invalid kv revision should 400, got %d", status)
+	}
+	status, _ = doJSON(t, "PUT", base+"/kv/null-revision?uid=u", `{"value":1,"expected_revision":null}`)
+	if status != http.StatusBadRequest {
+		t.Fatalf("null kv revision must not fall back to an unconditional write, got %d", status)
 	}
 	status, _ = doJSON(t, "GET", base+"/kv/missing?uid=u", "")
 	if status != http.StatusNotFound {

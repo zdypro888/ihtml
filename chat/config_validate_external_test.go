@@ -3,6 +3,7 @@ package chat_test
 import (
 	"context"
 	"errors"
+	"math"
 	"net/http"
 	"net/url"
 	"testing"
@@ -78,13 +79,61 @@ func TestConfigValidateCrossFieldRules(t *testing.T) {
 	tests := map[string]chat.Config{
 		"dual credentials":    func() chat.Config { c := base; c.APIKey, c.AuthToken = "a", "b"; return c }(),
 		"missing credentials": func() chat.Config { c := base; c.AuthToken = ""; return c }(),
-		"thinking budget":     func() chat.Config { c := base; c.Thinking, c.ThinkingBudgetTokens = true, 4096; return c }(),
+		"oversized max tokens": func() chat.Config {
+			c := base
+			c.MaxTokens = 1<<20 + 1
+			return c
+		}(),
+		"model control character": func() chat.Config { c := base; c.Model = "bad\tmodel"; return c }(),
+		"system prompt NUL":       func() chat.Config { c := base; c.SystemPrompt = "bad\x00prompt"; return c }(),
+		"thinking budget":         func() chat.Config { c := base; c.Thinking, c.ThinkingBudgetTokens = true, 4096; return c }(),
 		"turn timeout": func() chat.Config {
 			c := base
 			c.RequestTimeout, c.MaxTurnDuration = time.Second, time.Minute
 			return c
 		}(),
-		"short confirm secret": func() chat.Config { c := base; c.ConfirmSecret = []byte("short"); return c }(),
+		"short confirm secret":   func() chat.Config { c := base; c.ConfirmSecret = []byte("short"); return c }(),
+		"nan legacy temperature": func() chat.Config { c := base; c.Temperature = float32(math.NaN()); return c }(),
+		"nan explicit temperature": func() chat.Config {
+			c := base
+			value := float32(math.NaN())
+			c.TemperatureOverride = &value
+			return c
+		}(),
+		"infinite temperature":    func() chat.Config { c := base; c.Temperature = float32(math.Inf(1)); return c }(),
+		"negative host callbacks": func() chat.Config { c := base; c.MaxOutstandingHostCallbacks = -1; return c }(),
+		"oversized observations":  func() chat.Config { c := base; c.MaxOutstandingObservations = 4097; return c }(),
+		"negative operations":     func() chat.Config { c := base; c.MaxOutstandingOperations = -1; return c }(),
+		"negative provider response bytes": func() chat.Config {
+			c := base
+			c.MaxProviderResponseBytes = -1
+			return c
+		}(),
+		"small per-call output": func() chat.Config {
+			c := base
+			c.MaxModelOutputBytesPerCall = 1024
+			return c
+		}(),
+		"turn output smaller than call": func() chat.Config {
+			c := base
+			c.MaxModelOutputBytesPerCall, c.MaxModelOutputBytesPerTurn = 128<<10, 64<<10
+			return c
+		}(),
+		"negative output events": func() chat.Config {
+			c := base
+			c.MaxModelOutputEventsPerTurn = -1
+			return c
+		}(),
+		"oversized visible answer": func() chat.Config {
+			c := base
+			c.MaxAssistantMessageBytes = 513 << 10
+			return c
+		}(),
+		"negative visible reasoning": func() chat.Config {
+			c := base
+			c.MaxReasoningBytesPerTurn = -1
+			return c
+		}(),
 	}
 	for name, cfg := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -92,6 +141,42 @@ func TestConfigValidateCrossFieldRules(t *testing.T) {
 				t.Fatalf("error = %v", err)
 			}
 		})
+	}
+}
+
+func TestExternalSessionStoreRequiresApplicationNamespace(t *testing.T) {
+	cfg := chat.Config{
+		Provider: chat.ProviderOpenAI, BaseURL: "https://gateway.example/v1", Model: "model",
+		SessionStore: &typedNilSessionStore{},
+	}
+	err := cfg.Validate()
+	var field *chat.ConfigError
+	if !errors.As(err, &field) || field.Field != "SessionNamespace" {
+		t.Fatalf("error = %#v, want SessionNamespace", field)
+	}
+	cfg.SessionNamespace = "billing-app"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid namespaced external store: %v", err)
+	}
+	cfg.SessionCapabilityVersion = "bad\nversion"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("control characters in capability version must be rejected")
+	}
+}
+
+func TestExternalConfirmNonceStoreRequiresApplicationNamespace(t *testing.T) {
+	cfg := chat.Config{
+		Provider: chat.ProviderOpenAI, BaseURL: "https://gateway.example/v1", Model: "model",
+		ConfirmNonceStore: &typedNilConfirmNonceStore{},
+	}
+	err := cfg.Validate()
+	var field *chat.ConfigError
+	if !errors.As(err, &field) || field.Field != "SessionNamespace" {
+		t.Fatalf("error = %#v, want SessionNamespace", field)
+	}
+	cfg.SessionNamespace = "billing-app"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid namespaced external nonce store: %v", err)
 	}
 }
 

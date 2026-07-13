@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/middlewares/dynamictool/toolsearch"
 	"github.com/cloudwego/eino/adk/prebuilt/deep"
 	einoModel "github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
@@ -25,6 +26,7 @@ func enforceDeepConfirmationPause(mode string, resp collectResp, timeline *timel
 	}
 	resp.Message = deepApprovalPausedMessage
 	resp.Streamed = false
+	resp.ContentFormat = ihtml.ChatContentFormatText
 	timeline.pausePlan(deepApprovalPausedMessage)
 	return resp
 }
@@ -47,14 +49,22 @@ func buildTurnAgent(
 	cfg Config,
 	toolsEnabled bool,
 ) (adk.Agent, error) {
+	rootHandlers, err := contextSummaryHandlers(ctx, chatModel, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("build context summarization: %w", err)
+	}
 	if mode != AgentModeDeep {
 		agentCfg := &adk.ChatModelAgentConfig{
-			Name:          "ihtml_ui_agent",
-			Description:   "ihtml page building assistant.",
-			Instruction:   instruction,
-			Model:         chatModel,
-			GenModelInput: plainGenModelInput,
-			MaxIterations: cfg.MaxIterations,
+			// Keep the historical agent identity so persisted ADK sessions and
+			// downstream traces remain compatible; behavior is now general-purpose.
+			Name:             "ihtml_ui_agent",
+			Description:      "General business and dynamic UI assistant for ihtml.",
+			Instruction:      instruction,
+			Model:            chatModel,
+			GenModelInput:    plainGenModelInput,
+			MaxIterations:    cfg.MaxIterations,
+			ModelRetryConfig: newModelRetryConfig(normalizedModelRetries(cfg.MaxModelRetries)),
+			Handlers:         rootHandlers,
 		}
 		if toolsEnabled {
 			agentCfg.ToolsConfig = adk.ToolsConfig{ToolsNodeConfig: toolsNodeConfig(rt)}
@@ -76,6 +86,15 @@ func buildTurnAgent(
 	}
 
 	rootTools := toolsNodeConfig(rt)
+	if !cfg.DisableDynamicToolSearch && len(rootTools.Tools) > 0 {
+		dynamicTools := append([]tool.BaseTool(nil), rootTools.Tools...)
+		middleware, err := toolsearch.New(ctx, &toolsearch.Config{DynamicTools: dynamicTools})
+		if err != nil {
+			return nil, fmt.Errorf("build dynamic tool search: %w", err)
+		}
+		rootHandlers = append(rootHandlers, middleware)
+		rootTools.Tools = nil
+	}
 	rootTools.Tools = append(rootTools.Tools, &deepPlanTool{timeline: rt.timeline})
 	// 确认卡是强事务边界。串行执行保证同一批 tool_calls 中第一个待确认
 	// 写入先把 timeline 标记为 paused，后续调用会被服务端拒绝。
@@ -83,8 +102,8 @@ func buildTurnAgent(
 
 	return deep.New(ctx, &deep.Config{
 		Name:        "ihtml_deep_agent",
-		Description: "ihtml complex page planning and implementation assistant.",
-		Instruction: instruction + deepModePrompt,
+		Description: "General analysis and complex dynamic UI assistant for ihtml.",
+		Instruction: instruction,
 		ChatModel:   chatModel,
 		SubAgents:   []adk.Agent{inspector, reviewer},
 		ToolsConfig: adk.ToolsConfig{
@@ -92,6 +111,8 @@ func buildTurnAgent(
 			ReturnDirectly:  confirmationReturnDirectly(cfg),
 		},
 		MaxIteration:           cfg.MaxIterations,
+		ModelRetryConfig:       newModelRetryConfig(normalizedModelRetries(cfg.MaxModelRetries)),
+		Handlers:               rootHandlers,
 		WithoutWriteTodos:      true,
 		WithoutGeneralSubAgent: true,
 		TaskToolDescriptionGenerator: func(ctx context.Context, agents []adk.Agent) (string, error) {
@@ -117,13 +138,14 @@ func newReadOnlySubAgent(
 		maxIterations = 6
 	}
 	return adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
-		Name:          name,
-		Description:   instruction,
-		Instruction:   instruction,
-		Model:         chatModel,
-		ToolsConfig:   adk.ToolsConfig{ToolsNodeConfig: readOnlyToolsNodeConfig(rt)},
-		GenModelInput: plainGenModelInput,
-		MaxIterations: maxIterations,
+		Name:             name,
+		Description:      instruction,
+		Instruction:      instruction,
+		Model:            chatModel,
+		ToolsConfig:      adk.ToolsConfig{ToolsNodeConfig: readOnlyToolsNodeConfig(rt)},
+		GenModelInput:    plainGenModelInput,
+		MaxIterations:    maxIterations,
+		ModelRetryConfig: newModelRetryConfig(normalizedModelRetries(cfg.MaxModelRetries)),
 		Handlers: []adk.ChatModelAgentMiddleware{
 			&subagentStageHandler{
 				BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
@@ -191,6 +213,9 @@ func (t *deepPlanTool) InvokableRun(_ context.Context, argumentsInJSON string, _
 	var input struct {
 		Todos []ihtml.ChatPlanItem `json:"todos"`
 	}
+	if err := validateToolArgumentsJSON(argumentsInJSON); err != nil {
+		return "", errors.New("invalid ui_plan_update arguments: payload exceeds safety limits")
+	}
 	if err := json.Unmarshal([]byte(argumentsInJSON), &input); err != nil {
 		return "", fmt.Errorf("invalid ui_plan_update arguments: %w", err)
 	}
@@ -203,7 +228,7 @@ func (t *deepPlanTool) InvokableRun(_ context.Context, argumentsInJSON string, _
 		input.Todos[i].ID = strings.TrimSpace(input.Todos[i].ID)
 		input.Todos[i].Content = strings.TrimSpace(input.Todos[i].Content)
 		input.Todos[i].Status = strings.TrimSpace(input.Todos[i].Status)
-		if input.Todos[i].ID == "" || input.Todos[i].Content == "" {
+		if !validPlanItemID(input.Todos[i].ID) || input.Todos[i].Content == "" {
 			return "", errors.New("计划任务 id/content 不能为空")
 		}
 		if _, duplicate := seen[input.Todos[i].ID]; duplicate {
