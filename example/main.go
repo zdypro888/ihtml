@@ -623,6 +623,9 @@ type demoSession struct {
 	generation uint64
 	closed     bool
 	wg         sync.WaitGroup
+
+	inspectMu sync.Mutex
+	inspects  map[string]chan *ihtml.ChatClientInspection
 }
 
 func (s *demoSession) Close() {
@@ -644,6 +647,17 @@ func (s *demoSession) HandleEvent(ctx context.Context, ev *ihtml.ChatClientEvent
 	}
 	if ev.Type == "cancel" {
 		s.stopRun()
+		return
+	}
+	if ev.Type == ihtml.ChatClientInspectResult {
+		// 内核对 inspect_request 的应答: 与真实后端相同的配对方式。
+		s.inspectMu.Lock()
+		ch := s.inspects[ev.InspectID]
+		delete(s.inspects, ev.InspectID)
+		s.inspectMu.Unlock()
+		if ch != nil && ev.Inspect != nil {
+			ch <- ev.Inspect
+		}
 		return
 	}
 	if ev.Type != "user_message" {
@@ -763,12 +777,58 @@ func (s *demoSession) runDemo(ctx context.Context, generation uint64, text strin
 	if !s.emitRun(ctx, generation, ihtml.ChatStreamEvent{Type: "tool_result", ToolCall: call, ToolName: call.Name, ToolTitle: call.Title, ToolStatus: "success", ToolSummary: "已写入 1 个 Item: ai-note(当前页)", ModelReady: true}) {
 		return
 	}
-	for _, chunk := range []string{"<p>已把你的话写成一张卡片放进页面。", "接真实模型后我能真正理解需求、取业务数据、改主题、修报错。</p>"} {
+	// 写后自检演示: 走与真实后端一致的 inspect_request/inspect_result 往返,
+	// 读取内核回传的实时渲染状态。先等一拍, 让 SSE put 事件先在内核应用。
+	if !demoWait(ctx, 400*time.Millisecond) {
+		return
+	}
+	inspectNote := s.demoInspect(ctx, generation)
+	for _, chunk := range []string{"<p>已把你的话写成一张卡片放进页面。", inspectNote, "接真实模型后我能真正理解需求、取业务数据、改主题、修报错。</p>"} {
+		if chunk == "" {
+			continue
+		}
 		if !s.emitRun(ctx, generation, ihtml.ChatStreamEvent{Type: "assistant_delta", Delta: chunk, ModelReady: true}) || !demoWait(ctx, 120*time.Millisecond) {
 			return
 		}
 	}
 	_ = s.emitRun(ctx, generation, ihtml.ChatStreamEvent{Type: "assistant_done", ModelReady: true})
+}
+
+// demoInspect 发出 inspect_request 并等待内核应答, 返回一句自检结论。
+// 未应答(超时)时返回空串, 不影响演示流程。
+func (s *demoSession) demoInspect(ctx context.Context, generation uint64) string {
+	inspectID := fmt.Sprintf("demo_ins_%d", time.Now().UnixNano())
+	ch := make(chan *ihtml.ChatClientInspection, 1)
+	s.inspectMu.Lock()
+	if s.inspects == nil {
+		s.inspects = make(map[string]chan *ihtml.ChatClientInspection)
+	}
+	s.inspects[inspectID] = ch
+	s.inspectMu.Unlock()
+	defer func() {
+		s.inspectMu.Lock()
+		delete(s.inspects, inspectID)
+		s.inspectMu.Unlock()
+	}()
+	if !s.emitRun(ctx, generation, ihtml.ChatStreamEvent{Type: ihtml.ChatStreamInspectRequest, InspectID: inspectID, ModelReady: true}) {
+		return ""
+	}
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+	select {
+	case inspect := <-ch:
+		rendered := 0
+		for _, item := range inspect.Items {
+			if item.Present {
+				rendered++
+			}
+		}
+		return fmt.Sprintf("我又用 ui_page_inspect 自检了一次: 页面上 %d 个 Item 正在渲染, 刚写入的卡片确实在屏幕上。", rendered)
+	case <-ctx.Done():
+		return ""
+	case <-timer.C:
+		return ""
+	}
 }
 
 /* ---------- 预置演示数据: 单页默认形态(不建页面/菜单, 用内核组件类) ---------- */

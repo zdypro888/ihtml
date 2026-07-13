@@ -562,63 +562,69 @@ func (h *Handler) PutTemplate(ctx context.Context, user string, input Template, 
 	lock := h.userLock(user)
 	lock.Lock()
 	defer lock.Unlock()
-	before, err := h.readUserStateLocked(ctx, user)
-	if err != nil {
-		return Template{}, err
-	}
-	pages, err := statePages(before)
-	if err != nil {
-		return Template{}, err
-	}
-	catalog, err := stateTemplateCatalog(before, pages)
-	if err != nil {
-		return Template{}, err
-	}
-	index := templateIndex(catalog.Templates, input.ID)
-	now := time.Now()
+
 	var nextTemplate Template
-	changed := true
-	if index < 0 {
-		if expectedRevision != 0 {
-			return Template{}, &TemplateConflictError{ID: input.ID, Expected: expectedRevision, Actual: 0}
-		}
-		if len(catalog.Templates) >= maxTemplatesPerUser {
-			return Template{}, fmt.Errorf("too many templates")
-		}
-		revision, allocErr := allocateTemplateRevision(&catalog)
-		if allocErr != nil {
-			return Template{}, allocErr
-		}
-		nextTemplate, err = normalizeTemplateCreate(input, "", "未命名模板", revision, now)
+	wrote := false
+	err := h.updateUserStateLocked(ctx, user, func(before UserState) (UserState, error) {
+		wrote = false
+		pages, err := statePages(before)
 		if err != nil {
-			return Template{}, err
+			return UserState{}, err
 		}
-		catalog.Templates = append(catalog.Templates, nextTemplate)
-	} else {
-		current := catalog.Templates[index]
-		if expectedRevision != current.Revision {
-			return Template{}, conflictFor(expectedRevision, current)
-		}
-		nextTemplate, changed, err = normalizeTemplateUpdate(current, input, now)
+		catalog, err := stateTemplateCatalog(before, pages)
 		if err != nil {
-			return Template{}, err
+			return UserState{}, err
 		}
-		if !changed {
-			return nextTemplate, nil
+		index := templateIndex(catalog.Templates, input.ID)
+		now := time.Now()
+		if index < 0 {
+			if expectedRevision != 0 {
+				return UserState{}, &TemplateConflictError{ID: input.ID, Expected: expectedRevision, Actual: 0}
+			}
+			if len(catalog.Templates) >= maxTemplatesPerUser {
+				return UserState{}, fmt.Errorf("too many templates")
+			}
+			revision, allocErr := allocateTemplateRevision(&catalog)
+			if allocErr != nil {
+				return UserState{}, allocErr
+			}
+			nextTemplate, err = normalizeTemplateCreate(input, "", "未命名模板", revision, now)
+			if err != nil {
+				return UserState{}, err
+			}
+			catalog.Templates = append(catalog.Templates, nextTemplate)
+		} else {
+			current := catalog.Templates[index]
+			if expectedRevision != current.Revision {
+				return UserState{}, conflictFor(expectedRevision, current)
+			}
+			var changed bool
+			nextTemplate, changed, err = normalizeTemplateUpdate(current, input, now)
+			if err != nil {
+				return UserState{}, err
+			}
+			if !changed {
+				return UserState{}, errUserStateUnchanged
+			}
+			nextTemplate.Revision, err = allocateTemplateRevision(&catalog)
+			if err != nil {
+				return UserState{}, err
+			}
+			catalog.Templates[index] = nextTemplate
 		}
-		nextTemplate.Revision, err = allocateTemplateRevision(&catalog)
-		if err != nil {
-			return Template{}, err
+		next := cloneUserState(before)
+		snapshotState(&next, pages, mustStateTemplateCatalog(before, pages), by, "put template "+nextTemplate.ID, h.opts.maxRevisions)
+		if err := setStateTemplateCatalog(&next, catalog, pages); err != nil {
+			return UserState{}, err
 		}
-		catalog.Templates[index] = nextTemplate
-	}
-	next := cloneUserState(before)
-	snapshotState(&next, pages, mustStateTemplateCatalog(before, pages), by, "put template "+nextTemplate.ID, h.opts.maxRevisions)
-	if err := setStateTemplateCatalog(&next, catalog, pages); err != nil {
+		wrote = true
+		return next, nil
+	})
+	if err != nil {
 		return Template{}, err
 	}
-	if err := h.replaceUserStateLocked(ctx, user, before, next); err != nil {
-		return Template{}, err
+	if !wrote {
+		return nextTemplate, nil
 	}
 	h.publish(user, Event{Type: "templates", Op: "put", Templates: []Template{cloneTemplate(nextTemplate)}, By: by})
 	h.metric("writes", 1)
@@ -639,79 +645,85 @@ func (h *Handler) PutCurrentTemplate(ctx context.Context, user, page string, inp
 	lock := h.userLock(user)
 	lock.Lock()
 	defer lock.Unlock()
-	before, err := h.readUserStateLocked(ctx, user)
-	if err != nil {
-		return Template{}, err
-	}
-	currentView, pages, catalog, err := currentTemplateFromState(before, page)
-	if err != nil {
-		return Template{}, err
-	}
-	current := currentView.Template
-	index := templateIndex(catalog.Templates, current.ID)
-	now := time.Now()
+
 	var saved Template
-	templateChanged := true
-	if index < 0 {
-		if expectedRevision != 0 {
-			return Template{}, &TemplateConflictError{ID: current.ID, Expected: expectedRevision, Actual: 0}
-		}
-		revision, allocErr := allocateTemplateRevision(&catalog)
-		if allocErr != nil {
-			return Template{}, allocErr
-		}
-		saved, err = normalizeTemplateCreate(input, current.ID, current.Name, revision, now)
-		if err != nil {
-			return Template{}, err
-		}
-		catalog.Templates = append(catalog.Templates, saved)
-	} else {
-		stored := catalog.Templates[index]
-		if expectedRevision != stored.Revision {
-			return Template{}, conflictFor(expectedRevision, stored)
-		}
-		saved, templateChanged, err = normalizeTemplateUpdate(stored, input, now)
-		if err != nil {
-			return Template{}, err
-		}
-		if templateChanged {
-			saved.Revision, err = allocateTemplateRevision(&catalog)
-			if err != nil {
-				return Template{}, err
-			}
-		}
-		catalog.Templates[index] = saved
-	}
+	wrote := false
 	bindingChanged := false
-	if page == "" {
-		bindingChanged = catalog.RootTemplateID != saved.ID
-		catalog.RootTemplateID = saved.ID
-	} else {
-		pageIndex, _ := pageByName(pages, page)
-		bindingChanged = pages[pageIndex].TemplateID != saved.ID
-		pages[pageIndex].TemplateID = saved.ID
+	err := h.updateUserStateLocked(ctx, user, func(before UserState) (UserState, error) {
+		wrote, bindingChanged = false, false
+		currentView, pages, catalog, err := currentTemplateFromState(before, page)
+		if err != nil {
+			return UserState{}, err
+		}
+		current := currentView.Template
+		index := templateIndex(catalog.Templates, current.ID)
+		now := time.Now()
+		templateChanged := true
+		if index < 0 {
+			if expectedRevision != 0 {
+				return UserState{}, &TemplateConflictError{ID: current.ID, Expected: expectedRevision, Actual: 0}
+			}
+			revision, allocErr := allocateTemplateRevision(&catalog)
+			if allocErr != nil {
+				return UserState{}, allocErr
+			}
+			saved, err = normalizeTemplateCreate(input, current.ID, current.Name, revision, now)
+			if err != nil {
+				return UserState{}, err
+			}
+			catalog.Templates = append(catalog.Templates, saved)
+		} else {
+			stored := catalog.Templates[index]
+			if expectedRevision != stored.Revision {
+				return UserState{}, conflictFor(expectedRevision, stored)
+			}
+			saved, templateChanged, err = normalizeTemplateUpdate(stored, input, now)
+			if err != nil {
+				return UserState{}, err
+			}
+			if templateChanged {
+				saved.Revision, err = allocateTemplateRevision(&catalog)
+				if err != nil {
+					return UserState{}, err
+				}
+			}
+			catalog.Templates[index] = saved
+		}
+		if page == "" {
+			bindingChanged = catalog.RootTemplateID != saved.ID
+			catalog.RootTemplateID = saved.ID
+		} else {
+			pageIndex, _ := pageByName(pages, page)
+			bindingChanged = pages[pageIndex].TemplateID != saved.ID
+			pages[pageIndex].TemplateID = saved.ID
+		}
+		if !templateChanged && !bindingChanged {
+			return UserState{}, errUserStateUnchanged
+		}
+		next := cloneUserState(before)
+		oldPages, err := statePages(before)
+		if err != nil {
+			return UserState{}, err
+		}
+		oldCatalog, err := stateTemplateCatalog(before, oldPages)
+		if err != nil {
+			return UserState{}, err
+		}
+		snapshotState(&next, oldPages, oldCatalog, by, "put current template "+saved.ID, h.opts.maxRevisions)
+		if err := setStatePages(&next, pages); err != nil {
+			return UserState{}, err
+		}
+		if err := setStateTemplateCatalog(&next, catalog, pages); err != nil {
+			return UserState{}, err
+		}
+		wrote = true
+		return next, nil
+	})
+	if err != nil {
+		return Template{}, err
 	}
-	if !templateChanged && !bindingChanged {
+	if !wrote {
 		return cloneTemplate(saved), nil
-	}
-	next := cloneUserState(before)
-	oldPages, err := statePages(before)
-	if err != nil {
-		return Template{}, err
-	}
-	oldCatalog, err := stateTemplateCatalog(before, oldPages)
-	if err != nil {
-		return Template{}, err
-	}
-	snapshotState(&next, oldPages, oldCatalog, by, "put current template "+saved.ID, h.opts.maxRevisions)
-	if err := setStatePages(&next, pages); err != nil {
-		return Template{}, err
-	}
-	if err := setStateTemplateCatalog(&next, catalog, pages); err != nil {
-		return Template{}, err
-	}
-	if err := h.replaceUserStateLocked(ctx, user, before, next); err != nil {
-		return Template{}, err
 	}
 	h.publish(user, Event{Type: "templates", Op: "put", Templates: []Template{cloneTemplate(saved)}, By: by})
 	if bindingChanged && page != "" {
@@ -727,46 +739,54 @@ func (h *Handler) PublishTemplate(ctx context.Context, user, id string, expected
 	lock := h.userLock(user)
 	lock.Lock()
 	defer lock.Unlock()
-	before, err := h.readUserStateLocked(ctx, user)
+
+	var nextTemplate Template
+	wrote := false
+	err := h.updateUserStateLocked(ctx, user, func(before UserState) (UserState, error) {
+		wrote = false
+		pages, err := statePages(before)
+		if err != nil {
+			return UserState{}, err
+		}
+		catalog, err := stateTemplateCatalog(before, pages)
+		if err != nil {
+			return UserState{}, err
+		}
+		index := templateIndex(catalog.Templates, id)
+		if index < 0 {
+			return UserState{}, ErrNotFound
+		}
+		current := catalog.Templates[index]
+		if expectedRevision != current.Revision {
+			return UserState{}, conflictFor(expectedRevision, current)
+		}
+		if current.Published != nil && reflect.DeepEqual(*current.Published, current.Draft) {
+			nextTemplate = current
+			return UserState{}, errUserStateUnchanged
+		}
+		now := time.Now()
+		nextTemplate = cloneTemplate(current)
+		published := cloneTemplateVersion(current.Draft)
+		nextTemplate.Published, nextTemplate.PublishedAt = &published, &now
+		nextTemplate.Revision, err = allocateTemplateRevision(&catalog)
+		if err != nil {
+			return UserState{}, err
+		}
+		nextTemplate.UpdatedAt = now
+		catalog.Templates[index] = nextTemplate
+		next := cloneUserState(before)
+		snapshotState(&next, pages, mustStateTemplateCatalog(before, pages), by, "publish template "+id, h.opts.maxRevisions)
+		if err := setStateTemplateCatalog(&next, catalog, pages); err != nil {
+			return UserState{}, err
+		}
+		wrote = true
+		return next, nil
+	})
 	if err != nil {
 		return Template{}, err
 	}
-	pages, err := statePages(before)
-	if err != nil {
-		return Template{}, err
-	}
-	catalog, err := stateTemplateCatalog(before, pages)
-	if err != nil {
-		return Template{}, err
-	}
-	index := templateIndex(catalog.Templates, id)
-	if index < 0 {
-		return Template{}, ErrNotFound
-	}
-	current := catalog.Templates[index]
-	if expectedRevision != current.Revision {
-		return Template{}, conflictFor(expectedRevision, current)
-	}
-	if current.Published != nil && reflect.DeepEqual(*current.Published, current.Draft) {
-		return cloneTemplate(current), nil
-	}
-	now := time.Now()
-	nextTemplate := cloneTemplate(current)
-	published := cloneTemplateVersion(current.Draft)
-	nextTemplate.Published, nextTemplate.PublishedAt = &published, &now
-	nextTemplate.Revision, err = allocateTemplateRevision(&catalog)
-	if err != nil {
-		return Template{}, err
-	}
-	nextTemplate.UpdatedAt = now
-	catalog.Templates[index] = nextTemplate
-	next := cloneUserState(before)
-	snapshotState(&next, pages, mustStateTemplateCatalog(before, pages), by, "publish template "+id, h.opts.maxRevisions)
-	if err := setStateTemplateCatalog(&next, catalog, pages); err != nil {
-		return Template{}, err
-	}
-	if err := h.replaceUserStateLocked(ctx, user, before, next); err != nil {
-		return Template{}, err
+	if !wrote {
+		return cloneTemplate(nextTemplate), nil
 	}
 	h.publish(user, Event{Type: "templates", Op: "publish", Templates: []Template{cloneTemplate(nextTemplate)}, By: by})
 	h.metric("writes", 1)
@@ -780,62 +800,63 @@ func (h *Handler) DeleteTemplateSlot(ctx context.Context, user, id, slotID strin
 	lock := h.userLock(user)
 	lock.Lock()
 	defer lock.Unlock()
-	before, err := h.readUserStateLocked(ctx, user)
-	if err != nil {
-		return Template{}, err
-	}
-	pages, err := statePages(before)
-	if err != nil {
-		return Template{}, err
-	}
-	catalog, err := stateTemplateCatalog(before, pages)
-	if err != nil {
-		return Template{}, err
-	}
-	index := templateIndex(catalog.Templates, id)
-	if index < 0 {
-		return Template{}, ErrNotFound
-	}
-	current := catalog.Templates[index]
-	if expectedRevision != current.Revision {
-		return Template{}, conflictFor(expectedRevision, current)
-	}
-	nextTemplate := cloneTemplate(current)
-	found := false
-	kept := nextTemplate.Draft.Slots[:0]
-	for _, slot := range nextTemplate.Draft.Slots {
-		if slot.ID == slotID {
-			found = true
-			continue
+
+	var nextTemplate Template
+	err := h.updateUserStateLocked(ctx, user, func(before UserState) (UserState, error) {
+		pages, err := statePages(before)
+		if err != nil {
+			return UserState{}, err
 		}
-		kept = append(kept, slot)
-	}
-	if !found {
-		return Template{}, ErrNotFound
-	}
-	nextTemplate.Draft.Slots = kept
-	for i := range nextTemplate.Draft.Placements {
-		if nextTemplate.Draft.Placements[i].SlotID == slotID {
-			nextTemplate.Draft.Placements[i].SlotID = ""
-			nextTemplate.Draft.Placements[i].Unassigned = true
+		catalog, err := stateTemplateCatalog(before, pages)
+		if err != nil {
+			return UserState{}, err
 		}
-	}
-	nextTemplate.Draft.Version++
-	nextTemplate.Revision, err = allocateTemplateRevision(&catalog)
+		index := templateIndex(catalog.Templates, id)
+		if index < 0 {
+			return UserState{}, ErrNotFound
+		}
+		current := catalog.Templates[index]
+		if expectedRevision != current.Revision {
+			return UserState{}, conflictFor(expectedRevision, current)
+		}
+		nextTemplate = cloneTemplate(current)
+		found := false
+		kept := nextTemplate.Draft.Slots[:0]
+		for _, slot := range nextTemplate.Draft.Slots {
+			if slot.ID == slotID {
+				found = true
+				continue
+			}
+			kept = append(kept, slot)
+		}
+		if !found {
+			return UserState{}, ErrNotFound
+		}
+		nextTemplate.Draft.Slots = kept
+		for i := range nextTemplate.Draft.Placements {
+			if nextTemplate.Draft.Placements[i].SlotID == slotID {
+				nextTemplate.Draft.Placements[i].SlotID = ""
+				nextTemplate.Draft.Placements[i].Unassigned = true
+			}
+		}
+		nextTemplate.Draft.Version++
+		nextTemplate.Revision, err = allocateTemplateRevision(&catalog)
+		if err != nil {
+			return UserState{}, err
+		}
+		nextTemplate.UpdatedAt = time.Now()
+		if err := nextTemplate.Validate(); err != nil {
+			return UserState{}, err
+		}
+		catalog.Templates[index] = nextTemplate
+		next := cloneUserState(before)
+		snapshotState(&next, pages, mustStateTemplateCatalog(before, pages), by, "delete template slot "+slotID, h.opts.maxRevisions)
+		if err := setStateTemplateCatalog(&next, catalog, pages); err != nil {
+			return UserState{}, err
+		}
+		return next, nil
+	})
 	if err != nil {
-		return Template{}, err
-	}
-	nextTemplate.UpdatedAt = time.Now()
-	if err := nextTemplate.Validate(); err != nil {
-		return Template{}, err
-	}
-	catalog.Templates[index] = nextTemplate
-	next := cloneUserState(before)
-	snapshotState(&next, pages, mustStateTemplateCatalog(before, pages), by, "delete template slot "+slotID, h.opts.maxRevisions)
-	if err := setStateTemplateCatalog(&next, catalog, pages); err != nil {
-		return Template{}, err
-	}
-	if err := h.replaceUserStateLocked(ctx, user, before, next); err != nil {
 		return Template{}, err
 	}
 	h.publish(user, Event{Type: "templates", Op: "put", Templates: []Template{cloneTemplate(nextTemplate)}, By: by})
@@ -850,58 +871,59 @@ func (h *Handler) DeleteTemplate(ctx context.Context, user, id string, expectedR
 	lock := h.userLock(user)
 	lock.Lock()
 	defer lock.Unlock()
-	before, err := h.readUserStateLocked(ctx, user)
-	if err != nil {
-		return err
-	}
-	pages, err := statePages(before)
-	if err != nil {
-		return err
-	}
-	catalog, err := stateTemplateCatalog(before, pages)
-	if err != nil {
-		return err
-	}
-	index := templateIndex(catalog.Templates, id)
-	if index < 0 {
-		return ErrNotFound
-	}
-	current := catalog.Templates[index]
-	if expectedRevision != current.Revision {
-		return conflictFor(expectedRevision, current)
-	}
-	if _, err := allocateTemplateRevision(&catalog); err != nil {
-		return err
-	}
-	catalog.Templates = append(catalog.Templates[:index], catalog.Templates[index+1:]...)
+
 	bindingsChanged := false
-	if catalog.RootTemplateID == id {
-		catalog.RootTemplateID = ""
-		bindingsChanged = true
-	}
-	for i := range pages {
-		if pages[i].TemplateID == id {
-			pages[i].TemplateID = ""
+	err := h.updateUserStateLocked(ctx, user, func(before UserState) (UserState, error) {
+		bindingsChanged = false
+		pages, err := statePages(before)
+		if err != nil {
+			return UserState{}, err
+		}
+		catalog, err := stateTemplateCatalog(before, pages)
+		if err != nil {
+			return UserState{}, err
+		}
+		index := templateIndex(catalog.Templates, id)
+		if index < 0 {
+			return UserState{}, ErrNotFound
+		}
+		current := catalog.Templates[index]
+		if expectedRevision != current.Revision {
+			return UserState{}, conflictFor(expectedRevision, current)
+		}
+		if _, err := allocateTemplateRevision(&catalog); err != nil {
+			return UserState{}, err
+		}
+		catalog.Templates = append(catalog.Templates[:index], catalog.Templates[index+1:]...)
+		if catalog.RootTemplateID == id {
+			catalog.RootTemplateID = ""
 			bindingsChanged = true
 		}
-	}
-	next := cloneUserState(before)
-	oldPages, err := statePages(before)
+		for i := range pages {
+			if pages[i].TemplateID == id {
+				pages[i].TemplateID = ""
+				bindingsChanged = true
+			}
+		}
+		next := cloneUserState(before)
+		oldPages, err := statePages(before)
+		if err != nil {
+			return UserState{}, err
+		}
+		oldCatalog, err := stateTemplateCatalog(before, oldPages)
+		if err != nil {
+			return UserState{}, err
+		}
+		snapshotState(&next, oldPages, oldCatalog, by, "delete template "+id, h.opts.maxRevisions)
+		if err := setStatePages(&next, pages); err != nil {
+			return UserState{}, err
+		}
+		if err := setStateTemplateCatalog(&next, catalog, pages); err != nil {
+			return UserState{}, err
+		}
+		return next, nil
+	})
 	if err != nil {
-		return err
-	}
-	oldCatalog, err := stateTemplateCatalog(before, oldPages)
-	if err != nil {
-		return err
-	}
-	snapshotState(&next, oldPages, oldCatalog, by, "delete template "+id, h.opts.maxRevisions)
-	if err := setStatePages(&next, pages); err != nil {
-		return err
-	}
-	if err := setStateTemplateCatalog(&next, catalog, pages); err != nil {
-		return err
-	}
-	if err := h.replaceUserStateLocked(ctx, user, before, next); err != nil {
 		return err
 	}
 	h.publish(user, Event{Type: "templates", Op: "delete", IDs: []string{id}, By: by})

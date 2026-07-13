@@ -25,6 +25,9 @@ const (
 	ChatClientUserMessage = "user_message"
 	ChatClientConfirmTool = "confirm_tool"
 	ChatClientCancel      = "cancel"
+	// ChatClientInspectResult 是内核对 inspect_request 的应答帧,
+	// 携带 inspect_id 与实时页面渲染状态(不可信数据)。
+	ChatClientInspectResult = "inspect_result"
 
 	ChatStreamTurnStart            = "turn_start"
 	ChatStreamAssistantStatus      = "assistant_status"
@@ -38,6 +41,9 @@ const (
 	ChatStreamToolResult           = "tool_result"
 	ChatStreamAssistantDone        = "assistant_done"
 	ChatStreamTurnError            = "turn_error"
+	// ChatStreamInspectRequest 由服务端(ui_page_inspect 工具)发起, 请求内核
+	// 回传当前页面的实时渲染状态; 内核以 inspect_result 帧应答同一 inspect_id。
+	ChatStreamInspectRequest = "inspect_request"
 
 	ChatToolPending   = "pending"
 	ChatToolRunning   = "running"
@@ -81,8 +87,32 @@ type ChatClientContext struct {
 	UserAgent string             `json:"user_agent,omitempty"`
 }
 
+// ChatClientInspectionItem 是内核回传的单个 Item 实时渲染状态(不可信数据)。
+type ChatClientInspectionItem struct {
+	ID      string `json:"id"`
+	Type    string `json:"type,omitempty"`
+	Page    string `json:"page,omitempty"`
+	Slot    string `json:"slot,omitempty"`
+	Present bool   `json:"present"`           // 是否有已连接的 DOM 节点
+	Visible bool   `json:"visible,omitempty"` // 是否实际占据可见空间
+	Width   int    `json:"width,omitempty"`
+	Height  int    `json:"height,omitempty"`
+	Text    string `json:"text,omitempty"`  // 渲染文本摘要(截断)
+	Error   string `json:"error,omitempty"` // 该 Item 最近一条运行错误
+}
+
+// ChatClientInspection 是内核对 inspect_request 的完整应答载荷(不可信数据)。
+type ChatClientInspection struct {
+	Page        string                     `json:"page,omitempty"` // 当前页面名, 空 = 单页/根
+	Viewport    ChatClientViewport         `json:"viewport"`
+	ThemeMode   string                     `json:"theme_mode,omitempty"` // light / dark
+	Items       []ChatClientInspectionItem `json:"items,omitempty"`
+	Errors      []string                   `json:"errors,omitempty"`       // 最近页面错误摘要
+	VisibleText string                     `json:"visible_text,omitempty"` // 全页可见文本(截断)
+}
+
 // ChatClientEvent 是客户端发来的 WS 事件:
-// type = user_message | confirm_tool | cancel。
+// type = user_message | confirm_tool | cancel | inspect_result。
 type ChatClientEvent struct {
 	Type     string        `json:"type"`
 	Messages []ChatMessage `json:"messages,omitempty"`
@@ -92,6 +122,9 @@ type ChatClientEvent struct {
 	ToolsEnabled  *bool             `json:"tools_enabled,omitempty"`
 	ClientContext ChatClientContext `json:"client_context"`
 	ToolCall      *ProposedToolCall `json:"tool_call,omitempty"`
+	// InspectID/Inspect 仅用于 inspect_result: 应答服务端的同 ID inspect_request。
+	InspectID string                `json:"inspect_id,omitempty"`
+	Inspect   *ChatClientInspection `json:"inspect,omitempty"`
 }
 
 // ChatPlanItem 是 Deep 模式向前端投影的一条结构化任务。
@@ -158,6 +191,8 @@ type ChatStreamEvent struct {
 	Agent        *ChatAgentStage    `json:"agent,omitempty"`
 	Budget       *ChatTurnBudget    `json:"budget,omitempty"`
 	Error        string             `json:"error,omitempty"`
+	// InspectID 仅用于 inspect_request: 内核应答 inspect_result 时原样带回。
+	InspectID string `json:"inspect_id,omitempty"`
 }
 
 // ProposedToolCall 是一次工具调用的描述; 需人工确认的调用带 HMAC 签名的

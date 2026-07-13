@@ -168,20 +168,6 @@ func (h *Handler) ListItems(ctx context.Context, user string) ([]Item, error) {
 	return items, nil
 }
 
-// snapshotLocked 在持有用户锁的前提下为 current 存一条完整 UI 快照。
-// 即使 Items/Pages 都为空也保存，使用户第一次创建的内容同样可回滚。
-func (h *Handler) snapshotLocked(ctx context.Context, user string, current []Item, by, note string) error {
-	pages, err := h.loadPages(ctx, user)
-	if err != nil {
-		return err
-	}
-	catalog, err := h.loadTemplateCatalog(ctx, user, pages)
-	if err != nil {
-		return err
-	}
-	return h.addRevisionLocked(ctx, user, newRevision(current, pages, by, note, catalog))
-}
-
 func newRevision(items []Item, pages []Page, by, note string, catalogs ...templateCatalog) Revision {
 	revision := Revision{
 		Version:   CurrentDataVersion,
@@ -198,10 +184,6 @@ func newRevision(items []Item, pages []Page, by, note string, catalogs ...templa
 		revision.TemplateRevisionClock = catalogs[0].NextRevision
 	}
 	return revision
-}
-
-func (h *Handler) addRevisionLocked(ctx context.Context, user string, rev Revision) error {
-	return h.store.AddRevision(ctx, user, rev, h.opts.maxRevisions)
 }
 
 func newRevisionID() string {
@@ -244,45 +226,48 @@ func (h *Handler) PutItems(ctx context.Context, user string, items []Item, by, n
 	lock.Lock()
 	defer lock.Unlock()
 
-	existing, err := h.store.Items(ctx, user)
-	if err != nil {
-		return err
-	}
-	if err := validateItems(existing); err != nil {
-		return fmt.Errorf("stored items are invalid: %w", err)
-	}
-	now := time.Now()
-	index := make(map[string]int, len(existing))
-	for i := range existing {
-		index[existing[i].ID] = i
-	}
-	merged := cloneItems(existing)
-	written := make([]Item, 0, len(items))
-	for _, it := range items {
-		if pos, ok := index[it.ID]; ok {
-			if sameItemContent(existing[pos], it) {
-				continue
-			}
-			it.UpdatedAt = now
-			merged[pos] = it
-		} else {
-			it.UpdatedAt = now
-			index[it.ID] = len(merged)
-			merged = append(merged, it)
+	var written []Item
+	err := h.updateUserStateLocked(ctx, user, func(before UserState) (UserState, error) {
+		existing := before.Items
+		if err := validateItems(existing); err != nil {
+			return UserState{}, fmt.Errorf("stored items are invalid: %w", err)
 		}
-		written = append(written, it)
-	}
-	// 必须先完成合并和上限校验，再生成快照；失败请求不能污染历史列表。
-	if len(merged) > MaxItemsPerUser {
-		return fmt.Errorf("too many items: %d > %d", len(merged), MaxItemsPerUser)
-	}
-	if len(written) == 0 {
-		return nil
-	}
-	if err := h.snapshotLocked(ctx, user, existing, by, note); err != nil {
-		return err
-	}
-	if err := h.store.ReplaceItems(ctx, user, merged); err != nil {
+		now := time.Now()
+		index := make(map[string]int, len(existing))
+		for i := range existing {
+			index[existing[i].ID] = i
+		}
+		merged := cloneItems(existing)
+		written = make([]Item, 0, len(items))
+		for _, it := range items {
+			if pos, ok := index[it.ID]; ok {
+				if sameItemContent(existing[pos], it) {
+					continue
+				}
+				it.UpdatedAt = now
+				merged[pos] = it
+			} else {
+				it.UpdatedAt = now
+				index[it.ID] = len(merged)
+				merged = append(merged, it)
+			}
+			written = append(written, it)
+		}
+		// 必须先完成合并和上限校验，再生成快照；失败请求不能污染历史列表。
+		if len(merged) > MaxItemsPerUser {
+			return UserState{}, fmt.Errorf("too many items: %d > %d", len(merged), MaxItemsPerUser)
+		}
+		if len(written) == 0 {
+			return UserState{}, errUserStateUnchanged
+		}
+		next, err := nextStateWithSnapshot(before, by, note, h.opts.maxRevisions)
+		if err != nil {
+			return UserState{}, err
+		}
+		next.Items = merged
+		return next, nil
+	})
+	if err != nil || len(written) == 0 {
 		return err
 	}
 	sortItems(written)
@@ -290,6 +275,22 @@ func (h *Handler) PutItems(ctx context.Context, user string, items []Item, by, n
 	h.publish(user, Event{Type: "items", Op: "put", Items: written, By: by})
 	h.audit(ctx, user, "items.put", by, note, map[string]any{"ids": itemIDList(written)})
 	return nil
+}
+
+// nextStateWithSnapshot 克隆 before 并前置一条完整快照, 供各写路径把
+// "先快照后写入"合并为对 Store 的单次原子替换。
+func nextStateWithSnapshot(before UserState, by, note string, keep int) (UserState, error) {
+	pages, err := statePages(before)
+	if err != nil {
+		return UserState{}, err
+	}
+	catalog, err := stateTemplateCatalog(before, pages)
+	if err != nil {
+		return UserState{}, err
+	}
+	next := cloneUserState(before)
+	prependRevision(&next, newRevision(before.Items, pages, by, note, catalog), keep)
+	return next, nil
 }
 
 func itemIDList(items []Item) []string {
@@ -309,33 +310,36 @@ func (h *Handler) DeleteItems(ctx context.Context, user string, ids []string, by
 	lock.Lock()
 	defer lock.Unlock()
 
-	existing, err := h.store.Items(ctx, user)
-	if err != nil {
-		return nil, err
-	}
-	if err := validateItems(existing); err != nil {
-		return nil, fmt.Errorf("stored items are invalid: %w", err)
-	}
-	drop := make(map[string]struct{}, len(ids))
-	for _, id := range ids {
-		drop[strings.TrimSpace(id)] = struct{}{}
-	}
-	kept := make([]Item, 0, len(existing))
-	removed := make([]string, 0, len(ids))
-	for _, it := range existing {
-		if _, ok := drop[it.ID]; ok {
-			removed = append(removed, it.ID)
-			continue
+	var removed []string
+	err := h.updateUserStateLocked(ctx, user, func(before UserState) (UserState, error) {
+		existing := before.Items
+		if err := validateItems(existing); err != nil {
+			return UserState{}, fmt.Errorf("stored items are invalid: %w", err)
 		}
-		kept = append(kept, it)
-	}
-	if len(removed) == 0 {
-		return nil, nil
-	}
-	if err := h.snapshotLocked(ctx, user, existing, by, note); err != nil {
-		return nil, err
-	}
-	if err := h.store.ReplaceItems(ctx, user, kept); err != nil {
+		drop := make(map[string]struct{}, len(ids))
+		for _, id := range ids {
+			drop[strings.TrimSpace(id)] = struct{}{}
+		}
+		kept := make([]Item, 0, len(existing))
+		removed = make([]string, 0, len(ids))
+		for _, it := range existing {
+			if _, ok := drop[it.ID]; ok {
+				removed = append(removed, it.ID)
+				continue
+			}
+			kept = append(kept, it)
+		}
+		if len(removed) == 0 {
+			return UserState{}, errUserStateUnchanged
+		}
+		next, err := nextStateWithSnapshot(before, by, note, h.opts.maxRevisions)
+		if err != nil {
+			return UserState{}, err
+		}
+		next.Items = kept
+		return next, nil
+	})
+	if err != nil || len(removed) == 0 {
 		return nil, err
 	}
 	h.metric("writes", 1)
@@ -353,40 +357,45 @@ func (h *Handler) ReplaceItems(ctx context.Context, user string, items []Item, b
 	lock.Lock()
 	defer lock.Unlock()
 
-	existing, err := h.store.Items(ctx, user)
-	if err != nil {
-		return err
-	}
-	if err := validateItems(existing); err != nil {
-		return fmt.Errorf("stored items are invalid: %w", err)
-	}
-	existingByID := make(map[string]Item, len(existing))
-	for _, it := range existing {
-		existingByID[it.ID] = it
-	}
-	now := time.Now()
-	next := cloneItems(items)
-	changed := len(next) != len(existing)
-	for i := range next {
-		if old, ok := existingByID[next[i].ID]; ok && sameItemContent(old, next[i]) {
-			next[i].UpdatedAt = old.UpdatedAt
-			continue
+	wrote := false
+	err := h.updateUserStateLocked(ctx, user, func(before UserState) (UserState, error) {
+		wrote = false
+		existing := before.Items
+		if err := validateItems(existing); err != nil {
+			return UserState{}, fmt.Errorf("stored items are invalid: %w", err)
 		}
-		next[i].UpdatedAt = now
-		changed = true
-	}
-	if !changed {
-		return nil
-	}
-	if err := h.snapshotLocked(ctx, user, existing, by, note); err != nil {
-		return err
-	}
-	if err := h.store.ReplaceItems(ctx, user, next); err != nil {
+		existingByID := make(map[string]Item, len(existing))
+		for _, it := range existing {
+			existingByID[it.ID] = it
+		}
+		now := time.Now()
+		replaced := cloneItems(items)
+		changed := len(replaced) != len(existing)
+		for i := range replaced {
+			if old, ok := existingByID[replaced[i].ID]; ok && sameItemContent(old, replaced[i]) {
+				replaced[i].UpdatedAt = old.UpdatedAt
+				continue
+			}
+			replaced[i].UpdatedAt = now
+			changed = true
+		}
+		if !changed {
+			return UserState{}, errUserStateUnchanged
+		}
+		next, err := nextStateWithSnapshot(before, by, note, h.opts.maxRevisions)
+		if err != nil {
+			return UserState{}, err
+		}
+		next.Items = replaced
+		wrote = true
+		return next, nil
+	})
+	if err != nil || !wrote {
 		return err
 	}
 	h.metric("writes", 1)
 	h.publish(user, Event{Type: "items", Op: "replace", By: by})
-	h.audit(ctx, user, "items.replace", by, note, map[string]any{"count": len(next)})
+	h.audit(ctx, user, "items.replace", by, note, map[string]any{"count": len(items)})
 	return nil
 }
 
@@ -416,61 +425,61 @@ func (h *Handler) Rollback(ctx context.Context, user, revisionID, by string) err
 	lock.Lock()
 	defer lock.Unlock()
 
-	before, err := h.readUserStateLocked(ctx, user)
-	if err != nil {
-		return err
-	}
-	var target *Revision
-	for i := range before.Revisions {
-		if before.Revisions[i].ID == revisionID {
-			target = &before.Revisions[i]
-			break
+	var restorePages, restoreTemplates bool
+	err := h.updateUserStateLocked(ctx, user, func(before UserState) (UserState, error) {
+		var target *Revision
+		for i := range before.Revisions {
+			if before.Revisions[i].ID == revisionID {
+				target = &before.Revisions[i]
+				break
+			}
 		}
-	}
-	if target == nil {
-		return ErrNotFound
-	}
-	if target.Version < 0 || target.Version > CurrentDataVersion {
-		return fmt.Errorf("revision %q uses unsupported version %d", revisionID, target.Version)
-	}
-	if err := validateItems(target.Items); err != nil {
-		return fmt.Errorf("invalid revision %q: %w", revisionID, err)
-	}
-	currentPages, err := statePages(before)
-	if err != nil {
-		return err
-	}
-	currentCatalog, err := stateTemplateCatalog(before, currentPages)
-	if err != nil {
-		return err
-	}
-	next := cloneUserState(before)
-	next.Items = cloneItems(target.Items)
-	restorePages := target.Version >= 2
-	if restorePages {
-		if err := setStatePages(&next, target.Pages); err != nil {
-			return fmt.Errorf("invalid revision %q pages: %w", revisionID, err)
+		if target == nil {
+			return UserState{}, ErrNotFound
 		}
-	}
-	restoreTemplates := target.Version >= 3
-	if restoreTemplates {
-		targetCatalog := templateCatalog{
-			RootTemplateID: target.RootTemplateID, NextRevision: target.TemplateRevisionClock,
-			Templates: cloneTemplates(target.Templates),
+		if target.Version < 0 || target.Version > CurrentDataVersion {
+			return UserState{}, fmt.Errorf("revision %q uses unsupported version %d", revisionID, target.Version)
 		}
-		if err := rebaseRestoredTemplateCatalog(&targetCatalog, currentCatalog); err != nil {
-			return fmt.Errorf("restore revision %q template revisions: %w", revisionID, err)
+		if err := validateItems(target.Items); err != nil {
+			return UserState{}, fmt.Errorf("invalid revision %q: %w", revisionID, err)
 		}
-		targetPages := currentPages
+		currentPages, err := statePages(before)
+		if err != nil {
+			return UserState{}, err
+		}
+		currentCatalog, err := stateTemplateCatalog(before, currentPages)
+		if err != nil {
+			return UserState{}, err
+		}
+		next := cloneUserState(before)
+		next.Items = cloneItems(target.Items)
+		restorePages = target.Version >= 2
 		if restorePages {
-			targetPages = target.Pages
+			if err := setStatePages(&next, target.Pages); err != nil {
+				return UserState{}, fmt.Errorf("invalid revision %q pages: %w", revisionID, err)
+			}
 		}
-		if err := setStateTemplateCatalog(&next, targetCatalog, targetPages); err != nil {
-			return fmt.Errorf("invalid revision %q templates: %w", revisionID, err)
+		restoreTemplates = target.Version >= 3
+		if restoreTemplates {
+			targetCatalog := templateCatalog{
+				RootTemplateID: target.RootTemplateID, NextRevision: target.TemplateRevisionClock,
+				Templates: cloneTemplates(target.Templates),
+			}
+			if err := rebaseRestoredTemplateCatalog(&targetCatalog, currentCatalog); err != nil {
+				return UserState{}, fmt.Errorf("restore revision %q template revisions: %w", revisionID, err)
+			}
+			targetPages := currentPages
+			if restorePages {
+				targetPages = target.Pages
+			}
+			if err := setStateTemplateCatalog(&next, targetCatalog, targetPages); err != nil {
+				return UserState{}, fmt.Errorf("invalid revision %q templates: %w", revisionID, err)
+			}
 		}
-	}
-	prependRevision(&next, newRevision(before.Items, currentPages, by, "rollback to "+revisionID, currentCatalog), h.opts.maxRevisions)
-	if err := h.replaceUserStateLocked(ctx, user, before, next); err != nil {
+		prependRevision(&next, newRevision(before.Items, currentPages, by, "rollback to "+revisionID, currentCatalog), h.opts.maxRevisions)
+		return next, nil
+	})
+	if err != nil {
 		return err
 	}
 	h.metric("writes", 1)
@@ -673,19 +682,6 @@ func (h *Handler) loadPages(ctx context.Context, user string) ([]Page, error) {
 	return decodePages(raw)
 }
 
-func (h *Handler) savePagesLocked(ctx context.Context, user string, pages []Page) error {
-	if err := validatePages(pages); err != nil {
-		return err
-	}
-	next := append([]Page(nil), pages...)
-	sortPages(next)
-	raw, err := json.Marshal(next)
-	if err != nil {
-		return err
-	}
-	return h.store.KVSet(ctx, user, pagesKVKey, raw)
-}
-
 func statePages(state UserState) ([]Page, error) {
 	raw, ok := state.KV[pagesKVKey]
 	if !ok {
@@ -789,6 +785,11 @@ func applyLegacyUserState(ctx context.Context, store Store, user string, state U
 }
 
 func (h *Handler) replaceUserStateLocked(ctx context.Context, user string, before, next UserState) error {
+	// 条件写优先: 版本取自本次读到的 before, 任何跨副本交错写都会触发
+	// ErrVersionConflict, 由 updateUserStateLocked 重读重试。
+	if store, ok := h.store.(VersionedUserStateStore); ok {
+		return store.ReplaceUserStateVersioned(ctx, user, next, before.Version)
+	}
 	if store, ok := h.store.(UserStateStore); ok {
 		return store.ReplaceUserState(ctx, user, next)
 	}
@@ -800,6 +801,58 @@ func (h *Handler) replaceUserStateLocked(ctx context.Context, user string, befor
 		return fmt.Errorf("replace user state (previous state restored): %w", err)
 	}
 	return nil
+}
+
+// errUserStateUnchanged 由 updateUserStateLocked 的 mutate 回调返回,
+// 表示本次操作无需任何写入(不是错误)。
+var errUserStateUnchanged = errors.New("ihtml: user state unchanged")
+
+// userStateConflictAttempts 是条件写冲突的重试熔断上限。每次冲突都意味着
+// 另一个副本刚成功提交(系统整体在前进), 因此重试以 context 取消为主界;
+// 该上限只用于防御行为异常的 Store 造成的死循环。
+const userStateConflictAttempts = 64
+
+// updateUserStateLocked 是所有"读-改-写"变更的统一入口: 读完整状态 → mutate
+// 计算下一状态(含前置快照) → 单次原子替换。调用方必须已持有 userLock。
+// mutate 可能因条件写冲突被调用多次, 不得在闭包外累积副作用(应先重置再写入)。
+func (h *Handler) updateUserStateLocked(ctx context.Context, user string, mutate func(before UserState) (UserState, error)) error {
+	for attempt := 1; ; attempt++ {
+		before, err := h.readUserStateLocked(ctx, user)
+		if err != nil {
+			return err
+		}
+		next, err := mutate(before)
+		if errors.Is(err, errUserStateUnchanged) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		err = h.replaceUserStateLocked(ctx, user, before, next)
+		if err == nil || !errors.Is(err, ErrVersionConflict) || attempt >= userStateConflictAttempts {
+			return err
+		}
+		h.metric("state_conflicts", 1)
+		if err := sleepJittered(ctx, attempt); err != nil {
+			return errors.Join(ErrVersionConflict, err)
+		}
+	}
+}
+
+// sleepJittered 在冲突重试间做带抖动的指数退避(上限 ~50ms), 并响应 ctx 取消。
+func sleepJittered(ctx context.Context, attempt int) error {
+	base := time.Millisecond << min(attempt, 5) // 2ms..64ms 量级
+	var b [2]byte
+	_, _ = rand.Read(b[:])
+	jitter := time.Duration(uint16(b[0])<<8|uint16(b[1])) % base
+	timer := time.NewTimer(base/2 + jitter)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func prependRevision(state *UserState, rev Revision, keep int) {
@@ -824,55 +877,61 @@ func (h *Handler) SetPage(ctx context.Context, user string, page Page) error {
 	if err := page.Validate(); err != nil {
 		return err
 	}
-	lock := h.userLock(user)
-	lock.Lock()
-	defer lock.Unlock()
-	pages, err := h.loadPages(ctx, user)
-	if err != nil {
-		return err
-	}
-	oldPages := append([]Page(nil), pages...)
-	catalog, err := h.loadTemplateCatalog(ctx, user, oldPages)
-	if err != nil {
-		return err
-	}
-	if page.TemplateID != "" && templateIndex(catalog.Templates, page.TemplateID) < 0 {
-		return fmt.Errorf("page %q references missing template %q", page.Name, page.TemplateID)
-	}
-	found := false
-	for i := range pages {
-		if pages[i].Name == page.Name {
-			if pages[i] == page {
-				return nil
-			}
-			pages[i] = page
-			found = true
-			break
-		}
-	}
-	if !found {
-		if len(pages) >= maxPagesPerUser {
-			return fmt.Errorf("too many pages")
-		}
-		pages = append(pages, page)
-	}
-	items, err := h.store.Items(ctx, user)
-	if err != nil {
-		return err
-	}
-	if err := validateItems(items); err != nil {
-		return fmt.Errorf("stored items are invalid: %w", err)
-	}
 	by := mutationSourceFromContext(ctx)
 	if by == "" {
 		by = "api"
 	}
-	if err := h.addRevisionLocked(ctx, user, newRevision(items, oldPages, by, "set page "+page.Name, catalog)); err != nil {
+	lock := h.userLock(user)
+	lock.Lock()
+	defer lock.Unlock()
+
+	wrote := false
+	err := h.updateUserStateLocked(ctx, user, func(before UserState) (UserState, error) {
+		wrote = false
+		oldPages, err := statePages(before)
+		if err != nil {
+			return UserState{}, err
+		}
+		catalog, err := stateTemplateCatalog(before, oldPages)
+		if err != nil {
+			return UserState{}, err
+		}
+		if page.TemplateID != "" && templateIndex(catalog.Templates, page.TemplateID) < 0 {
+			return UserState{}, fmt.Errorf("page %q references missing template %q", page.Name, page.TemplateID)
+		}
+		pages := append([]Page(nil), oldPages...)
+		found := false
+		for i := range pages {
+			if pages[i].Name == page.Name {
+				if pages[i] == page {
+					return UserState{}, errUserStateUnchanged
+				}
+				pages[i] = page
+				found = true
+				break
+			}
+		}
+		if !found {
+			if len(pages) >= maxPagesPerUser {
+				return UserState{}, fmt.Errorf("too many pages")
+			}
+			pages = append(pages, page)
+		}
+		if err := validateItems(before.Items); err != nil {
+			return UserState{}, fmt.Errorf("stored items are invalid: %w", err)
+		}
+		next := cloneUserState(before)
+		prependRevision(&next, newRevision(before.Items, oldPages, by, "set page "+page.Name, catalog), h.opts.maxRevisions)
+		if err := setStatePages(&next, pages); err != nil {
+			return UserState{}, err
+		}
+		wrote = true
+		return next, nil
+	})
+	if err != nil || !wrote {
 		return err
 	}
-	if err := h.savePagesLocked(ctx, user, pages); err != nil {
-		return err
-	}
+	h.metric("writes", 1)
 	h.publish(user, Event{Type: "pages"})
 	h.audit(ctx, user, "page.set", by, "", map[string]any{"page": page.Name})
 	return nil
@@ -886,54 +945,62 @@ func (h *Handler) DeletePage(ctx context.Context, user, name, by string) ([]stri
 	lock := h.userLock(user)
 	lock.Lock()
 	defer lock.Unlock()
-	before, err := h.readUserStateLocked(ctx, user)
-	if err != nil {
-		return nil, err
-	}
-	if err := validateItems(before.Items); err != nil {
-		return nil, fmt.Errorf("stored items are invalid: %w", err)
-	}
-	pages, err := statePages(before)
-	if err != nil {
-		return nil, err
-	}
-	catalog, err := stateTemplateCatalog(before, pages)
-	if err != nil {
-		return nil, err
-	}
-	keptPages := make([]Page, 0, len(pages))
-	pageFound := false
-	for _, p := range pages {
-		if p.Name != name {
-			keptPages = append(keptPages, p)
-		} else {
-			pageFound = true
+
+	var (
+		pageFound  bool
+		ids        []string
+		layoutKeys []string
+	)
+	err := h.updateUserStateLocked(ctx, user, func(before UserState) (UserState, error) {
+		if err := validateItems(before.Items); err != nil {
+			return UserState{}, fmt.Errorf("stored items are invalid: %w", err)
 		}
-	}
-	keptItems := make([]Item, 0, len(before.Items))
-	ids := make([]string, 0)
-	for _, it := range before.Items {
-		if it.Page == name {
-			ids = append(ids, it.ID)
-			continue
+		pages, err := statePages(before)
+		if err != nil {
+			return UserState{}, err
 		}
-		keptItems = append(keptItems, it)
+		catalog, err := stateTemplateCatalog(before, pages)
+		if err != nil {
+			return UserState{}, err
+		}
+		keptPages := make([]Page, 0, len(pages))
+		pageFound = false
+		for _, p := range pages {
+			if p.Name != name {
+				keptPages = append(keptPages, p)
+			} else {
+				pageFound = true
+			}
+		}
+		keptItems := make([]Item, 0, len(before.Items))
+		ids = make([]string, 0)
+		for _, it := range before.Items {
+			if it.Page == name {
+				ids = append(ids, it.ID)
+				continue
+			}
+			keptItems = append(keptItems, it)
+		}
+		layoutKeys = itemLayoutKeysForPage(before.KV, name)
+		if !pageFound && len(ids) == 0 && len(layoutKeys) == 0 {
+			return UserState{}, errUserStateUnchanged
+		}
+		next := cloneUserState(before)
+		next.Items = keptItems
+		for _, key := range layoutKeys {
+			delete(next.KV, key)
+		}
+		if err := setStatePages(&next, keptPages); err != nil {
+			return UserState{}, err
+		}
+		prependRevision(&next, newRevision(before.Items, pages, by, "delete page "+name, catalog), h.opts.maxRevisions)
+		return next, nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	layoutKeys := itemLayoutKeysForPage(before.KV, name)
 	if !pageFound && len(ids) == 0 && len(layoutKeys) == 0 {
 		return nil, nil
-	}
-	next := cloneUserState(before)
-	next.Items = keptItems
-	for _, key := range layoutKeys {
-		delete(next.KV, key)
-	}
-	if err := setStatePages(&next, keptPages); err != nil {
-		return nil, err
-	}
-	prependRevision(&next, newRevision(before.Items, pages, by, "delete page "+name, catalog), h.opts.maxRevisions)
-	if err := h.replaceUserStateLocked(ctx, user, before, next); err != nil {
-		return nil, err
 	}
 	// 所有广播都在原子提交成功后发生，客户端不会观察到半删除状态。
 	if pageFound {
@@ -1133,7 +1200,7 @@ func (h *Handler) ExportUser(ctx context.Context, user string) (*UserExport, err
 // ImportUser 用 UserExport 整体替换该用户数据(先清场再写入)。
 // 用途: 备份恢复、环境迁移、新用户套模板。
 func (h *Handler) ImportUser(ctx context.Context, user string, export *UserExport) error {
-	next, err := h.importState(export)
+	imported, err := h.importState(export)
 	if err != nil {
 		return err
 	}
@@ -1141,33 +1208,33 @@ func (h *Handler) ImportUser(ctx context.Context, user string, export *UserExpor
 	lock.Lock()
 	defer lock.Unlock()
 
-	before, err := h.readUserStateLocked(ctx, user)
+	err = h.updateUserStateLocked(ctx, user, func(before UserState) (UserState, error) {
+		next := cloneUserState(imported)
+		beforePages, err := statePages(before)
+		if err != nil {
+			return UserState{}, err
+		}
+		beforeCatalog, err := stateTemplateCatalog(before, beforePages)
+		if err != nil {
+			return UserState{}, err
+		}
+		nextPages, err := statePages(next)
+		if err != nil {
+			return UserState{}, err
+		}
+		nextCatalog, err := stateTemplateCatalog(next, nextPages)
+		if err != nil {
+			return UserState{}, err
+		}
+		if err := rebaseRestoredTemplateCatalog(&nextCatalog, beforeCatalog); err != nil {
+			return UserState{}, err
+		}
+		if err := setStateTemplateCatalog(&next, nextCatalog, nextPages); err != nil {
+			return UserState{}, err
+		}
+		return next, nil
+	})
 	if err != nil {
-		return err
-	}
-	beforePages, err := statePages(before)
-	if err != nil {
-		return err
-	}
-	beforeCatalog, err := stateTemplateCatalog(before, beforePages)
-	if err != nil {
-		return err
-	}
-	nextPages, err := statePages(next)
-	if err != nil {
-		return err
-	}
-	nextCatalog, err := stateTemplateCatalog(next, nextPages)
-	if err != nil {
-		return err
-	}
-	if err := rebaseRestoredTemplateCatalog(&nextCatalog, beforeCatalog); err != nil {
-		return err
-	}
-	if err := setStateTemplateCatalog(&next, nextCatalog, nextPages); err != nil {
-		return err
-	}
-	if err := h.replaceUserStateLocked(ctx, user, before, next); err != nil {
 		return err
 	}
 	h.publish(user, Event{Type: "items", Op: "import", By: "import"})

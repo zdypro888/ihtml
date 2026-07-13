@@ -13,15 +13,17 @@ type MemoryStore struct {
 }
 
 var (
-	_ Store          = (*MemoryStore)(nil)
-	_ UserStateStore = (*MemoryStore)(nil)
-	_ RevisionStore  = (*MemoryStore)(nil)
+	_ Store                   = (*MemoryStore)(nil)
+	_ UserStateStore          = (*MemoryStore)(nil)
+	_ VersionedUserStateStore = (*MemoryStore)(nil)
+	_ RevisionStore           = (*MemoryStore)(nil)
 )
 
 type memoryUser struct {
 	items     []Item
 	kv        map[string]json.RawMessage
 	revisions []Revision // 新的在前
+	version   uint64     // 每次写入单调递增, 供条件写检测交错
 }
 
 // NewMemoryStore 创建内存存储。
@@ -53,7 +55,9 @@ func (s *MemoryStore) Items(_ context.Context, user string) ([]Item, error) {
 func (s *MemoryStore) ReplaceItems(_ context.Context, user string, items []Item) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.user(user, true).items = cloneItems(items)
+	u := s.user(user, true)
+	u.items = cloneItems(items)
+	u.version++
 	return nil
 }
 
@@ -76,7 +80,9 @@ func (s *MemoryStore) KVGet(_ context.Context, user, key string) (json.RawMessag
 func (s *MemoryStore) KVSet(_ context.Context, user, key string, value json.RawMessage) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.user(user, true).kv[key] = append(json.RawMessage(nil), value...)
+	u := s.user(user, true)
+	u.kv[key] = append(json.RawMessage(nil), value...)
+	u.version++
 	return nil
 }
 
@@ -85,7 +91,10 @@ func (s *MemoryStore) KVDelete(_ context.Context, user, key string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if u := s.user(user, false); u != nil {
-		delete(u.kv, key)
+		if _, ok := u.kv[key]; ok {
+			delete(u.kv, key)
+			u.version++
+		}
 	}
 	return nil
 }
@@ -121,7 +130,7 @@ func (s *MemoryStore) UserState(_ context.Context, user string) (UserState, erro
 	if u == nil {
 		return UserState{KV: map[string]json.RawMessage{}}, nil
 	}
-	return cloneUserState(UserState{Items: u.items, KV: u.kv, Revisions: u.revisions}), nil
+	return cloneUserState(UserState{Items: u.items, KV: u.kv, Revisions: u.revisions, Version: u.version}), nil
 }
 
 // ReplaceUserState 原子替换用户的完整状态。
@@ -129,7 +138,27 @@ func (s *MemoryStore) ReplaceUserState(_ context.Context, user string, state Use
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	next := cloneUserState(state)
-	s.users[user] = &memoryUser{items: next.Items, kv: next.KV, revisions: next.Revisions}
+	var version uint64
+	if u := s.user(user, false); u != nil {
+		version = u.version
+	}
+	s.users[user] = &memoryUser{items: next.Items, kv: next.KV, revisions: next.Revisions, version: version + 1}
+	return nil
+}
+
+// ReplaceUserStateVersioned 实现 VersionedUserStateStore。
+func (s *MemoryStore) ReplaceUserStateVersioned(_ context.Context, user string, state UserState, expected uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var version uint64
+	if u := s.user(user, false); u != nil {
+		version = u.version
+	}
+	if version != expected {
+		return ErrVersionConflict
+	}
+	next := cloneUserState(state)
+	s.users[user] = &memoryUser{items: next.Items, kv: next.KV, revisions: next.Revisions, version: expected + 1}
 	return nil
 }
 
@@ -190,5 +219,6 @@ func (s *MemoryStore) AddRevision(_ context.Context, user string, rev Revision, 
 	if keep > 0 && len(u.revisions) > keep {
 		u.revisions = u.revisions[:keep]
 	}
+	u.version++
 	return nil
 }

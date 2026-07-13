@@ -10,8 +10,15 @@ import (
 // ErrNotFound 表示请求的对象(KV 键/快照)不存在。
 var ErrNotFound = errors.New("ihtml: not found")
 
+// ErrVersionConflict 由 VersionedUserStateStore.ReplaceUserStateVersioned 返回,
+// 表示存储中的用户状态版本已不等于调用方读取时的版本(通常是另一个副本先写入)。
+// 调用方应重读状态、重放变更后重试。
+var ErrVersionConflict = errors.New("ihtml: user state version conflict")
+
 // Store 是持久化接口。实现只需要保证单个方法的原子性;
-// "读-改-写"的并发合并由上层(Handler)按用户加锁串行化。
+// "读-改-写"的并发合并在单副本内由上层(Handler)按用户加锁串行化。
+// 多副本部署要求 Store 同时实现 VersionedUserStateStore(内置 Store 均已实现),
+// 上层会用它做跨进程的条件写与冲突重试。
 //
 // user 是 UserResolver 解析出的用户标识, 实现应按它隔离数据。所有返回的
 // slice/map/RawMessage 必须是调用方可修改的值快照；实现不得在返回后继续修改
@@ -51,6 +58,11 @@ type UserState struct {
 	Items     []Item
 	KV        map[string]json.RawMessage
 	Revisions []Revision // 新的在前
+
+	// Version 是整个用户状态的乐观并发令牌，由实现 VersionedUserStateStore 的
+	// Store 在 UserState() 时填充；不支持版本的 Store 保持为 0。调用方应视为
+	// 不透明值：读到什么，条件写时就传什么。
+	Version uint64
 }
 
 // UserStateStore 是 Store 的可选增强接口。内置 Store 均实现它；第三方旧 Store
@@ -60,6 +72,25 @@ type UserState struct {
 type UserStateStore interface {
 	UserState(ctx context.Context, user string) (UserState, error)
 	ReplaceUserState(ctx context.Context, user string, state UserState) error
+}
+
+// VersionedUserStateStore 是 UserStateStore 的可选增强接口，为多副本部署提供
+// 跨进程的乐观并发控制。内置 Store 均实现它。
+//
+// 注意: 上层在两个替换方法中优先调用 ReplaceUserStateVersioned。若你通过嵌入
+// 内置 Store 做包装(审计/加密等)，Go 的方法提升会把版本化方法一并暴露——
+// 必须同时覆写 ReplaceUserState 与 ReplaceUserStateVersioned，否则包装逻辑会被绕过。
+//
+// 实现要求：
+//   - 用户状态版本从 0 开始（用户不存在或从未写入时为 0）；
+//   - 每个成功的写方法（ReplaceItems/KVSet/KVDelete/AddRevision/ReplaceUserState
+//     等）都必须单调推进该用户的版本，使并发的整状态条件写能察觉任何交错写入；
+//   - EraseUser 清除版本（回到 0）。
+type VersionedUserStateStore interface {
+	UserStateStore
+	// ReplaceUserStateVersioned 仅当该用户当前版本等于 expected 时原子替换完整
+	// 状态并推进版本；否则返回 ErrVersionConflict 且不产生任何修改。
+	ReplaceUserStateVersioned(ctx context.Context, user string, state UserState, expected uint64) error
 }
 
 // RevisionStore 是 Store 的可选增强接口，用于读取完整快照（包括较新契约中的
@@ -99,6 +130,7 @@ func cloneUserState(state UserState) UserState {
 		Items:     cloneItems(state.Items),
 		KV:        make(map[string]json.RawMessage, len(state.KV)),
 		Revisions: cloneRevisions(state.Revisions),
+		Version:   state.Version,
 	}
 	for key, value := range state.KV {
 		out.KV[key] = append(json.RawMessage(nil), value...)

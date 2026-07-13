@@ -78,6 +78,9 @@ func readBody(t *testing.T, res *http.Response) string {
 		sb.WriteString(sc.Text())
 		sb.WriteString("\n")
 	}
+	if err := sc.Err(); err != nil {
+		t.Fatalf("read body: %v", err)
+	}
 	return sb.String()
 }
 
@@ -110,8 +113,8 @@ func TestHandlerItemsFlow(t *testing.T) {
 	}
 	// 用户隔离
 	status, out = doJSON(t, "GET", base+"/items?uid=bob", "")
-	if len(out["items"].([]any)) != 0 {
-		t.Fatalf("bob should have no items: %v", out)
+	if status != 200 || len(out["items"].([]any)) != 0 {
+		t.Fatalf("bob should have no items: %d %v", status, out)
 	}
 	// 覆盖 one → 产生快照
 	status, _ = doJSON(t, "PUT", base+"/items?uid=alice", `[{"id":"one","type":"html","order":2,"content":"<b>2</b>"}]`)
@@ -120,8 +123,8 @@ func TestHandlerItemsFlow(t *testing.T) {
 	}
 	status, out = doJSON(t, "GET", base+"/revisions?uid=alice", "")
 	revs := out["revisions"].([]any)
-	if len(revs) == 0 {
-		t.Fatalf("should have revisions: %v", out)
+	if status != 200 || len(revs) == 0 {
+		t.Fatalf("should have revisions: %d %v", status, out)
 	}
 	revID := revs[0].(map[string]any)["id"].(string)
 	// 回滚
@@ -130,6 +133,9 @@ func TestHandlerItemsFlow(t *testing.T) {
 		t.Fatalf("rollback: %d %v", status, out)
 	}
 	status, out = doJSON(t, "GET", base+"/items?uid=alice", "")
+	if status != 200 {
+		t.Fatalf("items after rollback: %d %v", status, out)
+	}
 	for _, it := range out["items"].([]any) {
 		m := it.(map[string]any)
 		if m["id"] == "one" && m["content"] != "<b>1</b>" {
@@ -142,8 +148,8 @@ func TestHandlerItemsFlow(t *testing.T) {
 		t.Fatalf("delete: %d %v", status, out)
 	}
 	status, out = doJSON(t, "GET", base+"/items?uid=alice", "")
-	if len(out["items"].([]any)) != 0 {
-		t.Fatalf("items should be empty after delete: %v", out)
+	if status != 200 || len(out["items"].([]any)) != 0 {
+		t.Fatalf("items should be empty after delete: %d %v", status, out)
 	}
 	// 非法 Item 校验
 	status, out = doJSON(t, "PUT", base+"/items?uid=alice", `[{"id":"bad id","type":"html","content":""}]`)
@@ -176,8 +182,8 @@ func TestHandlerKVAndErrors(t *testing.T) {
 	}
 	status, out = doJSON(t, "GET", base+"/errors?uid=u", "")
 	errs := out["errors"].([]any)
-	if len(errs) != 1 || errs[0].(map[string]any)["message"] != "boom" {
-		t.Fatalf("list errors: %v", out)
+	if status != 200 || len(errs) != 1 || errs[0].(map[string]any)["message"] != "boom" {
+		t.Fatalf("list errors: %d %v", status, out)
 	}
 	// config
 	status, out = doJSON(t, "GET", base+"/config?uid=u", "")

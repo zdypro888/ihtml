@@ -651,7 +651,42 @@
         });
         this.burger = burger;
         rootEl.append(this.mask, burger);
+        this.bindGestures();
         queueMicrotask(() => { if (!destroyed) { grid.apply(); if (typeof itemEditor !== 'undefined') itemEditor.apply(); } });
+      },
+      // 移动端抽屉滑动手势: 左缘右滑打开, 抽屉开启时左滑关闭。
+      // 只绑一次(实例级 disposer 回收), shell reset/ensure 循环不叠加监听。
+      gesturesBound: false,
+      bindGestures() {
+        if (this.gesturesBound) return;
+        this.gesturesBound = true;
+        let track = null;
+        on(rootEl, 'touchstart', (ev) => {
+          track = null;
+          if (!this.active || env.mode !== 'mobile' || ev.touches.length !== 1) return;
+          if (!rootEl.classList.contains('ihtml-has-sidebar')) return;
+          const t = ev.touches[0];
+          const open = appEl.classList.contains('ihtml-sidebar-open');
+          if (!open) {
+            // 仅容器左缘 24px 内起手才追踪, 不干扰页面内横向滑动组件。
+            const rect = rootEl.getBoundingClientRect();
+            if (t.clientX - rect.left > 24) return;
+          }
+          track = { x: t.clientX, y: t.clientY, open };
+        }, { passive: true });
+        on(rootEl, 'touchmove', (ev) => {
+          if (!track || ev.touches.length !== 1) return;
+          const t = ev.touches[0];
+          const dx = t.clientX - track.x;
+          const dy = t.clientY - track.y;
+          if (Math.abs(dx) < 40 || Math.abs(dx) < Math.abs(dy) * 1.2) return;
+          const { open } = track;
+          track = null;
+          if (!open && dx > 0) this.sidebar(true);
+          else if (open && dx < 0) this.sidebar(false);
+        }, { passive: true });
+        on(rootEl, 'touchend', () => { track = null; }, { passive: true });
+        on(rootEl, 'touchcancel', () => { track = null; }, { passive: true });
       },
       reset() {
         if (!this.active) return;
@@ -4580,6 +4615,54 @@
         };
       },
 
+      // 应答服务端 ui_page_inspect 工具的 inspect_request:
+      // 回传每个 Item 的实时渲染状态, 让 AI 基于真实屏幕自检而不是猜测。
+      sendInspectResult(ev) {
+        if (!ev || !ev.inspect_id || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+        const items = [];
+        const lastErrorFor = (id) => {
+          for (let i = errorLog.length - 1; i >= 0; i--) {
+            if (errorLog[i].item_id === id) return clip(errorLog[i].message, 300);
+          }
+          return '';
+        };
+        for (const [id, rec] of registry) {
+          const node = (rec.nodes || []).find((n) => n && n.isConnected);
+          const view = {
+            id,
+            type: (rec.item && rec.item.type) || '',
+            page: rec.page || '',
+            slot: (rec.item && rec.item.meta && rec.item.meta.slot) || '',
+            present: !!node,
+          };
+          if (node && node.getBoundingClientRect) {
+            const rect = node.getBoundingClientRect();
+            view.width = Math.round(rect.width);
+            view.height = Math.round(rect.height);
+            view.visible = rect.width > 0 && rect.height > 0;
+            view.text = clip((node.innerText || '').trim(), 200);
+          }
+          const err = lastErrorFor(id);
+          if (err) view.error = err;
+          items.push(view);
+        }
+        const recent = errorLog.slice(-8).map((e) => clip((e.item_id ? e.item_id + ': ' : '') + e.message, 300));
+        try {
+          this.ws.send(JSON.stringify({
+            type: 'inspect_result',
+            inspect_id: ev.inspect_id,
+            inspect: {
+              page: nav.currentPage,
+              viewport: { width: env.width, height: env.height, mode: env.mode },
+              theme_mode: theme.get().mode || '',
+              items,
+              errors: recent,
+              visible_text: clip((appEl.innerText || '').trim(), 2000),
+            },
+          }));
+        } catch (e) { /* 连接瞬断: 服务端工具会按离线超时返回 */ }
+      },
+
       async send() {
         const text = this.dom.input.value.trim();
         if (!text || this.active || this.sending) return;
@@ -5280,6 +5363,9 @@
         while (this.turnsByRun.size > 128) this.turnsByRun.delete(this.turnsByRun.keys().next().value);
       },
       onEvent(ev) {
+        // inspect_request 是服务端的带外请求, 不依赖轮次归属与序号去重:
+        // 即使本地轮次已收尾也应答, 否则服务端工具只能等到超时。
+        if (ev.type === 'inspect_request') { this.sendInspectResult(ev); return; }
         const t = this.eventTurn(ev);
         if (!t) return;
         if (ev.agent || ev.budget || ev.type === 'assistant_plan' || ev.tool_call && ev.tool_call.approval_resume === 'manual_tool_only') {
@@ -5750,35 +5836,48 @@
     };
   }
 
-  /* ---------- 全局入口 ---------- */
+  /* ---------- 全局入口 ----------
+   * 同一页面支持多个相互隔离的实例(内核状态全部在 createInstance 闭包内)。
+   * 兼容层: 第一个实例的 API 仍合并到 window.ihtml, 既有单实例宿主代码不变;
+   * 多实例宿主请使用 mount() 的返回值操作各自实例。 */
+  const liveInstances = new Set();
   const globalAPI = {
     version: '0.6.0',
     mounted: false,
+    instances: () => Array.from(liveInstances),
     mount(hostEl, opts = {}) {
-      if (globalAPI.mounted) throw new Error('ihtml: already mounted (call ihtml.destroy() first)');
       if (typeof hostEl === 'string') hostEl = doc.querySelector(hostEl);
       if (!hostEl || !hostEl.appendChild) throw new Error('ihtml.mount: container element required');
+      if (hostEl.__ihtmlMounted) throw new Error('ihtml: this element is already mounted (destroy() it first)');
+      if (opts.routing === 'hash' && liveInstances.size > 0) {
+        // location.hash 是页面级单资源, 第二个 hash 路由实例会互相踩踏。
+        console.warn('[ihtml] multiple instances should use the default memory routing; hash routing is page-global');
+      }
       const inst = createInstance(hostEl, opts);
-      globalAPI.mounted = true;
+      hostEl.__ihtmlMounted = true;
+      liveInstances.add(inst);
+      const primary = !globalAPI.mounted;
       const instDestroy = inst.destroy;
-      inst.destroy = () => { instDestroy(); globalAPI.mounted = false; };
-      Object.assign(globalAPI, inst);
-      return globalAPI;
+      inst.destroy = () => {
+        instDestroy();
+        liveInstances.delete(inst);
+        delete hostEl.__ihtmlMounted;
+        if (globalAPI.__primary === inst) {
+          globalAPI.mounted = false;
+          globalAPI.__primary = null;
+        }
+      };
+      if (primary) {
+        globalAPI.mounted = true;
+        globalAPI.__primary = inst;
+        Object.assign(globalAPI, inst);
+      }
+      return inst;
     },
   };
   window.ihtml = globalAPI;
 
-  /* 自动挂载: 独立页 #app[data-ihtml-standalone] 或声明式 [data-ihtml] */
-  function autoMount() {
-    if (globalAPI.mounted) return;
-    const standaloneEl = doc.getElementById('app');
-    if (standaloneEl && standaloneEl.hasAttribute('data-ihtml-standalone')) {
-      globalAPI.mount(standaloneEl, { standalone: true });
-      return;
-    }
-    const target = doc.querySelector('[data-ihtml]');
-    if (!target) return;
-    const d = target.dataset;
+  function declarativeOptions(d) {
     const o = {};
     if (d.base) o.base = d.base;
     if (d.routing) o.routing = d.routing;
@@ -5794,8 +5893,21 @@
     else if (d.theme) { try { o.theme = JSON.parse(d.theme); } catch { /* 忽略 */ } }
     if (d.strings) { try { o.strings = JSON.parse(d.strings); } catch { /* 忽略 */ } }
     if (d.menu) o.menu = d.menu;
-    globalAPI.mount(target, o);
+    return o;
+  }
+
+  /* 自动挂载: 独立页 #app[data-ihtml-standalone] 或全部声明式 [data-ihtml] */
+  function autoMount() {
+    const standaloneEl = doc.getElementById('app');
+    if (!globalAPI.mounted && standaloneEl && standaloneEl.hasAttribute('data-ihtml-standalone')) {
+      globalAPI.mount(standaloneEl, { standalone: true });
+      return;
+    }
+    doc.querySelectorAll('[data-ihtml]').forEach((target) => {
+      if (target.__ihtmlMounted) return;
+      globalAPI.mount(target, declarativeOptions(target.dataset));
+    });
   }
   autoMount();
-  if (!globalAPI.mounted) doc.addEventListener('DOMContentLoaded', autoMount);
+  doc.addEventListener('DOMContentLoaded', autoMount);
 })();

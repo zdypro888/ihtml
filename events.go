@@ -4,24 +4,41 @@ import (
 	"sync"
 )
 
+// SSE 事件协议常量。这些字符串是公共线格式契约(见 COMPATIBILITY.md):
+// 同一协议版本内只做增量扩展, 消费者可安全地按常量比较。
 const (
-	EventItems     = "items"
+	// EventItems 表示 Item 集合变化。
+	EventItems = "items"
+	// EventTemplates 表示布局模板变化。
 	EventTemplates = "templates"
-	EventKV        = "kv"
-	EventPages     = "pages"
-	EventResync    = "resync"
+	// EventKV 表示某个用户级 KV 键变化(Event.Key 为键名)。
+	EventKV = "kv"
+	// EventPages 表示页面注册表变化。
+	EventPages = "pages"
+	// EventResync 要求客户端放弃增量、全量刷新(Event.Reason 说明原因)。
+	EventResync = "resync"
 
-	EventOpPut      = "put"
-	EventOpPublish  = "publish"
-	EventOpDelete   = "delete"
-	EventOpReplace  = "replace"
+	// EventOpPut 是 items/templates 事件的"写入/更新"操作。
+	EventOpPut = "put"
+	// EventOpPublish 是模板 Draft 发布为 Published 的操作。
+	EventOpPublish = "publish"
+	// EventOpDelete 是删除操作(Event.IDs 为目标)。
+	EventOpDelete = "delete"
+	// EventOpReplace 是 Item 全集整体替换操作。
+	EventOpReplace = "replace"
+	// EventOpRollback 是快照回滚操作。
 	EventOpRollback = "rollback"
-	EventOpImport   = "import"
-	EventOpPurge    = "purge"
+	// EventOpImport 是全量导入操作。
+	EventOpImport = "import"
+	// EventOpPurge 是用户数据清除操作。
+	EventOpPurge = "purge"
 
+	// ResyncSubscribe: 订阅建立时的基线 resync。
 	ResyncSubscribe = "subscribe"
-	ResyncOverflow  = "overflow"
-	ResyncPeriodic  = "periodic"
+	// ResyncOverflow: 订阅积压溢出、增量队列已被清空。
+	ResyncOverflow = "overflow"
+	// ResyncPeriodic: 周期性校准(兜底不能报告丢包的外部 Broadcaster)。
+	ResyncPeriodic = "periodic"
 )
 
 // Event 是推送给页面内核的实时事件(经 SSE 下发)。

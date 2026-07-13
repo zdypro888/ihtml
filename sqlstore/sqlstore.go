@@ -40,9 +40,10 @@ type Store struct {
 }
 
 var (
-	_ ihtml.Store          = (*Store)(nil)
-	_ ihtml.UserStateStore = (*Store)(nil)
-	_ ihtml.RevisionStore  = (*Store)(nil)
+	_ ihtml.Store                   = (*Store)(nil)
+	_ ihtml.UserStateStore          = (*Store)(nil)
+	_ ihtml.VersionedUserStateStore = (*Store)(nil)
+	_ ihtml.RevisionStore           = (*Store)(nil)
 )
 
 // New 创建 Store。db 由调用方负责打开与关闭。
@@ -144,6 +145,13 @@ func (s *Store) Init(ctx context.Context) error {
 			items ` + payloadText + ` NOT NULL,
 			PRIMARY KEY (usr, id)
 		)`,
+		// 用户状态版本行。每个写事务开头先 UPDATE 此行:
+		// 既做乐观并发令牌，也让并发写同一用户的事务在数据库层互相串行化。
+		`CREATE TABLE IF NOT EXISTS ihtml_user_version (
+			usr ` + keyText + ` NOT NULL,
+			version BIGINT NOT NULL,
+			PRIMARY KEY (usr)
+		)`,
 	}
 	for _, stmt := range stmts {
 		if err := s.exec(ctx, stmt); err != nil {
@@ -172,6 +180,65 @@ func (s *Store) Init(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// bumpUserVersionTx 在写事务开头原子推进用户版本(不存在则从 1 建行)。
+// 它必须是事务的第一条写语句: 版本行锁统一了并发写同一用户的加锁顺序,
+// 让不同副本的写事务在数据库层串行化, 也是乐观并发令牌的推进点。
+func (s *Store) bumpUserVersionTx(ctx context.Context, tx *sql.Tx, user string) error {
+	query := `INSERT INTO ihtml_user_version (usr, version) VALUES (?, 1)
+	          ON CONFLICT (usr) DO UPDATE SET version = ihtml_user_version.version + 1`
+	if s.dialect == MySQL {
+		query = `INSERT INTO ihtml_user_version (usr, version) VALUES (?, 1)
+		         ON DUPLICATE KEY UPDATE version = version + 1`
+	}
+	if _, err := tx.ExecContext(ctx, s.rebind(query), user); err != nil {
+		return fmt.Errorf("sqlstore: bump user version (升级到含 ihtml_user_version 的版本后需重新执行 Init): %w", err)
+	}
+	return nil
+}
+
+// casUserVersionTx 仅当当前版本等于 expected 时把版本推进到 expected+1;
+// 否则返回 ihtml.ErrVersionConflict。与 bumpUserVersionTx 一样必须最先执行。
+func (s *Store) casUserVersionTx(ctx context.Context, tx *sql.Tx, user string, expected uint64) error {
+	if expected == 0 {
+		// 版本行不存在(新用户或未迁移的旧数据)时建行为 1; 行已存在说明版本 ≥ 1,
+		// 唯一键冲突即并发写抢先——按版本冲突处理并保留底层错误细节。
+		if _, err := tx.ExecContext(ctx, s.rebind(
+			`INSERT INTO ihtml_user_version (usr, version) VALUES (?, 1)`), user); err != nil {
+			return errors.Join(ihtml.ErrVersionConflict, err)
+		}
+		return nil
+	}
+	res, err := tx.ExecContext(ctx, s.rebind(
+		`UPDATE ihtml_user_version SET version = ? WHERE usr = ? AND version = ?`),
+		expected+1, user, expected)
+	if err != nil {
+		return fmt.Errorf("sqlstore: cas user version (升级到含 ihtml_user_version 的版本后需重新执行 Init): %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ihtml.ErrVersionConflict
+	}
+	return nil
+}
+
+func (s *Store) userVersion(ctx context.Context, tx *sql.Tx, user string) (uint64, error) {
+	var version uint64
+	err := tx.QueryRowContext(ctx, s.rebind(
+		`SELECT version FROM ihtml_user_version WHERE usr = ?`), user).Scan(&version)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	if err != nil {
+		// 旧库尚未建 ihtml_user_version 表时按无版本处理, 读路径保持可用;
+		// 首次写入会返回明确的迁移提示。
+		return 0, nil
+	}
+	return version, nil
 }
 
 func ts(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
@@ -319,6 +386,9 @@ func (s *Store) ReplaceItems(ctx context.Context, user string, items []ihtml.Ite
 		return err
 	}
 	defer tx.Rollback() //nolint:errcheck // commit 成功后回滚是空操作
+	if err := s.bumpUserVersionTx(ctx, tx, user); err != nil {
+		return err
+	}
 	if err := s.syncItemsTx(ctx, tx, user, items); err != nil {
 		return err
 	}
@@ -346,6 +416,9 @@ func (s *Store) KVSet(ctx context.Context, user, key string, value json.RawMessa
 		return err
 	}
 	defer tx.Rollback() //nolint:errcheck
+	if err := s.bumpUserVersionTx(ctx, tx, user); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, s.rebind(`DELETE FROM ihtml_kv WHERE usr = ? AND k = ?`), user, key); err != nil {
 		return err
 	}
@@ -358,7 +431,18 @@ func (s *Store) KVSet(ctx context.Context, user, key string, value json.RawMessa
 
 // KVDelete 实现 ihtml.Store。
 func (s *Store) KVDelete(ctx context.Context, user, key string) error {
-	return s.exec(ctx, `DELETE FROM ihtml_kv WHERE usr = ? AND k = ?`, user, key)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	if err := s.bumpUserVersionTx(ctx, tx, user); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, s.rebind(`DELETE FROM ihtml_kv WHERE usr = ? AND k = ?`), user, key); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // KVKeys 实现 ihtml.Store。
@@ -386,6 +470,10 @@ func (s *Store) EraseUser(ctx context.Context, user string) error {
 		return err
 	}
 	defer tx.Rollback() //nolint:errcheck
+	// 版本行最先删除(与写事务的加锁顺序一致), 用户回到"无版本"状态。
+	if _, err := tx.ExecContext(ctx, s.rebind(`DELETE FROM ihtml_user_version WHERE usr = ?`), user); err != nil {
+		return fmt.Errorf("sqlstore: erase user version (升级到含 ihtml_user_version 的版本后需重新执行 Init): %w", err)
+	}
 	for _, table := range []string{"ihtml_items", "ihtml_kv", "ihtml_revisions"} {
 		if _, err := tx.ExecContext(ctx, s.rebind(`DELETE FROM `+table+` WHERE usr = ?`), user); err != nil {
 			return err
@@ -492,6 +580,12 @@ func (s *Store) UserState(ctx context.Context, user string) (ihtml.UserState, er
 		}
 		return state.Revisions[i].ID > state.Revisions[j].ID
 	})
+	// 版本最后读: 若连接已坏, 前面的数据查询会先暴露错误;
+	// 走到这里仍失败基本只剩"旧库未建版本表", 按 0(无版本)处理保持读路径可用。
+	state.Version, err = s.userVersion(ctx, tx, user)
+	if err != nil {
+		return ihtml.UserState{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return ihtml.UserState{}, err
 	}
@@ -619,16 +713,40 @@ func (s *Store) ReplaceUserState(ctx context.Context, user string, state ihtml.U
 		return err
 	}
 	defer tx.Rollback() //nolint:errcheck
+	if err := s.bumpUserVersionTx(ctx, tx, user); err != nil {
+		return err
+	}
+	if err := s.replaceUserStateTx(ctx, tx, user, state); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// ReplaceUserStateVersioned 实现 ihtml.VersionedUserStateStore: 版本条件写,
+// 供多副本部署在数据库层做真正的跨进程 CAS。
+func (s *Store) ReplaceUserStateVersioned(ctx context.Context, user string, state ihtml.UserState, expected uint64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	if err := s.casUserVersionTx(ctx, tx, user, expected); err != nil {
+		return err
+	}
+	if err := s.replaceUserStateTx(ctx, tx, user, state); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) replaceUserStateTx(ctx context.Context, tx *sql.Tx, user string, state ihtml.UserState) error {
 	if err := s.syncItemsTx(ctx, tx, user, state.Items); err != nil {
 		return err
 	}
 	if err := s.syncKVTx(ctx, tx, user, state.KV); err != nil {
 		return err
 	}
-	if err := s.syncRevisionsTx(ctx, tx, user, state.Revisions); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return s.syncRevisionsTx(ctx, tx, user, state.Revisions)
 }
 
 // Revisions 实现 ihtml.Store。
@@ -720,6 +838,9 @@ func (s *Store) AddRevision(ctx context.Context, user string, rev ihtml.Revision
 		return err
 	}
 	defer tx.Rollback() //nolint:errcheck
+	if err := s.bumpUserVersionTx(ctx, tx, user); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, s.rebind(
 		`INSERT INTO ihtml_revisions (usr, id, note, created_by, created_at, item_count, items)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`),

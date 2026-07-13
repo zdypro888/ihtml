@@ -140,12 +140,6 @@ func (s *confirmSigner) prepareContext(ctx context.Context, user string, call ih
 	return call, nil
 }
 
-// prepare 保留给包内兼容调用；实际工具路径使用可返回存储错误的 prepareContext。
-func (s *confirmSigner) prepare(user string, call ihtml.ProposedToolCall) ihtml.ProposedToolCall {
-	prepared, _ := s.prepareContext(context.Background(), user, call)
-	return prepared
-}
-
 // consumeContext 验签并原子核销。false 表示卡片无效(改动/过期/重放)。
 func (s *confirmSigner) consumeContext(ctx context.Context, user string, call ihtml.ProposedToolCall) (bool, error) {
 	if s == nil || s.keyErr != nil || len(s.key) == 0 {

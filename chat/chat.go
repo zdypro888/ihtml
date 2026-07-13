@@ -221,6 +221,7 @@ func (b *Backend) NewSession(_ context.Context, sctx *ihtml.ChatSessionContext) 
 		access:       sctx.Access,
 		sessionID:    sessionID,
 		store:        b.store,
+		inspect:      newInspectBroker(),
 	}, nil
 }
 
@@ -265,6 +266,7 @@ type session struct {
 
 	sessionID string
 	store     adk.SessionEventStore[*schema.Message]
+	inspect   *inspectBroker
 	closeOnce sync.Once
 }
 
@@ -297,6 +299,11 @@ func (s *session) HandleEvent(ctx context.Context, ev *ihtml.ChatClientEvent) {
 		}
 	case "confirm_tool":
 		s.startConfirm(ctx, ev)
+	case "inspect_result":
+		// 内核对 inspect_request 的应答: 路由给等待中的 ui_page_inspect 调用。
+		if s.inspect != nil && strings.TrimSpace(ev.InspectID) != "" {
+			s.inspect.deliver(strings.TrimSpace(ev.InspectID), ev.Inspect)
+		}
 	case "cancel":
 		s.stopActiveWork()
 		_ = s.emit(ihtml.ChatStreamEvent{Type: "assistant_status", Status: "已取消当前请求。", ModelReady: true})
@@ -340,7 +347,7 @@ func (s *session) enqueueTurn(parent context.Context, ev *ihtml.ChatClientEvent)
 		toolsEnabled = *ev.ToolsEnabled
 	}
 	if mode == AgentModeDeep && !toolsEnabled && modeErr == nil {
-		modeErr = errors.New("Deep 模式需要启用工具")
+		modeErr = errors.New("deep 模式需要启用工具")
 	}
 	budget := newTurnBudget(cfg, mode, emit)
 	approvalResume := ""
@@ -392,7 +399,7 @@ func (s *session) enqueueTurn(parent context.Context, ev *ihtml.ChatClientEvent)
 	}
 	chatModel = withTurnBudget(chatModel, budget)
 	tl := &timeline{emit: emit, mode: mode}
-	rt := &runtime{svc: s.svc, user: s.user, cfg: cfg, mode: mode, signer: s.backend.signer, writeLimiter: s.backend.writeLimiter, timeline: tl, apis: s.apis, apiBase: s.apiBase, inbound: s.inbound, inboundQuery: s.inboundQuery, access: s.access}
+	rt := &runtime{svc: s.svc, user: s.user, cfg: cfg, mode: mode, signer: s.backend.signer, writeLimiter: s.backend.writeLimiter, timeline: tl, apis: s.apis, apiBase: s.apiBase, inbound: s.inbound, inboundQuery: s.inboundQuery, access: s.access, inspect: s.inspect}
 	// 系统提示注入"页面现状"清单: 省一次 ui_item_list 往返, 也防盲写撞 id。
 	instruction := buildSystemPrompt(cfg, ev.ClientContext, s.apis) + inventoryPrompt(parent, s.svc, s.user)
 	agent, err := buildTurnAgent(parent, mode, instruction, chatModel, rt, budget, cfg, toolsEnabled)
@@ -559,7 +566,7 @@ func (s *session) startConfirm(parent context.Context, ev *ihtml.ChatClientEvent
 		if ev.ToolCall != nil && ev.ToolCall.AgentMode == AgentModeDeep {
 			mode = AgentModeDeep
 		}
-		rt := &runtime{svc: s.svc, user: s.user, cfg: s.backend.cfg, mode: mode, signer: s.backend.signer, writeLimiter: s.backend.writeLimiter, timeline: &timeline{emit: emit, mode: mode}, apis: s.apis, apiBase: s.apiBase, inbound: s.inbound, inboundQuery: s.inboundQuery, access: s.access}
+		rt := &runtime{svc: s.svc, user: s.user, cfg: s.backend.cfg, mode: mode, signer: s.backend.signer, writeLimiter: s.backend.writeLimiter, timeline: &timeline{emit: emit, mode: mode}, apis: s.apis, apiBase: s.apiBase, inbound: s.inbound, inboundQuery: s.inboundQuery, access: s.access, inspect: s.inspect}
 		if err := executeConfirmedTool(callCtx, rt, ev.ToolCall, emit); err != nil && ctx.Err() == nil {
 			_ = emit(ihtml.ChatStreamEvent{Type: "turn_error", Error: userFacingError(err), ModelReady: true})
 		}

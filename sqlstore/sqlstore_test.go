@@ -7,18 +7,52 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	_ "github.com/lib/pq"
+	_ "modernc.org/sqlite"
 
 	"github.com/zdypro888/ihtml"
+	"github.com/zdypro888/ihtml/storetest"
 )
 
 func TestNewRejectsNilDB(t *testing.T) {
 	if _, err := New(nil, Postgres); !errors.Is(err, ErrNilDB) {
 		t.Fatalf("New(nil) error = %v", err)
 	}
+}
+
+// newSQLiteStore 用纯 Go SQLite 驱动建全新临时库, 让三方言共享的 SQL 逻辑
+// (含 PG/SQLite 同形的 ON CONFLICT upsert)在 CI 中获得真实数据库覆盖。
+func newSQLiteStore(t *testing.T) *Store {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "ihtml_test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	// SQLite 单写者: 限制连接数避免测试并发下的 SQLITE_BUSY。
+	db.SetMaxOpenConns(1)
+	store, err := New(db, SQLite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	return store
+}
+
+// TestSQLiteConformance 用公开的 storetest 套件验收 SQLite 方言(每个子套件全新库)。
+func TestSQLiteConformance(t *testing.T) {
+	storetest.Run(t, func(t *testing.T) ihtml.Store { return newSQLiteStore(t) })
+}
+
+// TestSQLiteEndToEnd 在真实 SQLite 上跑与 Postgres 相同的 Handler 级回归。
+func TestSQLiteEndToEnd(t *testing.T) {
+	endToEnd(t, newSQLiteStore(t))
 }
 
 // TestPostgres 需要真实 postgres: 设置 IHTML_TEST_PG_DSN 才会运行。
@@ -38,10 +72,16 @@ func TestPostgres(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx := context.Background()
-	if err := store.Init(ctx); err != nil {
+	if err := store.Init(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	endToEnd(t, store)
+}
+
+// endToEnd 是与方言无关的 Handler 级回归: Items/KV/Template/Revisions 全链路。
+func endToEnd(t *testing.T, store *Store) {
+	t.Helper()
+	ctx := context.Background()
 	user := fmt.Sprintf("t-%d", time.Now().UnixNano()) // 每次跑用独立用户避免残留干扰
 
 	// Items

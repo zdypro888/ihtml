@@ -145,6 +145,15 @@ func (s *rejectingStateStore) ReplaceUserState(ctx context.Context, user string,
 	return s.MemoryStore.ReplaceUserState(ctx, user, state)
 }
 
+// 嵌入会把 ReplaceUserStateVersioned 一并提升出来, 包装 Store 必须两个替换
+// 方法都拦截, 否则 Handler 会优先走版本化路径绕过注入(见 store.go 接口文档)。
+func (s *rejectingStateStore) ReplaceUserStateVersioned(ctx context.Context, user string, state UserState, expected uint64) error {
+	if s.reject {
+		return errors.New("injected atomic replace failure")
+	}
+	return s.MemoryStore.ReplaceUserStateVersioned(ctx, user, state, expected)
+}
+
 func TestDeletePageFailureLeavesNoPartialState(t *testing.T) {
 	ctx := context.Background()
 	store := &rejectingStateStore{MemoryStore: NewMemoryStore()}

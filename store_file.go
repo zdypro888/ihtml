@@ -14,17 +14,18 @@ import (
 )
 
 // FileStore 把每个用户的数据存成一个 JSON 文件(<dir>/u<sha256>.json),
-// 写入走临时文件+rename 保证原子性。适合单机小规模部署与本地开发;
-// 大规模生产建议自行实现 Store 接入数据库。
+// 写入走临时文件+fsync+rename+目录同步, 保证原子性与崩溃/掉电一致性。
+// 适合单机小规模部署与本地开发; 大规模生产建议使用 sqlstore 或自行实现 Store。
 type FileStore struct {
 	dir string
 	mu  sync.Mutex // 文件级读-改-写串行化
 }
 
 var (
-	_ Store          = (*FileStore)(nil)
-	_ UserStateStore = (*FileStore)(nil)
-	_ RevisionStore  = (*FileStore)(nil)
+	_ Store                   = (*FileStore)(nil)
+	_ UserStateStore          = (*FileStore)(nil)
+	_ VersionedUserStateStore = (*FileStore)(nil)
+	_ RevisionStore           = (*FileStore)(nil)
 )
 
 // NewFileStore 创建文件存储, dir 不存在时自动创建。
@@ -39,6 +40,7 @@ type fileUserData struct {
 	Items     []Item                     `json:"items"`
 	KV        map[string]json.RawMessage `json:"kv,omitempty"`
 	Revisions []Revision                 `json:"revisions,omitempty"` // 新的在前
+	Version   uint64                     `json:"version,omitempty"`   // 每次写入单调递增; 旧文件缺省为 0
 }
 
 // fileName 始终散列完整用户标识，避免在默认大小写不敏感的文件系统上
@@ -97,19 +99,52 @@ func (s *FileStore) save(user string, data *fileUserData) error {
 	}
 	target := s.fileName(user)
 	tmp := target + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
+	if err := writeFileSync(tmp, raw); err != nil {
+		_ = os.Remove(tmp)
 		return err
 	}
 	if err := os.Rename(tmp, target); err != nil {
 		_ = os.Remove(tmp)
 		return err
 	}
+	// rename 后同步目录, 否则崩溃/掉电时目录项可能仍指向旧文件甚至丢失。
+	syncDir(s.dir)
 	legacy := s.legacyFileName(user)
 	if legacy != target {
 		_ = os.Remove(legacy) // 新文件已经原子落盘，旧文件清理失败不影响正确性
 	}
 	return nil
 }
+
+// writeFileSync 写入并 fsync, 保证 rename 可见时数据块已落盘。
+func writeFileSync(name string, raw []byte) error {
+	f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(raw); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// syncDir 尽力同步目录元数据; 个别文件系统不支持目录 fsync, 失败不视为错误。
+func syncDir(dir string) {
+	d, err := os.Open(dir)
+	if err != nil {
+		return
+	}
+	_ = d.Sync()
+	_ = d.Close()
+}
+
+// errFileStoreNoop 由 update 回调返回, 表示无需写盘(也不推进版本)。
+var errFileStoreNoop = errors.New("ihtml: file store noop")
 
 func (s *FileStore) update(user string, fn func(*fileUserData) error) error {
 	s.mu.Lock()
@@ -119,8 +154,12 @@ func (s *FileStore) update(user string, fn func(*fileUserData) error) error {
 		return err
 	}
 	if err := fn(data); err != nil {
+		if errors.Is(err, errFileStoreNoop) {
+			return nil
+		}
 		return err
 	}
+	data.Version++
 	return s.save(user, data)
 }
 
@@ -169,6 +208,9 @@ func (s *FileStore) KVSet(_ context.Context, user, key string, value json.RawMes
 // KVDelete 实现 Store。
 func (s *FileStore) KVDelete(_ context.Context, user, key string) error {
 	return s.update(user, func(d *fileUserData) error {
+		if _, ok := d.KV[key]; !ok {
+			return errFileStoreNoop
+		}
 		delete(d.KV, key)
 		return nil
 	})
@@ -199,6 +241,7 @@ func (s *FileStore) EraseUser(_ context.Context, user string) error {
 			errs = append(errs, err)
 		}
 	}
+	syncDir(s.dir)
 	return errors.Join(errs...)
 }
 
@@ -210,15 +253,34 @@ func (s *FileStore) UserState(_ context.Context, user string) (UserState, error)
 	if err != nil {
 		return UserState{}, err
 	}
-	return cloneUserState(UserState{Items: data.Items, KV: data.KV, Revisions: data.Revisions}), nil
+	return cloneUserState(UserState{Items: data.Items, KV: data.KV, Revisions: data.Revisions, Version: data.Version}), nil
 }
 
 // ReplaceUserState 原子替换用户的完整状态。
 func (s *FileStore) ReplaceUserState(_ context.Context, user string, state UserState) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	data, err := s.load(user)
+	if err != nil {
+		return err
+	}
 	next := cloneUserState(state)
-	return s.save(user, &fileUserData{Items: next.Items, KV: next.KV, Revisions: next.Revisions})
+	return s.save(user, &fileUserData{Items: next.Items, KV: next.KV, Revisions: next.Revisions, Version: data.Version + 1})
+}
+
+// ReplaceUserStateVersioned 实现 VersionedUserStateStore。
+func (s *FileStore) ReplaceUserStateVersioned(_ context.Context, user string, state UserState, expected uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	data, err := s.load(user)
+	if err != nil {
+		return err
+	}
+	if data.Version != expected {
+		return ErrVersionConflict
+	}
+	next := cloneUserState(state)
+	return s.save(user, &fileUserData{Items: next.Items, KV: next.KV, Revisions: next.Revisions, Version: expected + 1})
 }
 
 // Revisions 实现 Store。

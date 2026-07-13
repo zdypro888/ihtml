@@ -57,7 +57,9 @@ func collectEvents(ctx context.Context, iter *adk.AsyncIterator[*adk.AgentEvent]
 			continue
 		}
 		if event.Err != nil {
-			if _, ok := errors.AsType[*adk.WillRetryError](event.Err); ok {
+			// errors.As 而非 1.26 的 errors.AsType: SDK 最低 Go 版本保持 1.25。
+			var willRetry *adk.WillRetryError
+			if errors.As(event.Err, &willRetry) {
 				if emit != nil {
 					_ = emit(ihtml.ChatStreamEvent{Type: "assistant_status", Status: "模型连接中断, 正在重试…", ModelReady: true})
 				}

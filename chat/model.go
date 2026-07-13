@@ -107,10 +107,7 @@ func newClaudeChatModel(ctx context.Context, cfg Config) (einoModel.ToolCallingC
 // 写进 BaseURL 的常见配置，避免最终请求成 /v1/v1/messages。
 func normalizeClaudeBaseURL(raw string) string {
 	base := strings.TrimRight(strings.TrimSpace(raw), "/")
-	if strings.HasSuffix(base, "/v1") {
-		base = strings.TrimSuffix(base, "/v1")
-	}
-	return base
+	return strings.TrimSuffix(base, "/v1")
 }
 
 // claudeThinkingChatModel 把显式 Thinking 配置注入 Generate/Stream，并在
