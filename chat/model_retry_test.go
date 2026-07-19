@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"testing"
 	"time"
 
@@ -32,6 +33,10 @@ func TestModelRetryClassification(t *testing.T) {
 		{"cancelled", context.Canceled, false},
 		{"timeout", context.DeadlineExceeded, true},
 		{"unexpected eof", io.ErrUnexpectedEOF, true},
+		{"network timeout", &net.OpError{Op: "read", Net: "tcp", Err: context.DeadlineExceeded}, true},
+		{"temporary dns", &net.DNSError{Err: "temporary", Name: "model.example", IsTemporary: true}, true},
+		{"missing dns", &net.DNSError{Err: "no such host", Name: "model.invalid", IsNotFound: true}, false},
+		{"invalid address", net.InvalidAddrError("bad address"), false},
 		{"rate limit status", errors.New("error, status code: 429, too many requests"), true},
 		{"underscore status", errors.New("provider status_code=502"), true},
 		{"upstream status", errors.New("HTTP status=503"), true},

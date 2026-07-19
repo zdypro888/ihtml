@@ -98,6 +98,11 @@ the first tagged release, changes are recorded under **Unreleased**.
 
 ### Changed
 
+- Eino ADK is aligned with `v0.10.0-alpha.12` and the Claude adapter with
+  `v0.1.23`. The bounded in-memory session store now runs Eino's official
+  `SessionEventStore` conformance suite. Core builds are checked to remain
+  Eino-free, so an existing host Agent can implement `ChatBackend` without
+  linking the standalone `ihtml/chat` runtime.
 - Model text/reasoning stream chunks are coalesced into UTF-8-safe bounded
   WebSocket deltas; the same bounded projection now drives both deltas and the
   authoritative `assistant_done` snapshot, including retry rollback/replay.

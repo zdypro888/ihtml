@@ -31,6 +31,8 @@
 | `ihtml/redisbroadcast` | 多副本实时事件：非阻塞 Redis Pub/Sub + 用户级全局单调版本；`*redis.Client` 与 Broadcaster 生命周期均由宿主关闭 |
 | `ihtml/storetest` | 第三方 `Store` 实现的官方一致性验收套件（`storetest.Run`），内置 Store 同样由它验收 |
 
+**AI 所有权只有一种。** 宿主已有自己的 Agent、会话、记忆或权限系统时，应实现 `ihtml.ChatBackend` 并通过 `WithChatBackend` 注入；此时不要再创建 `ihtml/chat.Backend`。`ihtml/chat` 只服务没有既有 AI 中枢的独立部署，负责 ihtml 领域的 Fast/Deep Agent、UI 工具、确认边界与会话治理。两种模式共享同一套前端协议，但不会在一个进程里叠加两套模型循环。
+
 旧的 `ihtml.New` / `chat.New` 为兼容保留；新集成推荐 `NewHandler` / `NewChecked`，让所有配置错误在开始监听前返回。公共协议字符串均有导出常量，模型能力响应带 `protocol_version`。当前仍处于 pre-v1 阶段；发布 v1 前会继续保持新增优先、破坏性调整集中并提供迁移说明。
 
 完整兼容约定见 [COMPATIBILITY.md](COMPATIBILITY.md)，未发布变更见 [CHANGELOG.md](CHANGELOG.md)。许可证为 [MIT](LICENSE)，最低 Go 版本 1.25（CI 同时验证最低版与最新稳定版）；正式发版前仍需由项目所有者打首个 semver tag。

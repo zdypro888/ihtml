@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/cloudwego/eino-ext/components/model/claude"
 	"github.com/cloudwego/eino-ext/components/model/openai"
 	einoModel "github.com/cloudwego/eino/components/model"
@@ -297,7 +298,8 @@ func (m *claudeThinkingChatModel) WithTools(tools []*schema.ToolInfo) (einoModel
 }
 
 func (m *claudeThinkingChatModel) thinkingOption() einoModel.Option {
-	return claude.WithThinking(&claude.Thinking{Enable: true, BudgetTokens: m.budgetTokens})
+	thinking := anthropic.ThinkingConfigParamOfEnabled(int64(m.budgetTokens))
+	return claude.WithThinkingConfig(&thinking)
 }
 
 func (m *claudeThinkingChatModel) Generate(ctx context.Context, input []*schema.Message, opts ...einoModel.Option) (*schema.Message, error) {

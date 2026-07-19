@@ -241,7 +241,35 @@ func (s *outputSizeEstimator) addMessagePartCommon(part *schema.MessagePartCommo
 	if err := s.addString(part.MIMEType); err != nil {
 		return err
 	}
-	return s.addExtra(part.Extra)
+	legacyExtra, err := legacyMessagePartExtra(part)
+	if err != nil {
+		return err
+	}
+	return s.addExtra(legacyExtra)
+}
+
+// Eino still decodes the deprecated MessagePartCommon.Extra wire field, so a
+// custom provider can populate it even though new code writes metadata on the
+// containing input/output part. Read that compatibility field without binding
+// new code to the deprecated selector; if its upstream shape changes, fail
+// closed rather than silently excluding unknown output from the budget.
+func legacyMessagePartExtra(part *schema.MessagePartCommon) (map[string]any, error) {
+	value := reflect.ValueOf(part)
+	if value.IsNil() {
+		return nil, nil
+	}
+	field := value.Elem().FieldByName("Extra")
+	if !field.IsValid() {
+		return nil, nil
+	}
+	if !field.CanInterface() {
+		return nil, errUnsafeModelOutputValue
+	}
+	extra, ok := field.Interface().(map[string]any)
+	if !ok {
+		return nil, errUnsafeModelOutputValue
+	}
+	return extra, nil
 }
 
 func (s *outputSizeEstimator) addInt64Bytes(values []int64) error {

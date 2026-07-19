@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/cloudwego/eino/adk"
+	adksession "github.com/cloudwego/eino/adk/session"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -17,6 +18,17 @@ func historyEvent(id, content string) *adk.SessionEvent[*schema.Message] {
 		Kind:    adk.SessionEventMessage,
 		Message: schema.UserMessage(content),
 	}
+}
+
+func TestBoundedHistoryEinoConformance(t *testing.T) {
+	adksession.RunConformanceTests(t, func(testing.TB) adk.SessionEventStore[*schema.Message] {
+		return newBoundedSessionStore(historyLimits{
+			maxSessions: -1,
+			maxEvents:   -1,
+			maxBytes:    -1,
+			idleTTL:     -1,
+		})
+	}, schema.UserMessage)
 }
 
 func TestBoundedHistoryPrunesOldestEvents(t *testing.T) {

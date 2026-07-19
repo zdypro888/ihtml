@@ -48,6 +48,14 @@ func TestBudgetedModelRejectsOversizedGenerateContentAndToolArguments(t *testing
 	const limit = int64(64 << 10)
 	large := strings.Repeat("x", int(limit)+1)
 	base64Data := large
+	legacyMultimodal := new(schema.Message)
+	if err := json.Unmarshal([]byte(`{"multi_content":[{"type":"image_url","image_url":{"url":"`+large+`"}}]}`), legacyMultimodal); err != nil {
+		t.Fatal(err)
+	}
+	legacyPartExtra := new(schema.Message)
+	if err := json.Unmarshal([]byte(`{"assistant_output_multi_content":[{"type":"image_url","image":{"extra":{"payload":"`+large+`"}}}]}`), legacyPartExtra); err != nil {
+		t.Fatal(err)
+	}
 	for name, message := range map[string]*schema.Message{
 		"content":      schema.AssistantMessage(large, nil),
 		"message name": {Name: large},
@@ -56,14 +64,8 @@ func TestBudgetedModelRejectsOversizedGenerateContentAndToolArguments(t *testing
 		"finish reason": {
 			ResponseMeta: &schema.ResponseMeta{FinishReason: large},
 		},
-		"legacy multimodal URL": {
-			MultiContent: []schema.ChatMessagePart{{
-				Type: schema.ChatMessagePartTypeImageURL,
-				ImageURL: &schema.ChatMessageImageURL{
-					URL: large,
-				},
-			}},
-		},
+		"legacy multimodal URL": legacyMultimodal,
+		"legacy part extra":     legacyPartExtra,
 		"input multimodal bytes": {
 			UserInputMultiContent: []schema.MessageInputPart{{
 				Type: schema.ChatMessagePartTypeFileURL,
