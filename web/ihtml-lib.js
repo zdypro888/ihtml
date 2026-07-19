@@ -2460,12 +2460,19 @@
       out.base = base.href;
       if (!standalone) out.params = new URLSearchParams(out.params || {});
       if (out.storageKey != null) out.storageKey = String(out.storageKey);
+      if (out.scriptNonce != null) out.scriptNonce = String(out.scriptNonce).trim();
       if (Array.isArray(out.messageOrigins)) out.messageOrigins = out.messageOrigins.slice();
       out.routing = out.routing || (standalone ? 'hash' : 'memory');
       if (out.routing !== 'memory' && out.routing !== 'hash') {
         throw new TypeError('ihtml.mount: routing must be "memory" or "hash"');
       }
       return out;
+    }
+    function applyScriptNonce(script, nonce) {
+      if (!script) return script;
+      const value = String(nonce || '').trim();
+      if (value) script.nonce = value;
+      return script;
     }
     function scopeCSS(css, standalone, scopeStyles, instanceKey) {
       css = String(css || '');
@@ -2970,7 +2977,7 @@
       return right > left && bottom > top;
     }
     return Object.freeze({
-      storageHash, storageKey, migrateLegacyStorage, selectPrimary, itemLifecycleRecord, itemFacadeExpression, normalizeMountOptions, scopeCSS, inspectRange,
+      storageHash, storageKey, migrateLegacyStorage, selectPrimary, itemLifecycleRecord, itemFacadeExpression, normalizeMountOptions, applyScriptNonce, scopeCSS, inspectRange,
       hasIHTMLBinding, classicItemScript, moduleItemScript, rectVisible,
     });
   })();

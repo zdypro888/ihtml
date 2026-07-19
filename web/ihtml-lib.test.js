@@ -123,12 +123,13 @@ test('runtime persistence keys separate host, base, user, and value kind', () =>
 });
 
 test('runtime validates mount options before browser-side effects', () => {
-  const input = { base: '/sdk', params: { uid: 'alice' }, routing: 'memory' };
+  const input = { base: '/sdk', params: { uid: 'alice' }, routing: 'memory', scriptNonce: '  nonce-123  ' };
   const normalized = runtime.normalizeMountOptions(input, 'https://host.test/app/page', false);
   assert.equal(normalized.base, 'https://host.test/sdk/');
   assert.equal(normalized.routing, 'memory');
   assert.equal(normalized.params.get('uid'), 'alice');
-  assert.deepEqual(input, { base: '/sdk', params: { uid: 'alice' }, routing: 'memory' }, 'preflight must not mutate host options');
+  assert.equal(normalized.scriptNonce, 'nonce-123');
+  assert.deepEqual(input, { base: '/sdk', params: { uid: 'alice' }, routing: 'memory', scriptNonce: '  nonce-123  ' }, 'preflight must not mutate host options');
   assert.equal(
     runtime.normalizeMountOptions({ base: 'https://api.test/root?token=secret#page' }, 'https://host.test/', false).base,
     'https://api.test/root/',
@@ -140,6 +141,15 @@ test('runtime validates mount options before browser-side effects', () => {
   assert.throws(() => runtime.normalizeMountOptions({ base: 'https://user:pass@api.test/' }, 'https://host.test/', false), /credentials/);
   assert.throws(() => runtime.normalizeMountOptions({ routing: 'absolute' }, 'https://host.test/', false), /routing/);
   assert.throws(() => runtime.normalizeMountOptions('bad-options', 'https://host.test/', false), /options/);
+});
+
+test('runtime applies a host CSP nonce only when one is configured', () => {
+  const script = {};
+  assert.equal(runtime.applyScriptNonce(script, '  random-nonce  '), script);
+  assert.equal(script.nonce, 'random-nonce');
+  const untouched = {};
+  runtime.applyScriptNonce(untouched, '');
+  assert.equal(Object.hasOwn(untouched, 'nonce'), false);
 });
 
 test('runtime migrates legacy storage once without overwriting scoped data or deleting rollback keys', () => {

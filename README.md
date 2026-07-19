@@ -60,7 +60,7 @@
 - **同页多实例**：`mount` 可多次调用（或写多个 `data-ihtml` 声明），内核生成的 CSS 选择器边界、Item 词法 `ihtml` API、主题/模型/Agent 模式/对话会话缓存和内核 ARIA ID 均按实例隔离，各自 `destroy()`。Item 正文自带的 `id` 不会被重写，操作 Item DOM 必须从返回 API 的 `root` 开始查询。兼容层的 `window.ihtml` 动态指向当前主实例，主实例销毁后自动提升仍存活的第一个实例；多实例宿主仍必须保留每次 `mount()` 的返回值，并保持默认内存路由（hash 是页面级单资源）
 - `storageKey` / `data-ihtml-storage-key` 为实例提供跨刷新稳定的本地缓存身份；宿主元素有稳定 `id` 时可省略，否则建议显式设置。键还会按 `base` 和已解析用户隔离，切换身份不会复用上一用户的对话。升级时，首个成功解析身份的实例会一次性复制旧的无作用域主题、模型、Agent 模式和会话键；旧键保留供回滚，但不会再被第二个实例认领
 - 也支持 iframe 嵌入独立页。跨域父页面必须用 `WithMessageOrigins("https://host.example.com")` 显式放行 postMessage 与 CSP `frame-ancestors`
-- Item 中声明式的外部 `<script src>` / `<link rel=stylesheet>` 默认拒绝；只有受控宿主可显式设置 `allowExternalAssets:true`。外链 stylesheet 是文档级资源，不能被内核 `@scope` 重写；外链 classic Item 脚本若需异步使用实例 API，必须在脚本同步顶层先捕获 `const instance = window.ihtml`，回调只使用 `instance`。外链 ES Module 没有可靠的 `document.currentScript`；多实例宿主应由自己的初始化函数显式传入 `mount()` 返回 API，或使用能注入词法 `ihtml` 的内联 module Item。这不是沙箱：Item 是可信可执行代码，仍可通过 JS、图片或 CSS 发起网络请求。兼容旧 CSS 时可临时设置 `scopeStyles:false`
+- Item 中声明式的外部 `<script src>` / `<link rel=stylesheet>` 默认拒绝；只有受控宿主可显式设置 `allowExternalAssets:true`。启用严格 `script-src` CSP 的嵌入宿主应把当前响应的随机 nonce 传给 `mount({scriptNonce})`，内核会把它附加到所有动态 Item script，无需放开 `unsafe-inline`。外链 stylesheet 是文档级资源，不能被内核 `@scope` 重写；外链 classic Item 脚本若需异步使用实例 API，必须在脚本同步顶层先捕获 `const instance = window.ihtml`，回调只使用 `instance`。外链 ES Module 没有可靠的 `document.currentScript`；多实例宿主应由自己的初始化函数显式传入 `mount()` 返回 API，或使用能注入词法 `ihtml` 的内联 module Item。这不是沙箱：Item 是可信可执行代码，仍可通过 JS、图片或 CSS 发起网络请求。兼容旧 CSS 时可临时设置 `scopeStyles:false`
 
 ## 快速开始
 

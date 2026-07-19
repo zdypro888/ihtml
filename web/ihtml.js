@@ -12,6 +12,7 @@
  *   auth(() => REST header token), connectionAuth(() => 短期连接票据),
  *   messageOrigins(postMessage 白名单, 默认同源),
  *   scopeStyles(嵌入时默认 true), storageKey(稳定实例缓存键),
+ *   scriptNonce(宿主 CSP script-src nonce，自动附加到所有动态 Item script),
  *   allowExternalAssets(默认 false),
  *   captureHostErrors(嵌入时默认 false),
  *   onReady(cfg), onAuthError(), onConnection(state)
@@ -1409,6 +1410,8 @@
           continue;
         }
         const script = doc.createElement('script');
+        if (lib.runtime && typeof lib.runtime.applyScriptNonce === 'function') lib.runtime.applyScriptNonce(script, opts.scriptNonce);
+        else if (opts.scriptNonce) script.nonce = String(opts.scriptNonce).trim();
         for (const attr of old.attributes) script.setAttribute(attr.name, attr.value);
         script.dataset.ihtmlInstance = instanceKey;
         script.dataset.ihtmlItem = itemId;
@@ -1470,6 +1473,8 @@
           }
         } else if (item.type === 'js') {
           const script = el('script');
+          if (lib.runtime && typeof lib.runtime.applyScriptNonce === 'function') lib.runtime.applyScriptNonce(script, opts.scriptNonce);
+          else if (opts.scriptNonce) script.nonce = String(opts.scriptNonce).trim();
           script.dataset.ihtmlId = id;
           script.dataset.ihtmlInstance = instanceKey;
           script.dataset.ihtmlItem = id;
@@ -7189,6 +7194,7 @@
           opts.base = base.href;
           if (!opts.standalone) opts.params = new URLSearchParams(opts.params || {});
           if (opts.storageKey != null) opts.storageKey = String(opts.storageKey);
+          if (opts.scriptNonce != null) opts.scriptNonce = String(opts.scriptNonce).trim();
           if (Array.isArray(opts.messageOrigins)) opts.messageOrigins = opts.messageOrigins.slice();
           opts.routing = opts.routing || (opts.standalone ? 'hash' : 'memory');
           if (opts.routing !== 'memory' && opts.routing !== 'hash') throw new TypeError('ihtml.mount: routing must be "memory" or "hash"');
