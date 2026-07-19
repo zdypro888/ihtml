@@ -1410,9 +1410,12 @@
           continue;
         }
         const script = doc.createElement('script');
+        for (const attr of old.attributes) script.setAttribute(attr.name, attr.value);
+        // The trusted host nonce is authoritative. Apply it after copying Item
+        // attributes so stale or model-authored nonce attributes cannot replace
+        // the current response nonce and make an otherwise valid Item fail CSP.
         if (lib.runtime && typeof lib.runtime.applyScriptNonce === 'function') lib.runtime.applyScriptNonce(script, opts.scriptNonce);
         else if (opts.scriptNonce) script.nonce = String(opts.scriptNonce).trim();
-        for (const attr of old.attributes) script.setAttribute(attr.name, attr.value);
         script.dataset.ihtmlInstance = instanceKey;
         script.dataset.ihtmlItem = itemId;
         const module = String(script.type || '').trim().toLowerCase() === 'module';
