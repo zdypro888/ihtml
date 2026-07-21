@@ -8,6 +8,33 @@ require('./ihtml-lib.js');
 
 const { fmt, util, makeT, template, chatAgent, chatTrace, chatContent, itemLayout, runtime } = global.window.__ihtmlLib;
 
+test('runtime HTTP client is callable and preserves explicit verb helpers', async () => {
+  const calls = [];
+  const request = async (path, options) => {
+    calls.push({ path, options });
+    return { path, options };
+  };
+  const http = runtime.createHTTPClient(request, (path) => new URL(path, 'https://host.test/ui/').href);
+
+  assert.equal(typeof http, 'function');
+  assert.equal(http.request, request);
+  assert.equal(http.url('/api/users?limit=100'), 'https://host.test/api/users?limit=100');
+  await http('/api/users?limit=100');
+  await http.get('/api/users');
+  await http.post('/api/users', { name: 'A' }, { timeout: 100 });
+  await http.put('/api/users/1', { name: 'B' });
+  await http.del('/api/users/1', { timeout: 200 });
+
+  assert.deepEqual(calls, [
+    { path: '/api/users?limit=100', options: undefined },
+    { path: '/api/users', options: undefined },
+    { path: '/api/users', options: { timeout: 100, method: 'POST', body: { name: 'A' } } },
+    { path: '/api/users/1', options: { method: 'PUT', body: { name: 'B' } } },
+    { path: '/api/users/1', options: { timeout: 200, method: 'DELETE' } },
+  ]);
+  assert.throws(() => runtime.createHTTPClient(null), /request function required/);
+});
+
 test('chat content format is additive, locks explicitly, and unknown values fail closed to text', () => {
   assert.equal(chatContent.maxRenderBytes, 512 * 1024, 'browser hard limit must accept the SDK maximum');
   assert.equal(chatContent.normalizeFormat(''), 'auto');

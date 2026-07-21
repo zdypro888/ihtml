@@ -537,14 +537,10 @@
         requestControllers.delete(ctrl);
       }
     }
-    const http = {
-      url: (path) => apiURL(path).toString(),
-      request,
-      get: (path, o) => request(path, o),
-      post: (path, body, o) => request(path, { ...o, method: 'POST', body }),
-      put: (path, body, o) => request(path, { ...o, method: 'PUT', body }),
-      del: (path, o) => request(path, { ...o, method: 'DELETE' }),
-    };
+    // A callable client is both the shortest safe GET form and a compatibility
+    // surface for generated Item code. Named methods remain available for
+    // explicit verbs and existing pages.
+    const http = lib.runtime.createHTTPClient(request, (path) => apiURL(path).toString());
 
     /* ---------- 错误收集 ---------- */
     const registry = new Map(); // id → { item, page, nodes, teardowns }

@@ -2399,6 +2399,19 @@
 
   /* ---------- runtime 纯函数: 多实例命名/样式与 inspect 分页 ---------- */
   const runtime = (() => {
+    function createHTTPClient(request, resolveURL) {
+      if (typeof request !== 'function') throw new TypeError('ihtml: HTTP request function required');
+      const url = typeof resolveURL === 'function' ? resolveURL : (path) => String(path == null ? '' : path);
+      const client = (path, options) => request(path, options);
+      return Object.assign(client, {
+        url,
+        request,
+        get: (path, options) => request(path, options),
+        post: (path, body, options) => request(path, { ...options, method: 'POST', body }),
+        put: (path, body, options) => request(path, { ...options, method: 'PUT', body }),
+        del: (path, options) => request(path, { ...options, method: 'DELETE' }),
+      });
+    }
     function storageHash(value) {
       value = String(value || '');
       let hash = 0x811c9dc5;
@@ -2977,7 +2990,7 @@
       return right > left && bottom > top;
     }
     return Object.freeze({
-      storageHash, storageKey, migrateLegacyStorage, selectPrimary, itemLifecycleRecord, itemFacadeExpression, normalizeMountOptions, applyScriptNonce, scopeCSS, inspectRange,
+      createHTTPClient, storageHash, storageKey, migrateLegacyStorage, selectPrimary, itemLifecycleRecord, itemFacadeExpression, normalizeMountOptions, applyScriptNonce, scopeCSS, inspectRange,
       hasIHTMLBinding, classicItemScript, moduleItemScript, rectVisible,
     });
   })();

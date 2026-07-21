@@ -246,7 +246,7 @@ Item 内联代码会在无同名声明冲突时获得指向所属实例的词法
 | `ihtml.env` / `env.onChange(fn)` | `{mode:'pc'|'mobile', width, touch}` 设备感知 |
 | `ihtml.config` | 宿主经 `WithPageConfig` 注入的动态参数（只读） |
 | `ihtml.layout.sidebar(open)` | 移动端抽屉菜单开合 |
-| `ihtml.http.get/post/put/del(path)` | 同源请求封装，自动透传用户参数 |
+| `ihtml.http(path, options)` / `http.get(path, options)` / `http.post/put(path, body, options)` / `http.del(path, options)` | 同源请求封装；直接调用等价于 GET，自动透传用户参数 |
 | `ihtml.kv.get/set/del(key)` | 用户级持久化键值（服务端存储） |
 | `ihtml.bus.on/emit(name, data)` | Item 间解耦通讯 |
 | `ihtml.theme.get/set(patch)/onChange(fn)` | 主题读改，如 `set({mode:'dark', primary:'#059669'})` |

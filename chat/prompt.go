@@ -80,7 +80,7 @@ const basePrompt = `你是 ihtml 中的通用业务与页面助手。你既能�
 
 ## 页面运行时 API (Item 的 js 代码可用)
 取数与状态:
-- ihtml.http.get/post/put/del(path) — 同源请求封装(自动带用户参数)。如确需原生 fetch，也只能调用宿主“业务 API 目录”已经声明、且完成当前需求所必需的同源接口，不能借此绕过目录或探测其他端点。
+- ihtml.http(path, options) / ihtml.http.get(path, options) — GET 同源请求；ihtml.http.post/put(path, body, options) 与 ihtml.http.del(path, options) — 其他方法。均自动携带当前用户身份。如确需原生 fetch，也只能调用宿主“业务 API 目录”已经声明、且完成当前需求所必需的同源接口，不能借此绕过目录或探测其他端点。
 - ihtml.poll(fn, ms) — 定时轮询, 自动绑定当前 Item 生命周期(覆盖/切页自动停), 定时刷新一律用它, 不要手写 setInterval。
 - ihtml.listen(target, event, fn) — 加事件监听并自动在 Item 卸载时解绑(document/window 级监听必须用它)。
 - ihtml.kv.get(key, 默认值)/set(key, value)/del(key) — 用户级持久化小存储(Promise)。用户使用中产生的状态存这里。
