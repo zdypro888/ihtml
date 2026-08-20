@@ -294,6 +294,9 @@ type toolDef struct {
 	Confirm   bool   // 必须人工确认
 	Write     bool   // 写操作(只读访问下拒绝)
 	CodeWrite bool   // 会安装可执行 HTML/JS/CSS，默认必须人工确认
+	// Available gates additive Service capabilities without exposing a tool that
+	// the current host cannot execute. Nil means universally available.
+	Available func(*runtime) bool
 	// Validate 在签发确认卡之前校验完整参数。需要确认的结构化写工具必须
 	// 在这里 fail closed，避免让用户确认一个服务端注定会拒绝的载荷。
 	Validate func(args map[string]any) error
@@ -387,6 +390,16 @@ func itemSchema() *einoJSONSchema.Schema {
 	)
 }
 
+func pageSchema() *einoJSONSchema.Schema {
+	return objSchema([]string{"name", "title"},
+		prop{"name", strSchema("稳定路由名: 小写字母数字-_, 如 weekly-report")},
+		prop{"title", strSchema("菜单显示名")},
+		prop{"icon", strSchema("可选短图标文本")},
+		prop{"order", intSchema("菜单排序, 小的在前")},
+		prop{"template_id", strSchema("可选布局模板 ID")},
+	)
+}
+
 /* ---- 参数解码助手 ---- */
 
 func argString(args map[string]any, key string) string {
@@ -436,6 +449,42 @@ func argItems(args map[string]any, key string) ([]ihtml.Item, error) {
 		return nil, errors.New("items 为空")
 	}
 	return items, nil
+}
+
+func argPage(args map[string]any, key string) (ihtml.Page, error) {
+	raw, ok := args[key]
+	if !ok {
+		return ihtml.Page{}, fmt.Errorf("缺少 %s 参数", key)
+	}
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return ihtml.Page{}, err
+	}
+	var page ihtml.Page
+	if err := json.Unmarshal(encoded, &page); err != nil {
+		return ihtml.Page{}, fmt.Errorf("page 参数格式不正确: %w", err)
+	}
+	if err := page.Validate(); err != nil {
+		return ihtml.Page{}, err
+	}
+	return page, nil
+}
+
+func pagePublicationArgs(args map[string]any) (ihtml.Page, []ihtml.Item, error) {
+	page, err := argPage(args, "page")
+	if err != nil {
+		return ihtml.Page{}, nil, err
+	}
+	items, err := argItems(args, "items")
+	if err != nil {
+		return ihtml.Page{}, nil, err
+	}
+	for _, item := range items {
+		if item.Page != page.Name {
+			return ihtml.Page{}, nil, fmt.Errorf("item %q 的 page 必须是 %q", item.ID, page.Name)
+		}
+	}
+	return page, items, nil
 }
 
 func itemIDs(items []ihtml.Item) string {
@@ -756,6 +805,53 @@ func toolDefs() []toolDef {
 				}
 				return map[string]any{"count": len(pages), "pages": pages},
 					fmt.Sprintf("共 %d 个页面", len(pages)), nil
+			},
+		},
+		{
+			Name:  "ui_page_publish",
+			Title: "发布完整页面",
+			Desc:  "原子发布一个页面注册项及其完整 Item 集合。未列出的该页旧 Item 会被删除；全局和其他页面 Item 不受影响。新建或整体更新页面时优先使用。",
+			Params: objSchema([]string{"page", "items"},
+				prop{"page", pageSchema()},
+				prop{"items", arrSchema("该页面的完整 Item 集合；每项 page 必须等于 page.name", itemSchema())},
+				prop{"note", strSchema("这次页面发布的一句话说明")},
+			),
+			Risk:      "medium",
+			Write:     true,
+			CodeWrite: true,
+			Available: func(rt *runtime) bool {
+				_, ok := rt.svc.(ihtml.PagePublicationService)
+				return ok
+			},
+			Validate: func(args map[string]any) error {
+				_, _, err := pagePublicationArgs(args)
+				return err
+			},
+			Execute: func(ctx context.Context, rt *runtime, args map[string]any) (any, string, error) {
+				page, items, err := pagePublicationArgs(args)
+				if err != nil {
+					return nil, "", err
+				}
+				publisher, ok := rt.svc.(ihtml.PagePublicationService)
+				if !ok {
+					return nil, "", errors.New("当前宿主不支持原子页面发布")
+				}
+				note := argString(args, "note")
+				if note == "" {
+					note = "AI 发布页面 " + page.Name
+				}
+				before := time.Now()
+				if err := publisher.PublishPage(ctx, rt.user, page, items, "chat", note); err != nil {
+					return nil, "", err
+				}
+				newErrs := waitNewPageErrors(ctx, rt, before)
+				result := map[string]any{"ok": true, "page": page, "item_count": len(items), "item_ids": itemIDs(items)}
+				summary := fmt.Sprintf("已发布页面 %s，共 %d 个 Item", page.Name, len(items))
+				if len(newErrs) > 0 {
+					result["new_page_errors"] = newErrs
+					summary += fmt.Sprintf("；页面随即出现 %d 条新报错，需修复", len(newErrs))
+				}
+				return result, summary, nil
 			},
 		},
 		{
@@ -1255,6 +1351,9 @@ func toolsNodeConfigFiltered(rt *runtime, readOnly bool) compose.ToolsNodeConfig
 	defs := toolDefs()
 	tools := make([]tool.BaseTool, 0, len(defs))
 	for i := range defs {
+		if defs[i].Available != nil && !defs[i].Available(rt) {
+			continue
+		}
 		if readOnly && defs[i].Write {
 			continue
 		}

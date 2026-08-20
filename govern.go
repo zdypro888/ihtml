@@ -16,7 +16,7 @@ import (
 type AuditEvent struct {
 	Time   time.Time       `json:"time"`
 	User   string          `json:"user"`
-	Action string          `json:"action"` // items.put/items.delete/items.replace/items.rollback/kv.set/kv.delete/page.set/page.delete/user.import/user.purge
+	Action string          `json:"action"` // items.put/items.delete/items.replace/items.rollback/kv.set/kv.delete/page.set/page.publish/page.delete/user.import/user.purge
 	By     string          `json:"by"`     // api / chat / import ...
 	Note   string          `json:"note,omitempty"`
 	Detail json.RawMessage `json:"detail,omitempty"` // ids/key/page 等结构化明细
@@ -325,6 +325,14 @@ func (s *governedService) SetPage(ctx context.Context, user string, page Page) e
 		return err
 	}
 	return s.h.SetPage(ctx, user, page)
+}
+
+func (s *governedService) PublishPage(ctx context.Context, user string, page Page, items []Item, _, note string) error {
+	ctx, err := s.check(ctx, user, true)
+	if err != nil {
+		return err
+	}
+	return s.h.PublishPage(ctx, user, page, items, s.source, note)
 }
 
 func (s *governedService) DeletePage(ctx context.Context, user, name, _ string) ([]string, error) {

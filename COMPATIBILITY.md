@@ -96,6 +96,12 @@ third-party integrations may rely on while the API approaches v1.
   old clients retain unconditional-write behavior. Built-in versioned Stores
   provide cross-replica single-key CAS; legacy Stores only provide the existing
   per-Handler locking guarantee.
+- Atomic page publication is additive: existing `PageService`, `Service` and
+  `ScopedService` interfaces remain unchanged. `*Handler` implements the
+  separate `PagePublicationService`; scoped Handler values may be asserted to
+  `ScopedPagePublicationService`. A publication replaces only the named page's
+  registry entry and complete Item set in one state transition. The legacy
+  `PUT /api/pages` and `PUT /api/items` routes retain their original behavior.
 
 ## Browser and event integration
 

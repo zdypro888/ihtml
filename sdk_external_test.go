@@ -129,6 +129,9 @@ func TestScopeServiceDoesNotInventVersionedKVCapability(t *testing.T) {
 	if _, ok := scoped.(ihtml.ScopedVersionedKVService); ok {
 		t.Fatal("legacy-only Service unexpectedly exposes the optional versioned KV capability")
 	}
+	if _, ok := scoped.(ihtml.ScopedPagePublicationService); ok {
+		t.Fatal("legacy-only Service unexpectedly exposes the optional page publication capability")
+	}
 	if _, err := scoped.ListItems(context.Background()); err != nil {
 		t.Fatalf("legacy scoped service read failed: %v", err)
 	}
@@ -178,6 +181,15 @@ func TestServiceForRequestBindsUserAndEnforcesPolicy(t *testing.T) {
 	}
 	if _, err := versioned.KVCompareAndSet(context.Background(), "layout", json.RawMessage(`{}`), ihtml.MissingKVRevision); !errors.Is(err, ihtml.ErrAccessDenied) {
 		t.Fatalf("read-only conditional KV write error = %v", err)
+	}
+	publisher, ok := scoped.(ihtml.ScopedPagePublicationService)
+	if !ok {
+		t.Fatal("request-scoped Handler must expose the additive page publication capability")
+	}
+	if err := publisher.PublishPage(context.Background(), ihtml.Page{Name: "report", Title: "Report"}, []ihtml.Item{
+		{ID: "body", Type: ihtml.ItemHTML, Page: "report", Content: "ready"},
+	}, "host", "test"); !errors.Is(err, ihtml.ErrAccessDenied) {
+		t.Fatalf("read-only page publication error = %v", err)
 	}
 }
 

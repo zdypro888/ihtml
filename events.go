@@ -43,6 +43,8 @@ const (
 	// 持久化提交与消息发布不在同一事务内，因此外部通道不携带可能
 	// 因发布反序而过期的增量载荷，客户端改为重读已提交的权威状态。
 	ResyncExternal = "external"
+	// ResyncPublication: 页面注册表和完整页面 Item 在一次原子发布中同时变化。
+	ResyncPublication = "publication"
 )
 
 // Event 是推送给页面内核的实时事件(经 SSE 下发)。

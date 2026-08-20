@@ -29,3 +29,30 @@ func TestScopedServiceAdapterIgnoresLegacyUserArguments(t *testing.T) {
 		t.Fatalf("legacy user argument escaped scope: %+v, %v", mallory, err)
 	}
 }
+
+func TestScopedPublishingAdapterKeepsBoundIdentity(t *testing.T) {
+	base := ihtml.New(ihtml.NewMemoryStore())
+	defer base.Close()
+	scoped, err := ihtml.ScopeService(base, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	publisher, ok := scoped.(ihtml.ScopedPagePublicationService)
+	if !ok {
+		t.Fatal("Handler scope is missing page publication capability")
+	}
+	adapter := scopedPublishingServiceAdapter{
+		scopedServiceAdapter: scopedServiceAdapter{ScopedService: scoped},
+		publisher:            publisher,
+	}
+	if err := adapter.PublishPage(context.Background(), "mallory", ihtml.Page{Name: "report", Title: "Report"}, []ihtml.Item{
+		{ID: "body", Type: ihtml.ItemHTML, Page: "report", Content: "ready"},
+	}, "test", "publish"); err != nil {
+		t.Fatal(err)
+	}
+	alice, _ := base.ListPages(context.Background(), "alice")
+	mallory, _ := base.ListPages(context.Background(), "mallory")
+	if len(alice) != 1 || alice[0].Name != "report" || len(mallory) != 0 {
+		t.Fatalf("publishing adapter escaped scope: alice=%+v mallory=%+v", alice, mallory)
+	}
+}

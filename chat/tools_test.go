@@ -124,6 +124,34 @@ func TestToolPutAndList(t *testing.T) {
 	}
 }
 
+func TestToolPublishesCompletePageAtomically(t *testing.T) {
+	rt, _, svc := newTestRuntime(t)
+	ctx := context.Background()
+	if err := svc.SetPage(ctx, "t1", ihtml.Page{Name: "report", Title: "Old"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.PutItems(ctx, "t1", []ihtml.Item{
+		{ID: "old", Type: ihtml.ItemHTML, Page: "report", Content: "old"},
+		{ID: "global", Type: ihtml.ItemCSS, Content: "body{}"},
+	}, "test", "seed"); err != nil {
+		t.Fatal(err)
+	}
+
+	publish := findTool(t, rt, "ui_page_publish")
+	out, err := publish.InvokableRun(ctx, `{"page":{"name":"report","title":"Weekly report","order":20},"items":[{"id":"report-body","type":"html","page":"report","content":"<main>ready</main>"}],"note":"publish report"}`)
+	if err != nil || !strings.Contains(out, `"status":"ok"`) || !strings.Contains(out, `"item_count":1`) {
+		t.Fatalf("publish result: %s %v", out, err)
+	}
+	items, err := svc.ListItems(ctx, "t1")
+	if err != nil || len(items) != 2 || items[0].ID != "global" || items[1].ID != "report-body" {
+		t.Fatalf("published items = %+v, %v", items, err)
+	}
+	pages, err := svc.ListPages(ctx, "t1")
+	if err != nil || len(pages) != 1 || pages[0].Title != "Weekly report" {
+		t.Fatalf("published pages = %+v, %v", pages, err)
+	}
+}
+
 func TestToolThemeSet(t *testing.T) {
 	rt, _, svc := newTestRuntime(t)
 	ctx := context.Background()
@@ -258,7 +286,7 @@ func TestSystemPromptBraces(t *testing.T) {
 		Page:     ihtml.ChatClientPage{VisibleText: "现有页面文本"},
 	}, []ihtml.APISpec{{Name: "player_search", Method: "GET", Path: "/capi/players", Description: "按昵称搜玩家; 参数 q/limit"}}, "\n## 页面现状\nItem: 无(白纸)\n")
 	for _, want := range []string{
-		"ui_item_list", "ui_page_set", "ui_template_get", "ui_template_publish", "Template.published", "unassigned",
+		"ui_item_list", "ui_page_set", "ui_page_publish", "ui_template_get", "ui_template_publish", "Template.published", "unassigned",
 		"item-layout.*", "--ui-primary", "扩展指令", "mobile", "现有页面文本", "不可信", "/capi/players",
 		"api_probe", "ihtml-mobile", ".ihtml-root", "同源运行", "@import", "pending_confirmation",
 		"通用业务与页面助手", "直接在当前对话中回答", "不得为了承载答案而创建",

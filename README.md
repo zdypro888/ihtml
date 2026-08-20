@@ -274,6 +274,7 @@ Item 样式引用 CSS 变量即可自动适配换肤与明暗模式：
 | `GET/PUT/POST /api/items` | 列出 / 增改 Item（`?page=x` 过滤：全局+该页；`&global=0` 仅该页） |
 | `DELETE /api/items?id=a&id=b` | 删除 |
 | `GET/PUT /api/pages` · `DELETE /api/pages/{name}` | 页面注册表（删除页面连带删除页内 Item） |
+| `PUT /api/pages/{name}/publish` | 原子发布完整页面：一次提交同时更新页面注册项并替换该页全部 Item；不影响全局及其他页面 Item |
 | `GET/POST /api/templates` · `GET/PUT/DELETE /api/templates/{id}` | 一等布局模板 CRUD；写入使用 `expected_revision` 做 CAS |
 | `GET/PUT /api/templates/current?page=x` | 读取/保存 root 或页面当前模板；空模板合法，旧 `meta.slot/layout.*` 只读渐进迁移 |
 | `POST /api/templates/{id}/publish` | 把当前 Draft 发布为不可变值快照（体含 `expected_revision`） |
@@ -320,7 +321,7 @@ Template 只定义可复用结构。新业务 Item 通过 `Item.Meta["slot"] == 
 - 演示能力：`GET /api/chat/models` 可用 `preview_only:true` 表示仅提供确定性界面预览；它不等同于 `model_ready`，前端会保持预览可操作，同时明确提示回答并非来自真实 AI
 - 过程事件：`assistant_thinking` 是增量流，不是一次性快照；同一次模型输出共享 `thinking_id`，最后一条带 `thinking_done:true`。客户端应按 ID 追加并在 done 后折叠。中途流式重试前服务端发送 `assistant_reset`，新客户端应清除本轮已投影草稿；旧客户端可忽略。`assistant_done.message` 始终是权威最终快照，可覆盖此前的流式草稿；工具按 `tool_call.id` 原位更新，`tool_result.tool_summary` 是面向用户的结果，`tool_result` / `tool_debug` 只适合放在折叠技术详情中
 - 确认后恢复：当前 Deep 能力值为 `manual_tool_only`——确认卡只执行卡片中的单个工具调用，整体计划保持暂停，不会在用户不知情时自动续跑；需要继续时由客户端发起新的用户轮次。未来接入 checkpoint 后再通过能力字段升级
-- 工具：`ui_item_list/get/put/delete`、`ui_items_replace`、`ui_page_list/set/delete`、`ui_theme_get/set`、`ui_kv_get/set`、`ui_revision_list/rollback`、`ui_page_errors`、`ui_page_inspect`（经会话 WS 请求内核回传实时渲染状态：按视口交集、祖先计算样式与 overflow 裁剪估算每个 Item 的可见性，并返回尺寸、文本摘要与报错；支持 `ids` 精确过滤及 `offset`/`limit` 分页，每页最多 20 项，按 `next_offset` 继续；页面离线时数秒超时返回）、`api_probe`（只读探测业务 API）、`ui_plan_update`（Deep 模式的结构化计划工具），以及结构专用的 `ui_template_get/put_current/publish/slot_delete`
+- 工具：`ui_item_list/get/put/delete`、`ui_items_replace`、`ui_page_list/set/publish/delete`（`publish` 原子替换一个页面的注册项与完整 Item 集合）、`ui_theme_get/set`、`ui_kv_get/set`、`ui_revision_list/rollback`、`ui_page_errors`、`ui_page_inspect`（经会话 WS 请求内核回传实时渲染状态：按视口交集、祖先计算样式与 overflow 裁剪估算每个 Item 的可见性，并返回尺寸、文本摘要与报错；支持 `ids` 精确过滤及 `offset`/`limit` 分页，每页最多 20 项，按 `next_offset` 继续；页面离线时数秒超时返回）、`api_probe`（只读探测业务 API）、`ui_plan_update`（Deep 模式的结构化计划工具），以及结构专用的 `ui_template_get/put_current/publish/slot_delete`
 - Template 工具契约：`ui_template_get(page)` 只返回 Draft/Published 结构和 CAS revision，不读取 Item content；`put_current` 只接受完整结构 Draft（服务端严格拒绝未知字段、业务正文、HTML/CSS/JS/URL），保存后不会改变运行时；`publish` 才把 Draft 上线；`slot_delete` 保留 Item 并把引用迁入 Root fallback。所有 Template 写入都必须带 `expected_revision` 并确认
 - 风险控制：读操作直接执行；安装 HTML/JS/CSS 的 Item 写入、全部 Template 写入及所有高风险操作默认必须点确认卡（HMAC 签名 + 原子一次性 nonce + 15 分钟 TTL）。签名同时绑定用户、逻辑 SessionID、应用/租户能力指纹及语义工具协议版本，同密钥下也不能跨会话或跨应用执行/撤销。只有完全受控环境可用 `AllowUnconfirmedItemWrites=true` 放开普通 Item 写；`ConfirmWrites=true` 会进一步确认其余写操作
 - 多轮历史默认在 Backend 级内存中按 csid 恢复，并受会话数、每会话事件数、字节数与 TTL 四重上限约束；同一 Backend 内相同作用域 SessionID 同时只允许一个 WS owner，新连接会非阻塞接管，并在旧连接的模型、工具和确认操作真实返回后才开始执行。生产可注入持久化 `SessionStore` 或共享 `ConfirmNonceStore`；任一外部 Store 存在时，`NewChecked` 都强制要求稳定的 `SessionNamespace`（应用/租户命名空间），避免同一密钥/Store 被多个应用复用时确认卡串域，非结构化授权或回调语义变化时递增 `SessionCapabilityVersion`。兼容构造器 `New` 遇到未命名的任一外部 Store 会生成实例级临时 namespace，安全隔离但不会跨重启/副本续接。内部 SessionID 同时绑定这些值、只读策略、工具/API 目录、确认策略、探测边界与宿主提示词的能力指纹，权限或能力变化会自动切换历史作用域，且不会把 user/csid 明文暴露给外部 Store。该 owner 协调只保证单进程；多副本必须由宿主提供 sticky routing 或分布式 session lease/锁，单独共享 `SessionStore` 不能防止两个 Backend 并发执行同一会话
@@ -375,9 +376,11 @@ type ChatBackend interface {      // 换 AI 实现(自研/别的编排框架)
 }
 type ItemService / KVService / PageService / TemplateService interface { … }
 type VersionedKVService interface { … } // 可选: 单键读取版本 + 原子 CompareAndSet
+type PagePublicationService interface { … } // 可选: 页面注册项 + 页内完整 Item 原子发布
 type Service interface { … }      // 完整受信任管理 API；*Handler 实现
 type ScopedService interface { … } // 已绑定一个用户；请求路由优先用 ServiceForRequest
 type ScopedVersionedKVService interface { … } // 对 ScopedService 做类型断言取得
+type ScopedPagePublicationService interface { … } // 对 ScopedService 做类型断言取得
 ```
 
 `VersionedUserStateStore` 的版本 0 只表示“从未写入”。每个成功写操作（含删除不存在的 KV）都必须推进版本；`EraseUser` 也必须留下更新后的空状态墓碑，不能重置或复用版本。公共 KV 遇到 `ReservedKVPrefix` 会返回可用 `errors.Is(err, ErrReservedKVKey)` 判断的错误。第三方 Store 应运行 `storetest.Run`，它会同时验证并发 CAS、RawMessage 字节保真、输入/输出所有权和删除后的版本语义。`FileStore` 用可响应 `context` 取消的进程级 gate 与系统文件锁支持同目录多句柄/协作进程 CAS，新数据文件为 `0600`，v2 文件同时写精确 `kv_bytes` 和旧版可读的语义 `kv`；它适合小规模单版本部署，升级/回滚应停写切换，不能让不识别锁协议的旧二进制与新版并行写。生产数据库仍优先使用 `sqlstore`。

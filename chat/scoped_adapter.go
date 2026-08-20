@@ -12,6 +12,11 @@ import (
 // intentionally ignored; identity remains owned by ScopedService.
 type scopedServiceAdapter struct{ ihtml.ScopedService }
 
+type scopedPublishingServiceAdapter struct {
+	scopedServiceAdapter
+	publisher ihtml.ScopedPagePublicationService
+}
+
 func (s scopedServiceAdapter) ListItems(ctx context.Context, _ string) ([]ihtml.Item, error) {
 	return s.ScopedService.ListItems(ctx)
 }
@@ -54,6 +59,9 @@ func (s scopedServiceAdapter) ListPages(ctx context.Context, _ string) ([]ihtml.
 func (s scopedServiceAdapter) SetPage(ctx context.Context, _ string, page ihtml.Page) error {
 	return s.ScopedService.SetPage(ctx, page)
 }
+func (s scopedPublishingServiceAdapter) PublishPage(ctx context.Context, _ string, page ihtml.Page, items []ihtml.Item, by, note string) error {
+	return s.publisher.PublishPage(ctx, page, items, by, note)
+}
 func (s scopedServiceAdapter) DeletePage(ctx context.Context, _, name, by string) ([]string, error) {
 	return s.ScopedService.DeletePage(ctx, name, by)
 }
@@ -83,3 +91,4 @@ func (s scopedServiceAdapter) DeleteTemplate(ctx context.Context, _, id string, 
 }
 
 var _ ihtml.Service = scopedServiceAdapter{}
+var _ ihtml.PagePublicationService = scopedPublishingServiceAdapter{}

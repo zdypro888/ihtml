@@ -763,6 +763,117 @@ func TestPageSnapshotsRollbackSetAndDelete(t *testing.T) {
 	}
 }
 
+func TestPublishPageReplacesOnlyTargetPageInOneRevision(t *testing.T) {
+	ctx := context.Background()
+	h := New(NewMemoryStore())
+	t.Cleanup(func() { _ = h.Close() })
+
+	if err := h.SetPage(ctx, "u", Page{Name: "report", Title: "Old report", Order: 20}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.SetPage(ctx, "u", Page{Name: "other", Title: "Other", Order: 10}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.PutItems(ctx, "u", []Item{
+		{ID: "global", Type: ItemCSS, Content: "body{}"},
+		{ID: "old", Type: ItemHTML, Page: "report", Content: "old"},
+		{ID: "keep", Type: ItemHTML, Page: "other", Content: "keep"},
+	}, "api", "seed"); err != nil {
+		t.Fatal(err)
+	}
+	beforeRevisions, err := h.ListRevisions(ctx, "u")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	page := Page{Name: "report", Title: "Weekly report", Order: 30}
+	items := []Item{
+		{ID: "report-style", Type: ItemCSS, Page: "report", Content: ".report{}"},
+		{ID: "report-body", Type: ItemHTML, Page: "report", Content: "<main>ready</main>"},
+	}
+	if err := h.PublishPage(ctx, "u", page, items, "agent", "publish report"); err != nil {
+		t.Fatal(err)
+	}
+
+	pages, err := h.ListPages(ctx, "u")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pages) != 2 || pages[0].Name != "other" || pages[1] != page {
+		t.Fatalf("pages = %+v", pages)
+	}
+	gotItems, err := h.ListItems(ctx, "u")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotByID := make(map[string]Item, len(gotItems))
+	for _, item := range gotItems {
+		gotByID[item.ID] = item
+	}
+	for _, id := range []string{"global", "keep", "report-style", "report-body"} {
+		if _, ok := gotByID[id]; !ok {
+			t.Fatalf("published state is missing %q: %+v", id, gotItems)
+		}
+	}
+	if _, stale := gotByID["old"]; stale {
+		t.Fatalf("stale page item survived publication: %+v", gotItems)
+	}
+	revisions, err := h.ListRevisions(ctx, "u")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(revisions) != len(beforeRevisions)+1 || revisions[0].Note != "publish report" {
+		t.Fatalf("publication revisions = %+v, before=%d", revisions, len(beforeRevisions))
+	}
+
+	if err := h.PublishPage(ctx, "u", page, items, "agent", "same state"); err != nil {
+		t.Fatal(err)
+	}
+	afterNoop, err := h.ListRevisions(ctx, "u")
+	if err != nil || len(afterNoop) != len(revisions) {
+		t.Fatalf("no-op publication created a revision: before=%d after=%d err=%v", len(revisions), len(afterNoop), err)
+	}
+}
+
+func TestPublishPageRejectsCrossPageIDCollisionWithoutPartialState(t *testing.T) {
+	ctx := context.Background()
+	store := &rejectingStateStore{MemoryStore: NewMemoryStore()}
+	h := New(store)
+	t.Cleanup(func() { _ = h.Close() })
+	if err := h.SetPage(ctx, "u", Page{Name: "other", Title: "Other"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.PutItems(ctx, "u", []Item{{ID: "shared", Type: ItemHTML, Page: "other", Content: "keep"}}, "api", "seed"); err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.UserState(ctx, "u")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = h.PublishPage(ctx, "u", Page{Name: "report", Title: "Report"}, []Item{
+		{ID: "shared", Type: ItemHTML, Page: "report", Content: "collision"},
+	}, "agent", "collision")
+	if err == nil || !strings.Contains(err.Error(), "outside page") {
+		t.Fatalf("collision error = %v", err)
+	}
+	afterCollision, _ := store.UserState(ctx, "u")
+	if !reflect.DeepEqual(before, afterCollision) {
+		t.Fatalf("collision changed state\nbefore=%+v\nafter=%+v", before, afterCollision)
+	}
+
+	store.reject = true
+	err = h.PublishPage(ctx, "u", Page{Name: "report", Title: "Report"}, []Item{
+		{ID: "report", Type: ItemHTML, Page: "report", Content: "new"},
+	}, "agent", "injected failure")
+	if err == nil {
+		t.Fatal("expected injected atomic replace failure")
+	}
+	afterFailure, _ := store.UserState(ctx, "u")
+	if !reflect.DeepEqual(before, afterFailure) {
+		t.Fatalf("failed publication changed state\nbefore=%+v\nafter=%+v", before, afterFailure)
+	}
+}
+
 type rejectingStateStore struct {
 	*MemoryStore
 	reject bool

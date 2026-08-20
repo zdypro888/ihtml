@@ -328,6 +328,29 @@ func TestHandlerPages(t *testing.T) {
 	}
 }
 
+func TestHandlerPublishesCompletePage(t *testing.T) {
+	srv, _ := newTestServer(t)
+	base := srv.URL + "/api"
+	payload := `{"page":{"name":"report","title":"Report"},"items":[{"id":"report-body","type":"html","page":"report","content":"<main>ready</main>"}],"note":"publish"}`
+	status, out := doJSON(t, http.MethodPut, base+"/pages/report/publish?uid=p1", payload)
+	if status != http.StatusOK || out["page"] != "report" || out["item_count"] != float64(1) {
+		t.Fatalf("publish page: status=%d out=%v", status, out)
+	}
+	_, out = doJSON(t, http.MethodGet, base+"/pages?uid=p1", "")
+	if pages := out["pages"].([]any); len(pages) != 1 || pages[0].(map[string]any)["name"] != "report" {
+		t.Fatalf("published pages = %v", out)
+	}
+	_, out = doJSON(t, http.MethodGet, base+"/items?uid=p1", "")
+	if items := out["items"].([]any); len(items) != 1 || items[0].(map[string]any)["id"] != "report-body" {
+		t.Fatalf("published items = %v", out)
+	}
+
+	status, _ = doJSON(t, http.MethodPut, base+"/pages/other/publish?uid=p1", payload)
+	if status != http.StatusBadRequest {
+		t.Fatalf("path/body name mismatch status = %d", status)
+	}
+}
+
 func TestGovernance(t *testing.T) {
 	h := New(NewMemoryStore(),
 		WithUserResolver(DevelopmentUserResolver),

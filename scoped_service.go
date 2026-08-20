@@ -57,6 +57,12 @@ type ScopedPageService interface {
 	DeletePage(context.Context, string, string) ([]string, error)
 }
 
+// ScopedPagePublicationService is the user-bound form of the optional atomic
+// page publication capability.
+type ScopedPagePublicationService interface {
+	PublishPage(context.Context, Page, []Item, string, string) error
+}
+
 // ScopedTemplateService is TemplateService with the user already bound.
 type ScopedTemplateService interface {
 	ListTemplates(context.Context) ([]Template, error)
@@ -90,6 +96,17 @@ type boundVersionedService struct {
 	versioned VersionedKVService
 }
 
+type boundPublishingService struct {
+	*boundService
+	publisher PagePublicationService
+}
+
+type boundVersionedPublishingService struct {
+	*boundService
+	versioned VersionedKVService
+	publisher PagePublicationService
+}
+
 // ScopeService binds a trusted Service to one user. It does not add an access
 // policy by itself; use Handler.ServiceForRequest when handling an HTTP request.
 func ScopeService(service Service, user string) (ScopedService, error) {
@@ -101,8 +118,15 @@ func ScopeService(service Service, user string) (ScopedService, error) {
 		return nil, errors.Join(ErrInvalidServiceScope, errors.New("user is required"))
 	}
 	bound := &boundService{service: service, user: user}
-	if versioned, ok := service.(VersionedKVService); ok {
+	versioned, hasVersioned := service.(VersionedKVService)
+	publisher, hasPublisher := service.(PagePublicationService)
+	switch {
+	case hasVersioned && hasPublisher:
+		return &boundVersionedPublishingService{boundService: bound, versioned: versioned, publisher: publisher}, nil
+	case hasVersioned:
 		return &boundVersionedService{boundService: bound, versioned: versioned}, nil
+	case hasPublisher:
+		return &boundPublishingService{boundService: bound, publisher: publisher}, nil
 	}
 	return bound, nil
 }
@@ -171,6 +195,14 @@ func (s *boundVersionedService) KVCompareAndSet(ctx context.Context, key string,
 	return s.versioned.KVCompareAndSet(ctx, s.user, key, value, expectedRevision)
 }
 
+func (s *boundVersionedPublishingService) KVGetWithRevision(ctx context.Context, key string) (json.RawMessage, string, error) {
+	return s.versioned.KVGetWithRevision(ctx, s.user, key)
+}
+
+func (s *boundVersionedPublishingService) KVCompareAndSet(ctx context.Context, key string, value json.RawMessage, expectedRevision string) (string, error) {
+	return s.versioned.KVCompareAndSet(ctx, s.user, key, value, expectedRevision)
+}
+
 func (s *boundService) PageErrors(ctx context.Context) ([]PageError, error) {
 	return s.service.PageErrors(ctx, s.user)
 }
@@ -185,6 +217,14 @@ func (s *boundService) ListPages(ctx context.Context) ([]Page, error) {
 
 func (s *boundService) SetPage(ctx context.Context, page Page) error {
 	return s.service.SetPage(ctx, s.user, page)
+}
+
+func (s *boundPublishingService) PublishPage(ctx context.Context, page Page, items []Item, by, note string) error {
+	return s.publisher.PublishPage(ctx, s.user, page, items, by, note)
+}
+
+func (s *boundVersionedPublishingService) PublishPage(ctx context.Context, page Page, items []Item, by, note string) error {
+	return s.publisher.PublishPage(ctx, s.user, page, items, by, note)
 }
 
 func (s *boundService) DeletePage(ctx context.Context, name, by string) ([]string, error) {

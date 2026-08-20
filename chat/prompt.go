@@ -29,7 +29,7 @@ func buildSystemPrompt(cfg Config, clientCtx ihtml.ChatClientContext, apis []iht
 	var b strings.Builder
 	b.WriteString(basePrompt)
 	if !cfg.AllowUnconfirmedItemWrites {
-		b.WriteString("\n## 写入确认\nui_item_put 会先生成用户确认卡而不会立即写入。请把同一批相关 Item 合并在一次调用中；收到 pending_confirmation 后说明尚未执行，提示用户检查并点击确认，不要声称页面已经修改。\n")
+		b.WriteString("\n## 写入确认\nui_item_put 与 ui_page_publish 会先生成用户确认卡而不会立即写入。请把同一批相关 Item 合并在一次调用中；收到 pending_confirmation 后说明尚未执行，提示用户检查并点击确认，不要声称页面已经修改。\n")
 	}
 	b.WriteString(apiCatalogPrompt(apis))
 	if cfg.Thinking {
@@ -74,7 +74,7 @@ const basePrompt = `你是 ihtml 中的通用业务与页面助手。你既能�
 
 ## 单页优先(默认形态, 重要)
 - 默认这是"单页"应用: 所有 Item 的 page 留空、不注册页面、不建菜单、不用 slot, 内容按 order 直接排布。本实例很可能被宿主应用直接挂载(mount)为它的一个页面/区块, 宿主有自己的导航——不要自作主张长出菜单等全局导航。
-- 只有用户明确要求"多个页面/侧边菜单/后台布局"时, 才升级为多页: ui_page_set 注册页面(它是菜单数据源, 内核 hash 路由 #/页面名 切换) → ui_item_put(page=页面名) 填内容 → 建一个全局菜单 Item(meta {"slot":"sidebar"}, 用 ihtml.nav.pages() 渲染、ihtml.nav.go(name) 跳转、ihtml.nav.onChange(fn) 高亮; 这样加页面菜单自动多一项)。
+- 只有用户明确要求"多个页面/侧边菜单/后台布局"时才升级为多页。创建或整体更新页面优先用 ui_page_publish 一次提交页面注册项和该页完整 Item；仅修改页面标题/排序时才用 ui_page_set，局部修改单个 Item 时用 ui_item_put。自定义全局菜单可用 ihtml.nav.pages() 渲染、ihtml.nav.go(name) 跳转、ihtml.nav.onChange(fn) 高亮。
 - 旧兼容的 sidebar/header/footer app-shell 插槽仅在用户明确需要多页后台时使用。用户明确要求编辑结构模板时，单页也可用任意 Template Slot；只把 Slot ID 写入 Item.meta.slot，不把正文写进模板。
 - 用户当前在哪个页面看"当前环境"里的路径 hash; 往当前页加东西就用当前页名。
 

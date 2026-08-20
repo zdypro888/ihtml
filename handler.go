@@ -280,6 +280,7 @@ func (h *Handler) routes() {
 	mux.HandleFunc("POST /api/items/replace", h.withJSONWrite(h.handleReplaceItems))
 	mux.HandleFunc("GET /api/pages", h.withUser(h.handleListPages))
 	mux.HandleFunc("PUT /api/pages", h.withJSONWrite(h.handleSetPage))
+	mux.HandleFunc("PUT /api/pages/{name}/publish", h.withJSONWrite(h.handlePublishPage))
 	mux.HandleFunc("DELETE /api/pages/{name}", h.withWrite(h.handleDeletePage))
 	h.registerTemplateRoutes(mux)
 	mux.HandleFunc("GET /api/revisions", h.withUser(h.handleListRevisions))
@@ -641,6 +642,29 @@ func (h *Handler) handleSetPage(w http.ResponseWriter, r *http.Request, user str
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (h *Handler) handlePublishPage(w http.ResponseWriter, r *http.Request, user string) {
+	var payload struct {
+		Page  Page   `json:"page"`
+		Items []Item `json:"items"`
+		Note  string `json:"note"`
+	}
+	if err := readJSON(w, r, 16<<20, &payload); err != nil {
+		h.writeError(w, http.StatusBadRequest, fmt.Errorf("invalid request body: %w", err))
+		return
+	}
+	if payload.Page.Name != r.PathValue("name") {
+		h.writeError(w, http.StatusBadRequest, fmt.Errorf("page name does not match request path"))
+		return
+	}
+	if err := h.PublishPage(r.Context(), user, payload.Page, payload.Items, "api", payload.Note); err != nil {
+		h.writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "page": payload.Page.Name, "item_count": len(payload.Items),
+	})
 }
 
 func (h *Handler) handleDeletePage(w http.ResponseWriter, r *http.Request, user string) {

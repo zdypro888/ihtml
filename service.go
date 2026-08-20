@@ -83,6 +83,17 @@ type PageService interface {
 	DeletePage(ctx context.Context, user, name, by string) ([]string, error)
 }
 
+// PagePublicationService is an optional atomic capability for publishing a
+// complete page. The page registry entry and every Item owned by that page are
+// replaced in one state transition, so readers never observe a registered page
+// without its content (or new content under stale page metadata).
+//
+// It deliberately remains separate from Service to preserve compatibility with
+// third-party Service implementations compiled against the original contract.
+type PagePublicationService interface {
+	PublishPage(ctx context.Context, user string, page Page, items []Item, by, note string) error
+}
+
 // TemplateService is the reusable layout template capability.
 type TemplateService interface {
 	// ListTemplates 返回一等布局模板；模板内容与动态页面 Item 分离。
@@ -1581,6 +1592,133 @@ func (h *Handler) SetPage(ctx context.Context, user string, page Page) error {
 	h.metric("writes", 1)
 	h.publish(user, Event{Type: "pages"})
 	h.audit(ctx, user, "page.set", by, "", map[string]any{"page": page.Name})
+	return nil
+}
+
+// PublishPage atomically replaces one page registry entry and that page's
+// complete Item set. Global Items and Items belonging to other pages are left
+// untouched. Incoming Item IDs may not collide with those outside the page.
+func (h *Handler) PublishPage(ctx context.Context, user string, page Page, items []Item, by, note string) error {
+	if err := page.Validate(); err != nil {
+		return err
+	}
+	if len(items) == 0 {
+		return fmt.Errorf("no page items to publish")
+	}
+	if err := validateItems(items); err != nil {
+		return err
+	}
+	for _, item := range items {
+		if item.Page != page.Name {
+			return fmt.Errorf("item %q belongs to page %q, want %q", item.ID, item.Page, page.Name)
+		}
+	}
+	by = strings.TrimSpace(by)
+	if by == "" {
+		by = mutationSourceFromContext(ctx)
+	}
+	if by == "" {
+		by = "api"
+	}
+	note = strings.TrimSpace(note)
+	if note == "" {
+		note = "publish page " + page.Name
+	}
+
+	lock := h.userLock(user)
+	lock.Lock()
+	defer lock.Unlock()
+
+	wrote := false
+	err := h.updateUserStateLocked(ctx, user, func(before UserState) (UserState, error) {
+		wrote = false
+		if err := validateItems(before.Items); err != nil {
+			return UserState{}, fmt.Errorf("stored items are invalid: %w", err)
+		}
+		oldPages, err := statePages(before)
+		if err != nil {
+			return UserState{}, err
+		}
+		catalog, err := stateTemplateCatalog(before, oldPages)
+		if err != nil {
+			return UserState{}, err
+		}
+		if page.TemplateID != "" && templateIndex(catalog.Templates, page.TemplateID) < 0 {
+			return UserState{}, fmt.Errorf("page %q references missing template %q", page.Name, page.TemplateID)
+		}
+
+		pages := append([]Page(nil), oldPages...)
+		pageChanged := true
+		foundPage := false
+		for i := range pages {
+			if pages[i].Name != page.Name {
+				continue
+			}
+			foundPage = true
+			pageChanged = pages[i] != page
+			pages[i] = page
+			break
+		}
+		if !foundPage {
+			if len(pages) >= maxPagesPerUser {
+				return UserState{}, fmt.Errorf("too many pages")
+			}
+			pages = append(pages, page)
+		}
+
+		outsideIDs := make(map[string]struct{}, len(before.Items))
+		oldPageItems := make(map[string]Item)
+		merged := make([]Item, 0, len(before.Items)-len(oldPageItems)+len(items))
+		for _, item := range before.Items {
+			if item.Page == page.Name {
+				oldPageItems[item.ID] = item
+				continue
+			}
+			outsideIDs[item.ID] = struct{}{}
+			merged = append(merged, item)
+		}
+
+		itemsChanged := len(oldPageItems) != len(items)
+		now := time.Now()
+		for _, item := range items {
+			if _, collision := outsideIDs[item.ID]; collision {
+				return UserState{}, fmt.Errorf("item id %q is already used outside page %q", item.ID, page.Name)
+			}
+			if old, ok := oldPageItems[item.ID]; ok && sameItemContent(old, item) {
+				item = old
+			} else {
+				item.UpdatedAt = now
+				itemsChanged = true
+			}
+			merged = append(merged, item)
+		}
+		if err := validateItems(merged); err != nil {
+			return UserState{}, err
+		}
+		if !pageChanged && !itemsChanged {
+			return UserState{}, errUserStateUnchanged
+		}
+
+		next, err := nextStateWithSnapshot(before, by, note, h.opts.maxRevisions)
+		if err != nil {
+			return UserState{}, err
+		}
+		next.Items = merged
+		if err := setStatePages(&next, pages); err != nil {
+			return UserState{}, err
+		}
+		wrote = true
+		return next, nil
+	})
+	if err != nil || !wrote {
+		return err
+	}
+
+	h.metric("writes", 1)
+	h.publish(user, Event{Type: EventResync, Reason: ResyncPublication, By: by})
+	h.audit(ctx, user, "page.publish", by, note, map[string]any{
+		"page": page.Name, "item_count": len(items), "ids": itemIDList(items),
+	})
 	return nil
 }
 

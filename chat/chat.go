@@ -406,7 +406,11 @@ func (b *Backend) NewSession(_ context.Context, sctx *ihtml.ChatSessionContext) 
 		// Prefer the request-bound, continuously governed capability. The adapter
 		// ignores every legacy user argument, so the model runtime cannot
 		// accidentally cross a tenant even if a caller supplies the wrong value.
-		service = scopedServiceAdapter{ScopedService: sctx.ScopedService}
+		adapter := scopedServiceAdapter{ScopedService: sctx.ScopedService}
+		service = adapter
+		if publisher, ok := sctx.ScopedService.(ihtml.ScopedPagePublicationService); ok {
+			service = scopedPublishingServiceAdapter{scopedServiceAdapter: adapter, publisher: publisher}
+		}
 	}
 	created := &session{
 		backend:         b,
