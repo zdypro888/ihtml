@@ -1,0 +1,12 @@
+{
+  "name": "ihtml-ui-tests",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "test": "node --test web/*.test.js",
+    "test:ui": "node --test web/ihtml-chat.test.js"
+  },
+  "devDependencies": {
+    "playwright": "1.62.1"
+  }
+}

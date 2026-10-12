@@ -19,6 +19,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 
 	"github.com/zdypro888/ihtml"
+	"github.com/zdypro888/ihtml/internal/nilcheck"
 )
 
 const (
@@ -27,6 +28,16 @@ const (
 )
 
 func newChatModel(ctx context.Context, cfg Config) (einoModel.ToolCallingChatModel, error) {
+	if cfg.ModelFactory != nil {
+		model, err := cfg.ModelFactory(ctx, cfg)
+		if err != nil {
+			return nil, err
+		}
+		if nilcheck.IsNil(model) {
+			return nil, errors.New("model factory returned nil model")
+		}
+		return model, nil
+	}
 	switch strings.TrimSpace(cfg.Provider) {
 	case ProviderOpenAI:
 		return newOpenAIChatModel(ctx, cfg)

@@ -38,11 +38,15 @@ const (
 
 // Config 是对话后端配置。
 type Config struct {
-	Provider  string // openai / claude, 必填
-	BaseURL   string // API 根地址, 必填(如 https://api.openai.com/v1)
-	APIKey    string // OpenAI Bearer 或 Anthropic x-api-key；本地网关可留空
-	AuthToken string // Anthropic Authorization Bearer；仅 claude provider 使用
-	Model     string // 默认模型；仅 AllowModelSelect=true 时允许前端另选
+	// ModelFactory optionally supplies a host's model transport (for example
+	// agent/eino.NewChatModel with Responses). Agent, budgets, UI tools and
+	// confirmation still belong to this Backend; do not create a second Agent.
+	ModelFactory func(context.Context, Config) (einoModel.ToolCallingChatModel, error)
+	Provider     string // openai / claude, 必填
+	BaseURL      string // API 根地址, 必填(如 https://api.openai.com/v1)
+	APIKey       string // OpenAI Bearer 或 Anthropic x-api-key；本地网关可留空
+	AuthToken    string // Anthropic Authorization Bearer；仅 claude provider 使用
+	Model        string // 默认模型；仅 AllowModelSelect=true 时允许前端另选
 
 	Stream         bool          // 流式输出, 建议 true
 	Thinking       bool          // 透出思考过程(需模型支持 reasoning)

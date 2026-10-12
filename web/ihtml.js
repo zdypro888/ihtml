@@ -17,11 +17,25 @@
  *   captureHostErrors(嵌入时默认 false),
  *   onReady(cfg), onAuthError(), onConnection(state)
  * 实例 API 额外提供: destroy(), ready(Promise), fmt/util/chart/poll/listen/panel。 */
+/* mountChat(el, options) uses the same chat renderer without workspace boot.
+ * Options: base/params/theme/locale/strings/storageKey/auth/connectionAuth,
+ * onReady/onAuthError, initialMessages: [{role, content, contentFormat?}],
+ * contextProvider({context, user, signal}) -> partial ChatClientContext | Promise,
+ * onChatEvent(event) -> void (detached snapshot, confirmation secrets omitted).
+ * API: ready(), refreshAuth(), refreshConfig(), destroy(), root/user/config,
+ * chat.send(text?) -> Promise<boolean>; chat.open()/close()/cancel()/clear(),
+ * chat.getMessages() -> [{role, content, contentFormat}] (detached, bounded
+ * display-only snapshot, not canonical history or model input),
+ * chat.enabled/busy/readOnly. clear() rotates csid; initialMessages are display
+ * only. Hosts MUST await refreshAuth() when changing identity. Context remains
+ * untrusted browser input; auth uses headers, connectionAuth uses short tickets.
+ * Include ihtml.css and the bundled ihtml-lib.js + ihtml.js as for mount(). */
 (() => {
   'use strict';
   const doc = document;
   const lib = window.__ihtmlLib || { makeT: () => (k) => k, fmt: {}, util: {}, chart: {} };
   let instanceSeq = 0;
+  const chatOnlyOption = Symbol('ihtml.mountChat');
   let runtimeSymbolName = 'ihtml.runtime.v1';
   let runtimeSymbol = Symbol.for(runtimeSymbolName);
 
@@ -124,6 +138,7 @@
     const instanceID = ++instanceSeq;
     const instanceKey = newInstanceKey(instanceID);
     const standalone = !!opts.standalone;
+    const chatOnly = opts[chatOnlyOption] === true;
     const T = lib.makeT(opts.locale || navigator.language, opts.strings);
     const templateCore = lib.template;
     const itemLayoutCore = lib.itemLayout;
@@ -225,10 +240,11 @@
 
     /* ---------- 容器 ---------- */
     const rootEl = el('div', 'ihtml-root');
+    rootEl.classList.toggle('ihtml-chat-inline', chatOnly);
     rootEl.dataset.ihtmlInstance = instanceKey;
     rootEl.classList.toggle('ihtml-standalone-root', standalone);
     const appEl = el('div', 'ihtml-app');
-    rootEl.appendChild(appEl);
+    if (!chatOnly) rootEl.appendChild(appEl);
     hostEl.appendChild(rootEl);
     const themedRoots = [rootEl];
     let dialogSeq = 0;
@@ -412,6 +428,25 @@
       if (typeof opts.connectionAuth === 'function') return String(await opts.connectionAuth() || '');
       return typeof opts.connectionAuth === 'string' ? opts.connectionAuth : '';
     }
+    function boundedChatHook(invoke, signal) {
+      return new Promise((resolve, reject) => {
+        let timer; let settled = false;
+        const finish = (error, value) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          signal.removeEventListener('abort', abort);
+          if (error) reject(error); else resolve(value);
+        };
+        const abort = () => finish(staleRequestError());
+        signal.addEventListener('abort', abort, { once: true });
+        timer = setTimeout(() => finish(new Error('ihtml: host callback unavailable')), 5000);
+        Promise.resolve().then(() => {
+          if (signal.aborted) throw staleRequestError();
+          return invoke();
+        }).then((value) => finish(null, value), (error) => finish(error));
+      });
+    }
 
     /* ---------- 事件总线 ---------- */
     const busMap = new Map();
@@ -442,6 +477,10 @@
     let authExpiredShown = false;
     let authBanner = null;
     function handleAuthExpired() {
+      // Revoke pending context/connection work before the host changes identity.
+      chat.resetForAuth();
+      chat.enabled = false;
+      chat.syncChatControls();
       bus.emit('ihtml:auth-expired', {});
       if (typeof opts.onAuthError === 'function') { try { opts.onAuthError(); } catch { /* 忽略 */ } }
       if (authExpiredShown) return;
@@ -5132,6 +5171,12 @@
       init(cfg) {
         this.enabled = !!(cfg && cfg.chat);
         if (this.dom && this.dom.readonlyBadge) this.dom.readonlyBadge.hidden = !readOnly;
+        if (chatOnly) {
+          if (!this.dom) this.build();
+          this.dom.panel.style.display = '';
+          this.syncChatControls();
+          return;
+        }
         if (this.entry) {
           this.entry.style.display = this.enabled && chatEntryEnabled ? '' : 'none';
           syncActionDock();
@@ -5148,7 +5193,12 @@
         syncActionDock();
       },
       open() {
-        if (!this.enabled) return;
+        if (!this.enabled || destroyed) return;
+        if (chatOnly) {
+          this.dom.panel.style.display = '';
+          this.dom.input.focus();
+          return;
+        }
         panel.close();
         if (!this.dom) this.build();
         this.previousFocus = doc.activeElement;
@@ -5164,6 +5214,7 @@
       },
       close() {
         if (!this.dom) return;
+        if (chatOnly) { this.dom.panel.style.display = 'none'; return; }
         this.dom.mask.style.display = 'none';
         this.dom.panel.style.display = 'none';
         rootEl.classList.remove('ihtml-chat-open');
@@ -5177,8 +5228,8 @@
         const mask = el('div', 'ihtml-chat-mask');
         mask.onclick = () => this.close();
         const panelEl = el('div', 'ihtml-chat');
-        panelEl.setAttribute('role', 'dialog');
-        panelEl.setAttribute('aria-modal', 'true');
+        panelEl.setAttribute('role', chatOnly ? 'region' : 'dialog');
+        if (!chatOnly) panelEl.setAttribute('aria-modal', 'true');
         panelEl.setAttribute('aria-labelledby', chatID + '-title');
 
         const head = el('div', 'ihtml-chat-head');
@@ -5193,7 +5244,8 @@
         const closeBtn = el('button', 'close', T('close'));
         closeBtn.type = 'button';
         closeBtn.onclick = () => this.close();
-        head.append(title, readonlyBadge, newBtn, closeBtn);
+        head.append(title, readonlyBadge, newBtn);
+        if (!chatOnly) head.appendChild(closeBtn);
 
         const toolbar = el('div', 'ihtml-chat-toolbar');
         toolbar.style.display = 'none'; // 模型选择器默认隐藏(model_select 下发才显示)
@@ -5275,6 +5327,7 @@
           const imeActive = ev.isComposing || composing || ev.keyCode === 229;
           if (ev.key === 'Escape') {
             if (imeActive) { ev.stopPropagation(); return; }
+            if (chatOnly) return;
             ev.preventDefault(); ev.stopPropagation(); this.close(); return;
           }
           if (ev.key !== 'Enter') return;
@@ -5297,9 +5350,10 @@
         live.setAttribute('aria-live', 'polite');
         live.setAttribute('aria-atomic', 'true');
 
-        panelEl.addEventListener('keydown', (ev) => handleDialogKey(ev, panelEl, () => this.close()));
+        if (!chatOnly) panelEl.addEventListener('keydown', (ev) => handleDialogKey(ev, panelEl, () => this.close()));
         panelEl.append(head, toolbar, modebar, log, foot, live);
-        rootEl.append(mask, panelEl);
+        if (!chatOnly) rootEl.appendChild(mask);
+        rootEl.appendChild(panelEl);
         this.dom = { mask, panel: panelEl, log, foot, input, sendBtn, providerBadge, modelInput, dataList, freshBtn, toolbar, modebar, modeButtons, modeHint, live, readonlyBadge };
         this.log = log;
         on(window, 'resize', () => {
@@ -5311,6 +5365,41 @@
         });
         this.resizeComposer(); this.syncChatControls();
         this.notice(T('welcome'));
+        this.appendMessages(opts.initialMessages);
+      },
+
+      appendMessages(messages) {
+        for (const message of messages || []) {
+          const card = el('article', 'ihtml-msg ' + message.role);
+          card._displayMessage = { role: message.role, content: message.content, contentFormat: message.contentFormat };
+          card.appendChild(el('div', 'author', message.role === 'user' ? T('author_user') : 'AI'));
+          const body = el('div', message.role === 'user' ? 'content' : 'answer');
+          if (message.role === 'user') body.textContent = message.content;
+          else body.replaceChildren(renderAssistant(message.content, message.contentFormat, body, false));
+          card.appendChild(body);
+          this.log.appendChild(card);
+        }
+        this.scroll();
+      },
+
+      getMessages() {
+        if (!this.log || destroyed || authRefreshing) return [];
+        const messages = [];
+        let remaining = 512 * 1024;
+        // Take the newest display text only; notices and process/tool state are
+        // deliberately not replayable. Never derive history from rendered HTML.
+        for (const card of Array.from(this.log.children).reverse()) {
+          const source = card._turn
+            ? { role: 'assistant', content: card._turn.text, contentFormat: card._turn.contentFormat }
+            : card._displayMessage;
+          if (!source || !source.content || !remaining || messages.length === 100) continue;
+          const limited = chatContentCore.clipUTF8(source.content, remaining);
+          if (!limited.text) continue;
+          remaining -= limited.bytes;
+          messages.push({ role: source.role, content: limited.text,
+            contentFormat: source.role === 'user' ? 'text' : chatContentCore.resolveFormat(source.contentFormat, source.content) });
+        }
+        return messages.reverse();
       },
 
       notice(html) {
@@ -5399,12 +5488,13 @@
       syncChatControls() {
         if (!this.dom) return;
         const busy = this.active || this.sending;
-        this.dom.input.readOnly = this.sending;
-        this.dom.input.setAttribute('aria-readonly', String(this.sending));
+        const unavailable = destroyed || !this.enabled || authRefreshing;
+        this.dom.input.readOnly = this.sending || unavailable;
+        this.dom.input.setAttribute('aria-readonly', String(this.dom.input.readOnly));
         this.dom.foot.setAttribute('aria-busy', String(busy));
         this.dom.sendBtn.textContent = busy ? T('stop') : T('send');
         this.dom.sendBtn.classList.toggle('stop', busy);
-        this.dom.sendBtn.disabled = !busy && !this.dom.input.value.trim();
+        this.dom.sendBtn.disabled = unavailable || (!busy && !this.dom.input.value.trim());
         this.dom.modelInput.disabled = busy;
         this.dom.freshBtn.disabled = busy || !!this.modelPromise;
         for (const [mode, button] of Object.entries(this.dom.modeButtons || {})) {
@@ -5417,7 +5507,7 @@
             if (!owner) continue;
             for (const rec of owner.tools.values()) {
               if (rec.status !== 'pending') continue;
-              const disabled = confirmationBusy || !!rec.cancelPending || !!rec.confirmPending;
+              const disabled = unavailable || readOnly || confirmationBusy || !!rec.cancelPending || !!rec.confirmPending;
               rec.card.classList.toggle('confirmation-busy', disabled);
               rec.body.setAttribute('aria-busy', String(!!rec.cancelPending || !!rec.confirmPending));
               rec.body.querySelectorAll('.t-actions button').forEach((button) => { button.disabled = disabled; });
@@ -5502,8 +5592,12 @@
         if (this.ws && this.ws.readyState === WebSocket.OPEN) return Promise.resolve(this.ws);
         if (this.wsPromise) return this.wsPromise;
         const generation = ++this.wsGeneration;
+        const connectionAbort = new AbortController();
+        this.connectionAbort = connectionAbort;
         const promise = (async () => {
-          const ticket = await evalConnectionAuth();
+          let ticket;
+          try { ticket = await boundedChatHook(evalConnectionAuth, connectionAbort.signal); }
+          finally { if (this.connectionAbort === connectionAbort) this.connectionAbort = null; }
           if (destroyed || generation !== this.wsGeneration) throw new Error(T('chat_disconnected'));
           const wsURL = apiURL('api/chat/ws', true, ticket);
           wsURL.searchParams.set('csid', chatSessionID());
@@ -5558,6 +5652,8 @@
       },
       disconnect() {
         const ws = this.ws;
+        if (this.connectionAbort) this.connectionAbort.abort();
+        this.connectionAbort = null;
         this.wsGeneration++;
         this.ws = null;
         this.wsPromise = null;
@@ -5566,6 +5662,8 @@
       reset() {
         this.sendGeneration++;
         this.sending = false;
+        if (this.contextAbort) this.contextAbort.abort();
+        this.contextAbort = null;
         this.confirmationBusy = null;
         this.disconnect();
         chatSessionID(true); // 换会话号 = 服务端上下文重开
@@ -5612,6 +5710,8 @@
         this.sendGeneration++;
         this.modelLoadSeq++;
         this.sending = false;
+        if (this.contextAbort) this.contextAbort.abort();
+        this.contextAbort = null;
         this.confirmationBusy = null;
         this.clearTurnTimers();
         this.disconnect();
@@ -5626,6 +5726,10 @@
         this.everConnected = false;
         this.setActive(false);
         if (this.dom) {
+          this.dom.input.value = '';
+          this.dom.modelInput.value = '';
+          this.dom.dataList.replaceChildren();
+          this.model = '';
           this.setAgentMode('fast', false);
           this.syncChatControls();
         }
@@ -5659,6 +5763,41 @@
           locale: navigator.language,
           time_zone: (Intl.DateTimeFormat().resolvedOptions() || {}).timeZone || '',
           user_agent: navigator.userAgent,
+        };
+      },
+
+      async resolveContext(signal) {
+        const context = this.clientContext();
+        if (chatOnly) context.page.visible_text = '';
+        let supplied = context;
+        if (typeof opts.contextProvider === 'function') {
+          supplied = await boundedChatHook(() => opts.contextProvider({ context, user: resolvedUser, signal }), signal);
+        }
+        const source = supplied && typeof supplied === 'object' ? supplied : {};
+        const viewport = source.viewport || {};
+        const page = source.page || {};
+        const text = (value, fallback, max) => typeof value === 'string' ? clip(value, max) : fallback;
+        const dimension = (value, fallback) => Number.isFinite(value) ? Math.max(0, Math.min(32768, value)) : fallback;
+        let path = context.page.path;
+        // Even trusted host context is browser input. Never forward URL
+        // credentials, search parameters or arbitrary extra fields to a model.
+        if (typeof opts.contextProvider === 'function' && typeof page.path === 'string') {
+          try {
+            const url = new URL(clip(page.path, 1024), location.origin);
+            path = url.protocol === 'http:' || url.protocol === 'https:' ? url.pathname : '(embedded)';
+          } catch { path = '(embedded)'; }
+        }
+        return {
+          viewport: {
+            width: dimension(viewport.width, context.viewport.width),
+            height: dimension(viewport.height, context.viewport.height),
+            device_pixel_ratio: dimension(viewport.device_pixel_ratio, context.viewport.device_pixel_ratio),
+            mode: viewport.mode === 'mobile' || viewport.mode === 'pc' ? viewport.mode : context.viewport.mode,
+          },
+          page: { path, title: text(page.title, context.page.title, 300), visible_text: text(page.visible_text, context.page.visible_text, 1800) },
+          locale: text(source.locale, context.locale, 64),
+          time_zone: text(source.time_zone, context.time_zone, 128),
+          user_agent: text(source.user_agent, context.user_agent, 512),
         };
       },
 
@@ -5778,16 +5917,27 @@
         } catch (e) { /* 连接瞬断: 服务端工具会按离线超时返回 */ }
       },
 
-      async send() {
+      async send(value) {
+        if (destroyed || !this.enabled || authRefreshing || !this.dom || this.active || this.sending || this.confirmationBusy) return false;
+        if (value !== undefined) {
+          if (typeof value !== 'string') throw new TypeError('ihtml.chat.send: text must be a string');
+          this.dom.input.value = value;
+        }
         const text = this.dom.input.value.trim();
-        if (!text || this.active || this.sending) return;
+        if (!text || text.length > 65536) return false;
         this.sending = true;
         const generation = ++this.sendGeneration;
+        const epoch = requestEpoch;
+        const user = resolvedUser;
+        const contextAbort = new AbortController();
+        this.contextAbort = contextAbort;
         this.syncChatControls();
         let pendingTurn = null;
         try {
           if (!this.modelInfo) await this.loadModels();
-          if (generation !== this.sendGeneration) return;
+          if (destroyed || epoch !== requestEpoch || user !== resolvedUser || generation !== this.sendGeneration || !this.enabled || authRefreshing) return false;
+          const clientContext = await this.resolveContext(contextAbort.signal);
+          if (destroyed || epoch !== requestEpoch || user !== resolvedUser || generation !== this.sendGeneration || contextAbort.signal.aborted || !this.enabled || authRefreshing) return false;
           // The input is the source of truth. `change` is not guaranteed to fire
           // before Enter submits (and programmatic fills only emit `input`), so a
           // stale cached model must never be sent while another value is visible.
@@ -5799,6 +5949,7 @@
           if (this.dom.input.value.trim() === text) this.dom.input.value = '';
           this.resizeComposer();
           const um = el('article', 'ihtml-msg user');
+          um._displayMessage = { role: 'user', content: text, contentFormat: 'text' };
           um.appendChild(el('div', 'author', T('author_user')));
           um.appendChild(el('div', 'content', text));
           this.log.appendChild(um);
@@ -5810,21 +5961,25 @@
           this.sending = false;
           this.syncChatControls();
           const ws = await this.ensureWS();
-          if (generation !== this.sendGeneration || !this.active || this.turn !== pendingTurn || pendingTurn.done || pendingTurn.cancelled) return;
+          if (destroyed || epoch !== requestEpoch || user !== resolvedUser || generation !== this.sendGeneration || !this.active || this.turn !== pendingTurn || pendingTurn.done || pendingTurn.cancelled) return false;
           ws.send(JSON.stringify({
             type: 'user_message',
             messages: [{ role: 'user', content: text }],
             model: pendingTurn.requestModel,
             agent_mode: pendingTurn.agentMode,
             tools_enabled: true,
-            client_context: this.clientContext(),
+            client_context: clientContext,
           }));
+          return true;
         } catch (e) {
           if (generation === this.sendGeneration && !(e && e.stale) && !(pendingTurn && pendingTurn.cancelled)) {
-            if (this.active && this.turn === pendingTurn && !pendingTurn.done) this.turnError(e.message, pendingTurn);
-            else ui.toast(e.message || T('chat_broken'), 'error');
+            if (this.active && this.turn === pendingTurn && !pendingTurn.done) this.turnError(T('chat_broken'), pendingTurn);
+            else ui.toast(T('chat_broken'), 'error');
           }
+          return false;
         } finally {
+          contextAbort.abort();
+          if (this.contextAbort === contextAbort) this.contextAbort = null;
           if (generation === this.sendGeneration) {
             this.sending = false;
             if (this.dom) this.syncChatControls();
@@ -5834,6 +5989,8 @@
       cancel() {
         this.sendGeneration++;
         this.sending = false;
+        if (this.contextAbort) this.contextAbort.abort();
+        this.contextAbort = null;
         const turn = this.turn;
         if (this.ws && this.ws.readyState === WebSocket.OPEN) {
           this.ws.send(JSON.stringify({ type: 'cancel' }));
@@ -6475,6 +6632,7 @@
         this.scroll();
       },
       async confirmTool(rec) {
+        if (destroyed || !this.enabled || authRefreshing || readOnly) return;
         if (!rec || rec.status !== 'pending') return;
         if (this.active || this.sending || this.confirmationBusy) {
           this.syncChatControls();
@@ -6645,12 +6803,13 @@
         while (this.turnsByRun.size > 128) this.turnsByRun.delete(this.turnsByRun.keys().next().value);
       },
       onEvent(ev) {
+        if (!ev || typeof ev !== 'object' || typeof ev.type !== 'string') return;
         // inspect_request 是服务端的带外请求, 不依赖轮次归属与序号去重:
         // 即使本地轮次已收尾也应答, 否则服务端工具只能等到超时。
-        if (ev.type === 'inspect_request') { this.sendInspectResult(ev); return; }
+        if (ev.type === 'inspect_request') { this.sendInspectResult(ev); this.notifyEvent(ev); return; }
         // cancel_tool_result is connection-scoped rather than a model turn. Its
         // id/nonce pair resolves the exact historical confirmation card.
-        if (ev.type === 'cancel_tool_result') { this.handleCancellationResult(ev); return; }
+        if (ev.type === 'cancel_tool_result') { this.handleCancellationResult(ev); this.notifyEvent(ev); return; }
         const t = this.eventTurn(ev);
         if (!t) return;
         if (ev.agent || ev.budget || ev.type === 'assistant_plan' || ev.tool_call && ev.tool_call.approval_resume === 'manual_tool_only') {
@@ -6671,6 +6830,18 @@
           case 'assistant_done': this.finishTurn(ev, t); break;
           case 'turn_error': this.turnError(ev.error || 'error', t); break;
         }
+        this.notifyEvent(ev);
+      },
+      notifyEvent(ev) {
+        if (typeof opts.onChatEvent !== 'function' || destroyed) return;
+        try {
+          // The host receives a detached snapshot, never the executable card
+          // or internal state. Hook failures cannot alter protocol handling.
+          const snapshot = JSON.parse(JSON.stringify(ev, (key, value) =>
+            isTechnicalSecretKey(key) || key === 'tool_debug' ? undefined : value));
+          const result = opts.onChatEvent(snapshot);
+          if (result && typeof result.catch === 'function') result.catch(() => {});
+        } catch { /* host observation is best effort */ }
       },
       finishTurn(ev, t = this.turn) {
         if (!t || t.done) {
@@ -6774,6 +6945,7 @@
     let readyFinished = false;
     let envGridBound = false;
     let readOnly = false;
+    let authRefreshing = false;
     let resolvedUser = '';
     async function loadConfig() {
       const epoch = requestEpoch;
@@ -6796,6 +6968,7 @@
     let settingsEntry = null;
     function configureActions(cfg) {
       chat.init(cfg);
+      if (chatOnly) return;
       if (opts.panel !== false && !settingsEntry) {
         settingsEntry = el('button', 'ihtml-settings-entry', T('settings'));
         settingsEntry.type = 'button';
@@ -6893,7 +7066,7 @@
       readyFinished = true;
       booted = true;
       skeleton.hide();
-      if (!envGridBound) {
+      if (!chatOnly && !envGridBound) {
         envGridBound = true;
         addDisposer(env.onChange(() => {
           if (env.mode === 'mobile' && grid.editing) grid.edit(false);
@@ -6906,6 +7079,23 @@
       if (typeof opts.onReady === 'function') { try { opts.onReady(cfg); } catch { /* 忽略 */ } }
     }
     async function boot() {
+      if (chatOnly) {
+        themeLoadLocal();
+        applyEnv();
+        try {
+          const cfg = await loadConfig();
+          if (destroyed) return;
+          configureActions(cfg);
+          finishReadyOnce(cfg);
+          if (chat.enabled) void chat.loadModels().catch(() => {});
+        } catch (error) {
+          if (destroyed || isStaleError(error)) return;
+          configureActions({ chat: false });
+          chat.systemNote(T('chat_broken'));
+          finishReadyOnce({ chat: false });
+        }
+        return;
+      }
       const epoch = requestEpoch;
       installErrorHandlers();
       if (destroyed) return;
@@ -6962,6 +7152,8 @@
     }
 
     async function refreshAuthAndState() {
+      authRefreshing = true;
+      chat.enabled = false;
       invalidateRequests();
       const epoch = requestEpoch;
       stopSSE();
@@ -6980,6 +7172,10 @@
         if (authBanner) { authBanner.remove(); authBanner = null; }
         if (authHintNode) { authHintNode.remove(); authHintNode = null; }
         configureActions(cfg);
+        if (chatOnly) {
+          finishReadyOnce(cfg);
+          return cfg;
+        }
         if (!hostTheme) await themePullRemote();
         if (epoch !== requestEpoch) throw staleRequestError();
         if (SAFE_MODE) {
@@ -7000,12 +7196,23 @@
         if (epoch !== requestEpoch || isStaleError(err)) throw err;
         stopSSE();
         clearUserRuntime();
+        if (chatOnly) {
+          chat.enabled = false;
+          chat.systemNote(T('chat_broken'));
+          finishReadyOnce({ chat: false });
+          throw err;
+        }
         if (err && err.status === 401) renderAuthHint();
         else errorState.show(err && err.message || err, () => {
           errorState.hide();
           void refreshAuthAndState().catch(() => {});
         });
         throw err;
+      } finally {
+        if (epoch === requestEpoch) {
+          authRefreshing = false;
+          chat.syncChatControls();
+        }
       }
     }
     // 错误态重试: 只重拉数据不重放全部初始化
@@ -7028,7 +7235,12 @@
       user: '',
       config: {},
       ready: () => readyPromise,
-      refreshConfig: () => loadConfig(),
+      refreshConfig: async () => {
+        const user = resolvedUser;
+        const cfg = await loadConfig();
+        if (booted && user !== resolvedUser) return refreshAuthAndState();
+        return cfg;
+      },
       refreshAuth: refreshAuthAndState,
       http, kv, bus, theme, ui, env, items, errors,
       fmt: lib.fmt,
@@ -7078,12 +7290,31 @@
       chat: {
         open: () => chat.open(),
         close: () => chat.close(),
-        get enabled() { return chat.enabled; },
+        send: async (text) => {
+          await readyPromise;
+          if (destroyed || !chat.enabled || authRefreshing) return false;
+          if (!chat.dom) chat.build();
+          return !!(await chat.send(text));
+        },
+        cancel: () => { if (!destroyed) chat.cancel(); },
+        getMessages: () => chat.getMessages(),
+        clear: () => {
+          if (destroyed || authRefreshing) return;
+          if (!chat.dom) chat.build();
+          chat.reset();
+        },
+        get enabled() { return !destroyed && chat.enabled; },
+        get busy() { return !destroyed && (chat.active || chat.sending || !!chat.confirmationBusy); },
+        get readOnly() { return readOnly; },
       },
       destroy() {
         if (destroyed) return;
         destroyed = true;
-        runtimeBridge.unregister(instanceKey, api);
+        chat.sendGeneration++;
+        if (chat.contextAbort) chat.contextAbort.abort();
+        chat.contextAbort = null;
+        if (chat.restoreIsolation) { chat.restoreIsolation(); chat.restoreIsolation = null; }
+        runtimeBridge.unregister(instanceKey, publicAPI);
         invalidateRequests();
         clearTimeout(errTimer);
         clearTimeout(envTimer);
@@ -7115,9 +7346,17 @@
       value: (id, lifecycle) => createItemFacade(id, lifecycle),
       enumerable: false,
     });
-    runtimeBridge.register(instanceKey, api);
+    const publicAPI = chatOnly ? {
+      version: api.version, root: rootEl,
+      ready: api.ready, refreshAuth: api.refreshAuth,
+      refreshConfig: api.refreshAuth,
+      chat: api.chat, destroy: api.destroy,
+      get user() { return api.user; },
+      get config() { return api.config; },
+    } : api;
+    runtimeBridge.register(instanceKey, publicAPI);
     boot();
-    return api;
+    return publicAPI;
   }
 
   /* 从宿主页面推断主题(theme:'inherit') */
@@ -7158,13 +7397,16 @@
   const mountedHosts = new WeakMap();
   const mountingHosts = new WeakSet();
   const compatibilityProxyKeys = new Set();
-  const compatibilityReservedKeys = new Set(['version', 'mounted', 'instances', 'mount', '__primary']);
+  const compatibilityReservedKeys = new Set(['version', 'mounted', 'instances', 'mount', 'mountChat', '__primary']);
   const globalAPI = {
     version: '0.6.0',
     mounted: false,
     __primary: null,
     instances: () => Array.from(liveInstances),
-    mount(hostEl, opts = {}) {
+    mountChat(hostEl, options = {}) {
+      return globalAPI.mount(hostEl, options, chatOnlyOption);
+    },
+    mount(hostEl, opts = {}, internalMode) {
       if (typeof hostEl === 'string') hostEl = doc.querySelector(hostEl);
       if (!hostEl || hostEl.nodeType !== 1 || typeof hostEl.getAttribute !== 'function' || typeof hostEl.appendChild !== 'function') {
         throw new Error('ihtml.mount: container element required');
@@ -7178,6 +7420,11 @@
       mountingHosts.add(hostEl);
       let inst = null;
       try {
+        if (internalMode === chatOnlyOption) {
+          if (opts == null) opts = {};
+          if (typeof opts !== 'object') throw new TypeError('ihtml.mountChat: options must be an object');
+          opts = { ...opts, [chatOnlyOption]: true, standalone: false, routing: 'memory', menu: null, panel: false };
+        }
         if (lib.runtime && typeof lib.runtime.normalizeMountOptions === 'function') {
           opts = lib.runtime.normalizeMountOptions(opts, location.href, !!(opts && opts.standalone));
         } else {
@@ -7197,6 +7444,19 @@
           if (Array.isArray(opts.messageOrigins)) opts.messageOrigins = opts.messageOrigins.slice();
           opts.routing = opts.routing || (opts.standalone ? 'hash' : 'memory');
           if (opts.routing !== 'memory' && opts.routing !== 'hash') throw new TypeError('ihtml.mount: routing must be "memory" or "hash"');
+        }
+        for (const name of ['onChatEvent', 'contextProvider']) {
+          if (opts[name] != null && typeof opts[name] !== 'function') throw new TypeError('ihtml: ' + name + ' must be a function');
+        }
+        if (opts.initialMessages != null) {
+          if (!Array.isArray(opts.initialMessages) || opts.initialMessages.length > 100) throw new TypeError('ihtml: initialMessages must be an array of at most 100 messages');
+          let bytes = 0;
+          opts.initialMessages = opts.initialMessages.map((message) => {
+            if (!message || !['user', 'assistant'].includes(message.role) || typeof message.content !== 'string') throw new TypeError('ihtml: initialMessages require user/assistant role and string content');
+            bytes += new TextEncoder().encode(message.content).length;
+            if (bytes > 512 * 1024) throw new TypeError('ihtml: initialMessages exceed 512 KiB');
+            return { role: message.role, content: message.content, contentFormat: typeof message.contentFormat === 'string' ? message.contentFormat : 'text' };
+          });
         }
         if (typeof opts.menu === 'string') doc.querySelector(opts.menu); // validate selector before createInstance mutates DOM
         else if (opts.menu && (opts.menu.nodeType !== 1 || typeof opts.menu.appendChild !== 'function')) {

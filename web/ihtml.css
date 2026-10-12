@@ -1282,6 +1282,24 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
 }
 @keyframes ihtml-slide { from { transform: translateX(40px); opacity: 0.4; } }
 
+/* Inline and drawer assistants share the same renderer and controls. */
+.ihtml-root.ihtml-chat-inline {
+  min-width: 0; min-height: 0;
+  height: 100%;
+}
+.ihtml-chat-inline > .ihtml-chat {
+  position: relative; inset: auto; z-index: auto;
+  width: 100%; height: 100%; min-height: 320px;
+  max-height: none; border: 0; box-shadow: none;
+  animation: none; background: var(--ui-bg);
+}
+.ihtml-chat-inline .ihtml-chat-head { flex-wrap: wrap; }
+.ihtml-chat-inline .ihtml-chat-head .title {
+  min-width: 0; max-width: none; white-space: normal; overflow-wrap: anywhere;
+}
+.ihtml-chat-inline .ihtml-chat-log { min-width: 0; min-height: 0; }
+.ihtml-chat-inline > .ihtml-chat > :not(.ihtml-chat-log) { flex-shrink: 0; }
+
 .ihtml-chat-head {
   display: flex; align-items: center; gap: 10px;
   min-height: 62px; padding: 11px 18px;

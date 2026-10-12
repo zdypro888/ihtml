@@ -12,3 +12,4 @@ example/secrets/
 # 构建产物
 dist/
 *.test
+node_modules/

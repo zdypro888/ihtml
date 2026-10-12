@@ -5,7 +5,8 @@ third-party integrations may rely on while the API approaches v1.
 
 ## Public contracts
 
-- Exported identifiers in `ihtml`, `ihtml/chat`, `ihtml/chat/config`,
+- Exported identifiers in `ihtml`, `ihtml/agent`, `ihtml/agent/eino`,
+  `ihtml/assistant`, `ihtml/chat`, `ihtml/chat/config`,
   `ihtml/sqlstore`, `ihtml/redisbroadcast`, and `ihtml/storetest` are public
   unless their documentation explicitly marks them deprecated.
 - New features should use new capability interfaces. Existing interfaces must
@@ -17,6 +18,18 @@ third-party integrations may rely on while the API approaches v1.
   within a protocol version; incompatible wire changes require a new version.
 
 ## Configuration and data
+
+- The minimum toolchain is Go 1.26.9. The optional native Responses adapter
+  uses the official OpenAI SDK v3, which requires Go 1.26. Core Handler builds
+  remain Eino-free; Go modules still resolve the module's minimum toolchain.
+- `agent/eino.Config` is a programmatic runtime contract, not the strict
+  `chat/config` JSON schema. Hosts resolve credentials explicitly. Its default
+  transport refuses redirects; an injected HTTPClient owns transport safety.
+- Runtime events/checkpoints are private model working memory, not product
+  transcripts. A host sharing a RuntimeStore must supply a unique namespace
+  and tenant/capability-scoped SessionID. The default namespace is suitable
+  only for one application. Retain the old namespace/validator when migrating
+  a persisted application; nbco explicitly retains `eino:chat` and numeric IDs.
 
 - Host configuration and AI configuration have independent schema versions.
 - A strict reader rejects unknown fields, duplicate keys, trailing documents,
@@ -104,6 +117,21 @@ third-party integrations may rely on while the API approaches v1.
   `PUT /api/pages` and `PUT /api/items` routes retain their original behavior.
 
 ## Browser and event integration
+
+- `mountChat` is the additive inline chat-only mount. It returns its own API,
+  with the same identity/cache isolation and destroy lifecycle as `mount`.
+  `initialMessages` are display-only, not canonical model history.
+  `chat.getMessages()` returns at most 100 display messages / 512 KiB, excluding
+  notices and tool/reasoning state; hosts own identity-scoped snapshot retention.
+  Await `ready()` before sending and `refreshAuth()` before a user switch. Its
+  `contextProvider` receives an abort signal and produces untrusted context;
+  `onChatEvent` receives a detached, best-effort event without confirmation
+  credentials. No hook replaces server authorization or the host transcript.
+- `assistant.NewChecked` bridges one existing Engine. It requires a trusted
+  PrepareTurn and explicit model capabilities. It does not implement signed
+  confirmation cards, inspection or checkpoint resumption. ApprovalRequired
+  tools are excluded without a host ToolExecutionGuard; the host remains
+  responsible for authorization, live revocation and durable tool receipts.
 
 - Same-page mounts isolate ordinary Item CSS selectors, injected lexical
   runtime bindings, runtime-generated accessibility IDs, and local persistence.

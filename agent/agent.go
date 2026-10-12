@@ -1,0 +1,293 @@
+// Package agent 定义引擎无关的 AI 对话抽象。
+//
+// 设计原则（接口皆可换，中枢不可换）：
+//   - 核心自持有 Tool 定义（名称 + JSON Schema + handler），不依赖任何框架类型；
+//     eino、HTTP MCP 各自做薄适配。
+//   - Engine 的抽象层级是「跑完一次明确模式的模型任务」：Deep 可含完整
+//     tool 循环，OneShot 是受控单次生成；这样可保持替换模型框架时的边界稳定。
+//   - 产品聊天记录由调用方落库；支持持久会话的引擎自行管理完整 agent 轨迹，
+//     History 只用于首次建立引擎会话时的种子上下文。
+package agent
+
+import (
+	"context"
+	"encoding/json"
+)
+
+// Tool 是领域能力暴露给 AI 的最小单元。
+type Tool struct {
+	Name        string
+	Description string
+	// Maturity is explicit governance metadata. The zero value is stable;
+	// experimental tools remain usable but are surfaced separately in the
+	// capability catalog so operators can review adoption and failures.
+	Maturity ToolMaturity
+	// Domain 是稳定的能力领域标识（people/work/workers/...），供能力检索、
+	// 展示和审计使用；外部工具未声明时归入 extension。
+	Domain string
+	// Effect 描述工具的外部影响，供能力检索、审计和动作证据判断使用。
+	// 未声明的第三方工具按 unknown 处理。
+	Effect string
+	// LoadMode separates authorization from cognitive exposure. Authorized tools
+	// remain executable, while only immediate tools and turn-relevant deferred
+	// tools expose their full schema to the model.
+	LoadMode ToolLoadMode
+	// Completion describes what a successful handler return means. Most tools
+	// complete synchronously; worker and workflow dispatchers only accept durable
+	// asynchronous work and must not be presented as already finished.
+	Completion ToolCompletion
+	// RequiredAction 是宿主解释的主动权限标识；runtime 不授予任何权限。
+	// 外部工具应显式声明，空值的策略由宿主决定。
+	RequiredAction string
+	// ResolvePermissionTarget derives the canonical capability target from one
+	// invocation. It lets the common authorization wrapper enforce resource
+	// scopes (for example one Telegram group) without teaching it business
+	// argument names. Nil means the handler owns any target-level check.
+	ResolvePermissionTarget func(context.Context, json.RawMessage) (string, error)
+	GroupSensitive          bool // true 表示不得暴露给群共享会话
+	// ApprovalRequired marks a destructive capability for the host's approval
+	// wrapper. Runtime alone does not verify approvals; hosts must gate execution.
+	ApprovalRequired bool
+	// InputSchema 是 JSON Schema（object 类型）。
+	InputSchema map[string]any
+	// NormalizeInput applies the same schema-aware normalization used by the
+	// handler. Agent runtimes use it only to derive stable per-turn invocation
+	// identities; nil means canonical JSON is sufficient.
+	NormalizeInput func(json.RawMessage) json.RawMessage
+	// RecoverResult performs a read-only reconstruction after the durable
+	// invocation boundary exists but its exact result was not persisted. It is
+	// reserved for handlers whose domain transaction stores an invocation-scoped
+	// recovery record; ordinary write tools must leave it nil.
+	RecoverResult func(ctx context.Context, args json.RawMessage) (result string, recovered bool, err error)
+	// ResultPersisted runs after the durable invocation receipt contains the
+	// exact result. It may erase short-lived recovery plaintext; failures do not
+	// invalidate the already durable tool result.
+	ResultPersisted func(ctx context.Context, args json.RawMessage, result string) error
+	// Handler 执行工具并返回给模型的文本结果。
+	// 业务错误（权限不足、目标不存在）应返回 (提示文本, nil) 让模型自行转述；
+	// 只有系统性故障才返回 error。
+	Handler func(ctx context.Context, args json.RawMessage) (string, error)
+}
+
+type toolInvocationKey struct{}
+
+// WithToolInvocationKey attaches the runtime-owned identity of one logical
+// write/execute invocation. Domain handlers may use it as an idempotency key;
+// user input must never be trusted as this value.
+func WithToolInvocationKey(ctx context.Context, key string) context.Context {
+	if key == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, toolInvocationKey{}, key)
+}
+
+// ToolInvocationKey returns the opaque identity assigned by the Agent runtime.
+// It is empty for direct/MCP calls that do not provide a durable invocation.
+func ToolInvocationKey(ctx context.Context) string {
+	key, _ := ctx.Value(toolInvocationKey{}).(string)
+	return key
+}
+
+// ToolMaturity describes operational confidence, not authorization. Keeping it
+// on the tool definition avoids inferring governance policy from naming.
+type ToolMaturity string
+
+const (
+	ToolMaturityStable       ToolMaturity = "stable"
+	ToolMaturityExperimental ToolMaturity = "experimental"
+)
+
+const (
+	ToolEffectRead    = "read"
+	ToolEffectWrite   = "write"
+	ToolEffectExecute = "execute"
+	ToolEffectUnknown = "unknown"
+)
+
+// ToolLoadMode controls when an authorized tool schema enters the model's
+// working set. The zero value is deferred so new tools remain scalable by
+// default; immediate is reserved for a very small, generic capability kernel.
+type ToolLoadMode string
+
+const (
+	ToolLoadDeferred  ToolLoadMode = ""
+	ToolLoadImmediate ToolLoadMode = "immediate"
+)
+
+// ToolCompletion describes the lifecycle represented by a successful tool
+// handler return. It is metadata about the operation, not an agent completion
+// protocol.
+type ToolCompletion string
+
+const (
+	ToolCompletionImmediate    ToolCompletion = ""
+	ToolCompletionAsynchronous ToolCompletion = "asynchronous"
+)
+
+// Role 消息角色。
+type Role string
+
+const (
+	RoleUser      Role = "user"
+	RoleAssistant Role = "assistant"
+)
+
+// Message 一条对话消息（仅文本轮次；tool 轨迹见 Step，单独审计）。
+type Message struct {
+	Role    Role
+	Content string
+}
+
+// Skill 是本轮与目标相关、可由 agent 按需加载的执行方法。候选检索和作用域
+// 校验属于业务层，实际选择与加载交给 agent 框架。
+type Skill struct {
+	Name        string
+	Description string
+	Content     string
+}
+
+// StepKind 轨迹条目类型。
+type StepKind string
+
+const (
+	StepToolCall StepKind = "tool_call"
+	StepText     StepKind = "text"
+)
+
+// Step 一次引擎轮次内的执行轨迹条目，用于审计与回放。
+type Step struct {
+	Kind       StepKind
+	ToolName   string
+	Args       json.RawMessage
+	Result     string
+	Err        string
+	Completion ToolCompletion
+	// Replayed means the model repeated the exact same write/execute invocation
+	// in one turn. The original call remains in Steps; this entry is evidence of
+	// the suppressed replay and did not invoke the business handler again.
+	Replayed bool
+}
+
+// Usage 一轮的用量统计（能取到多少记多少，取不到为零值）。
+type Usage struct {
+	InputTokens  int64
+	OutputTokens int64
+}
+
+// ToolExposure records what the model actually saw after framework middleware
+// applied deferred-tool selection. It intentionally differs from the full
+// authorized catalog supplied in TurnRequest.Tools.
+type ToolExposure struct {
+	AgentIterations int
+	ModelCalls      int
+	PeakToolCount   int
+	PeakSchemaChars int
+	PeakTools       []string
+}
+
+// TurnMode defines the orchestration contract for a model call. It is selected
+// by the call site, never inferred from user wording.
+type TurnMode string
+
+const (
+	// TurnModeDeep enables the full autonomous agent loop. It is also the default
+	// for the zero value so product conversations cannot silently lose capability.
+	TurnModeDeep TurnMode = "deep"
+	// TurnModeOneShot performs exactly one tool-free model generation for bounded
+	// internal transformations such as extraction, summarization, and rendering.
+	TurnModeOneShot TurnMode = "one_shot"
+)
+
+// ReasoningMode controls provider reasoning for a specific call. Product Deep
+// turns use the configured default; bounded internal selectors can disable
+// reasoning when the provider supports it.
+type ReasoningMode string
+
+const (
+	ReasoningDefault  ReasoningMode = ""
+	ReasoningDisabled ReasoningMode = "disabled"
+)
+
+// TurnRequest 一轮对话请求。
+type TurnRequest struct {
+	// Mode selects the orchestration profile. Empty defaults to TurnModeDeep.
+	Mode TurnMode
+	// SessionID 是 host 侧会话 ID（落库主键），引擎可用它做日志关联。
+	SessionID string
+	// InvocationScope identifies one logical Agent execution for side-effect
+	// idempotency. Retries of the same execution must reuse it; distinct user
+	// turns or automation occurrences must not. Empty falls back to SessionID.
+	InvocationScope string
+	// EngineSession 是引擎侧持久会话标识。空表示由引擎创建；调用方应保存
+	// TurnResult 返回值并在下一轮传回。
+	EngineSession string
+	// DisableSession disables engine-managed history for channels whose context
+	// can receive out-of-band messages (for example passive group listening).
+	DisableSession bool
+	// SessionCapability identifies the stable permission-scoped capability set.
+	// It may be broader than Tools for a transient read-only turn, preventing
+	// unnecessary session rotation while handlers still enforce the narrower set.
+	SessionCapability string
+	// System 系统提示，由 chat 编排器组装（身份、角色、当前时间等）。
+	System string
+	// History 本会话既往文本消息（不含本轮），按时间升序。
+	History []Message
+	// UserText 本轮用户输入。
+	UserText string
+	// Model 是本轮使用的模型名覆盖；空值表示使用引擎默认配置。
+	Model string
+	// Tools 本轮可用工具集（已按用户权限裁剪）。
+	Tools []Tool
+	// Skills 是已按语义相关性和用户/渠道作用域裁剪的候选执行方法。
+	// 引擎只暴露元数据，由模型按需加载完整 Content。
+	Skills []Skill
+	// OnEvent 可选回调：工具调用与文本产出实时上报（审计/流式）。
+	// 引擎在任意 goroutine 调用它，实现方需自行保证并发安全。
+	OnEvent func(Step)
+	// OnDelta 可选：流式渐进显示回调（eino 流式）。nil = 不流式。传入的是【当前
+	// 助手消息累积到目前的可显示文本快照】，网关应「替换」显示而非
+	// 追加；新消息开始时快照重置（短），网关随之刷新。收尾以 TurnResult.Text 为准。
+	// 与 OnEvent 一样可能在任意 goroutine 调用，实现方自行保证并发安全。
+	OnDelta func(text string)
+	// StreamReasoning 为 true 时，OnDelta 会包含模型 ReasoningContent；默认 false，
+	// 只流式展示最终正文，避免把内部推理暴露给用户。
+	StreamReasoning bool
+	// MaxOutputTokens bounds this call independently from the engine default.
+	// It is primarily used by internal OneShot selectors and extractors.
+	MaxOutputTokens int
+	// MaxIterations optionally lowers the DeepAgent lifecycle limit for bounded
+	// background work. Zero keeps the engine-wide limit; callers cannot raise
+	// the configured ceiling.
+	MaxIterations int
+	// Reasoning controls provider reasoning for this call. Unsupported providers
+	// keep their normal behavior.
+	Reasoning ReasoningMode
+	// JSONOutput asks compatible providers for a JSON object. Callers must still
+	// validate the decoded structure and all selected identifiers.
+	JSONOutput bool
+}
+
+// TurnResult 一轮对话结果。
+type TurnResult struct {
+	// Text 模型最终答复（给用户看的）。
+	Text string
+	// EngineSession 引擎侧会话标识；调用方应持久化以便下一轮传回。
+	EngineSession string
+	// FinishReason 是底层模型返回的结束原因（如 stop/length/max_tokens）。
+	FinishReason string
+	// OutputLikelyTruncated 表示底层模型疑似耗尽输出预算。对思考型模型来说，
+	// 这常表现为 output tokens 打满，但可见正文只有一两个词。
+	OutputLikelyTruncated bool
+	// Steps 本轮完整执行轨迹（含 tool 调用），用于审计。
+	Steps        []Step
+	Usage        Usage
+	ToolExposure ToolExposure
+}
+
+// Engine 跑一轮带工具的对话。实现：einoengine。
+type Engine interface {
+	// RunTurn 阻塞直到本轮完成（模型给出最终文本或出错）。
+	RunTurn(ctx context.Context, req *TurnRequest) (*TurnResult, error)
+	// Name 引擎标识（配置值），用于日志与会话落库。
+	Name() string
+}

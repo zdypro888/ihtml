@@ -7,6 +7,18 @@ the first tagged release, changes are recorded under **Unreleased**.
 
 ### Added
 
+- `agent` engine-neutral contracts and `agent/eino` reusable native Eino runtime,
+  extracted from nbco with Responses encrypted reasoning replay, native tool
+  loops, cancellation, token budgets, scoped durable sessions and regressions.
+- `assistant.NewChecked` host-engine ChatBackend bridge with queued turns,
+  cancellation, snapshot-to-delta projection, generic tool events and explicit
+  host preparation/completion/approval hooks. No business database dependency.
+- Standalone `ihtml.mountChat`, shared chat rendering, send/cancel/clear API,
+  abortable context extension and redacted event hooks; `example/assistant` and
+  `docs/ai-integration.md` demonstrate cross-project integration.
+- `chat.Config.ModelFactory` for explicit host model transport injection
+  without creating a second Agent owner.
+
 - MIT license (`LICENSE`).
 - `VersionedUserStateStore` optional capability: per-user optimistic-concurrency
   tokens with conditional whole-state replacement (`ErrVersionConflict`). All
@@ -112,7 +124,9 @@ the first tagged release, changes are recorded under **Unreleased**.
   confirm/cancel frame rates are hard-bounded, and manual tools inherit the
   turn-duration deadline. Cross-process ownership still requires host routing
   or a distributed lease.
-- Minimum Go version is now 1.25.0 (was pinned to the 1.26.5 patch release).
+- Minimum Go version is now 1.26.9 for the official OpenAI Responses SDK and
+  patched toolchain. gRPC/OpenTelemetry dependencies are updated to eliminate
+  reachable vulnerabilities; CI lint tools are aligned with Go 1.26.
 - `FileStore` serializes all in-process access plus cooperating processes with
   OS file locks, uses unique `0600` temporary/data files, fsyncs data before
   rename, and propagates directory-sync failures. Versioned CAS is therefore

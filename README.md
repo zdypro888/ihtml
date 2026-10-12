@@ -26,6 +26,9 @@
 |---|---|
 | `ihtml` | 稳定核心：HTTP Handler、Store/Service、模板、事件与 ChatBackend 协议；AI 完全可选 |
 | `ihtml/chat` | 内置 Eino AI 后端；程序化入口是 `chat.Config` + `chat.NewChecked` |
+| `ihtml/agent` | 与引擎无关的 Tool、TurnRequest、流式 Step、Usage 与 Engine 契约 |
+| `ihtml/agent/eino` | 通用 Eino 执行循环、原生 Responses/Chat Completions/Claude 模型适配、动态工具与持久会话接口 |
+| `ihtml/assistant` | 将宿主的 `agent.Engine` 接到对话协议，宿主通过 PrepareTurn/CompleteTurn/ToolExecutionGuard 保留业务治理 |
 | `ihtml/chat/config` | 严格、版本化、可嵌入宿主配置的 AI JSON loader；SecretResolver 显式注入 |
 | `ihtml/sqlstore` | `database/sql` 持久化实现；驱动与 `*sql.DB` 生命周期由宿主拥有 |
 | `ihtml/redisbroadcast` | 多副本实时事件：非阻塞 Redis Pub/Sub + 用户级全局单调版本；`*redis.Client` 与 Broadcaster 生命周期均由宿主关闭 |
@@ -35,7 +38,26 @@
 
 旧的 `ihtml.New` / `chat.New` 为兼容保留；新集成推荐 `NewHandler` / `NewChecked`，让所有配置错误在开始监听前返回。公共协议字符串均有导出常量，模型能力响应带 `protocol_version`。当前仍处于 pre-v1 阶段；发布 v1 前会继续保持新增优先、破坏性调整集中并提供迁移说明。
 
-完整兼容约定见 [COMPATIBILITY.md](COMPATIBILITY.md)，未发布变更见 [CHANGELOG.md](CHANGELOG.md)。许可证为 [MIT](LICENSE)，最低 Go 版本 1.25（CI 同时验证最低版与最新稳定版）；正式发版前仍需由项目所有者打首个 semver tag。
+完整兼容约定见 [COMPATIBILITY.md](COMPATIBILITY.md)，未发布变更见 [CHANGELOG.md](CHANGELOG.md)。许可证为 [MIT](LICENSE)，最低 Go 版本 1.26.9（官方 OpenAI SDK 要求 Go 1.26，使用已修补版本；CI 同时验证最低系列与最新稳定版）；正式发版前仍需由项目所有者打首个 semver tag。
+
+### 独立 AI 助手与复用指南
+
+只需要对话页面时使用 `ihtml.mountChat`，无需挂载工作台或加载 Items。它和工作台抽屉共用消息渲染、流式事件、取消、模型选择和身份隔离：
+
+```js
+const assistant = ihtml.mountChat(document.querySelector('#assistant'), {
+  base: '/ui/', theme: 'inherit', storageKey: 'project-assistant',
+  auth: getHostToken, connectionAuth: getShortLivedTicket,
+  contextProvider: ({context}) => ({page: {...context.page, path: '/orders'}}),
+  onChatEvent: event => observeChat(event),
+});
+await assistant.ready();
+await assistant.chat.send('查看本周订单');
+const messages = assistant.chat.getMessages(); // 有界显示快照，可用于路由重挂载
+// 页面离开时 assistant.destroy()；换用户时 await assistant.refreshAuth()。
+```
+
+挂载点由宿主设置高度；上下文是非可信浏览器输入，不能用于授权。显示快照也不是可信模型历史。扩展接口、原生 Responses 模型、宿主 Agent 接入、历史与工具权限边界，以及 nbco 实践总结见 [AI 接入指南](docs/ai-integration.md)。可运行的独立助手示例：`go run ./example/assistant`，默认只在本机运行确定性预览，不调用付费 API。
 
 ## 嵌入宿主应用（SDK 形态）
 

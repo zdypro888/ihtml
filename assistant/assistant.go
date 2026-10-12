@@ -1,0 +1,554 @@
+// Package assistant bridges ihtml's chat protocol to a host-owned agent.Engine.
+// It does not authenticate users, persist transcripts, or implement approvals.
+package assistant
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"reflect"
+	"strings"
+	"sync"
+
+	"github.com/zdypro888/ihtml"
+	"github.com/zdypro888/ihtml/agent"
+)
+
+// Config contains no provider credentials. Hooks must respect cancellation and
+// be safe across connections. Engine.RunTurn must stop when its context ends.
+type Config struct {
+	Engine agent.Engine
+	// PrepareTurn receives only the newest client user message, not the browser's
+	// transcript. The host owns identity, permissions, model selection, History,
+	// SessionID, EngineSession and InvocationScope. Return a fresh request.
+	PrepareTurn func(context.Context, *ihtml.ChatSessionContext, *ihtml.ChatClientEvent) (*agent.TurnRequest, error)
+	// Exactly one explicit model source is required; no readiness is inferred.
+	Models         *ihtml.ChatModels
+	ModelsProvider func(context.Context) (ihtml.ChatModels, error)
+	// CompleteTurn receives partial results and failures for host persistence.
+	// An error suppresses assistant_done. No client transcript is ever persisted
+	// by this package. Hooks and Emit must return; Close waits for real unwind.
+	CompleteTurn func(context.Context, *ihtml.ChatSessionContext, *agent.TurnRequest, *agent.TurnResult, error) error
+	// ToolExecutionGuard runs immediately before each host Handler. Required for
+	// ApprovalRequired tools: it must verify host-owned approval and live access,
+	// never a client claim. Already-governed Handlers still own live revocation.
+	ToolExecutionGuard func(context.Context, *ihtml.ChatSessionContext, agent.Tool, json.RawMessage) error
+	MaxPendingTurns    int    // default 16; per connection, excluding the active turn
+	ContentFormat      string // default text; HTML remains untrusted model output
+}
+
+type Backend struct{ cfg Config }
+
+var _ ihtml.ChatBackend = (*Backend)(nil)
+var _ ihtml.ModelLister = (*Backend)(nil)
+
+// NewChecked validates dependencies without invoking the Engine or host hooks.
+func NewChecked(cfg Config) (*Backend, error) {
+	if isNil(cfg.Engine) {
+		return nil, errors.New("assistant: Engine is required")
+	}
+	if cfg.PrepareTurn == nil {
+		return nil, errors.New("assistant: PrepareTurn is required")
+	}
+	if (cfg.Models == nil) == (cfg.ModelsProvider == nil) {
+		return nil, errors.New("assistant: specify exactly one of Models or ModelsProvider")
+	}
+	if cfg.MaxPendingTurns == 0 {
+		cfg.MaxPendingTurns = 16
+	}
+	if cfg.MaxPendingTurns < 1 || cfg.MaxPendingTurns > 256 {
+		return nil, errors.New("assistant: MaxPendingTurns must be between 1 and 256")
+	}
+	if cfg.ContentFormat == "" {
+		cfg.ContentFormat = ihtml.ChatContentFormatText
+	}
+	switch cfg.ContentFormat {
+	case ihtml.ChatContentFormatText, ihtml.ChatContentFormatMarkdown, ihtml.ChatContentFormatHTML:
+	default:
+		return nil, errors.New("assistant: unsupported ContentFormat")
+	}
+	if cfg.Models != nil {
+		models := cloneModels(*cfg.Models)
+		cfg.Models = &models
+	}
+	return &Backend{cfg: cfg}, nil
+}
+
+func isNil(v any) bool {
+	if v == nil {
+		return true
+	}
+	r := reflect.ValueOf(v)
+	switch r.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return r.IsNil()
+	}
+	return false
+}
+
+func cloneModels(m ihtml.ChatModels) ihtml.ChatModels {
+	m.ProtocolVersion = ihtml.ChatProtocolVersion
+	m.Models = append([]string{}, m.Models...)
+	m.AgentModes = append([]string{}, m.AgentModes...)
+	// This bridge neither signs confirmation cards nor resumes checkpoints.
+	m.DeepApprovalResume = ""
+	if m.PreviewOnly {
+		m.ModelReady = false
+	}
+	return m
+}
+
+func (b *Backend) Models(ctx context.Context) (models ihtml.ChatModels, err error) {
+	defer func() {
+		if recover() != nil {
+			models, err = ihtml.ChatModels{}, errors.New("assistant: ModelsProvider panicked")
+		}
+	}()
+	if b.cfg.Models != nil {
+		return cloneModels(*b.cfg.Models), nil
+	}
+	models, err = b.cfg.ModelsProvider(ctx)
+	return cloneModels(models), err
+}
+
+func (b *Backend) NewSession(ctx context.Context, sctx *ihtml.ChatSessionContext) (ihtml.ChatSession, error) {
+	if ctx == nil || ctx.Err() != nil {
+		return nil, errors.New("assistant: live session context is required")
+	}
+	if sctx == nil || strings.TrimSpace(sctx.User) == "" || sctx.Emit == nil {
+		return nil, errors.New("assistant: authenticated User and Emit are required")
+	}
+	if sctx.Access.ChatDisabled {
+		return nil, ihtml.ErrAccessDenied
+	}
+	copyContext := *sctx
+	copyContext.APIs = append([]ihtml.APISpec(nil), sctx.APIs...)
+	ctx, cancel := context.WithCancel(ctx)
+	s := &session{backend: b, sctx: copyContext, ctx: ctx, cancel: cancel,
+		wake: make(chan struct{}, 1), done: make(chan struct{})}
+	go s.loop()
+	return s, nil
+}
+
+type pendingTurn struct {
+	parent context.Context
+	event  ihtml.ChatClientEvent
+}
+
+type session struct {
+	backend       *Backend
+	sctx          ihtml.ChatSessionContext
+	ctx           context.Context
+	cancel        context.CancelFunc
+	wake          chan struct{}
+	done          chan struct{}
+	mu            sync.Mutex
+	emitMu        sync.Mutex
+	queue         []pendingTurn
+	active        context.CancelFunc
+	activeOutput  *projection
+	queueRejected bool
+	closed        bool
+}
+
+// Close cancels active and queued work and waits for all host work to unwind.
+// It must not be called reentrantly from Engine callbacks, host hooks or Emit.
+func (s *session) Close() {
+	s.mu.Lock()
+	s.closed = true
+	s.queue = nil
+	s.cancel()
+	s.mu.Unlock()
+	<-s.done
+}
+
+func (s *session) HandleEvent(ctx context.Context, ev *ihtml.ChatClientEvent) {
+	if ev == nil || ctx == nil || ctx.Err() != nil {
+		return
+	}
+	if ev.Type == ihtml.ChatClientCancel {
+		s.mu.Lock()
+		s.queue = nil
+		s.queueRejected = false
+		if s.active != nil {
+			s.active()
+		}
+		s.mu.Unlock()
+		return
+	}
+	// Confirmation, checkpoint resume and inspection are host-specific protocols,
+	// not capabilities this bridge can safely emulate.
+	if ev.Type != ihtml.ChatClientUserMessage {
+		return
+	}
+	copyEvent, err := cleanEvent(ev)
+	if err != nil {
+		return
+	}
+	s.mu.Lock()
+	if s.closed || s.ctx.Err() != nil {
+		s.mu.Unlock()
+		return
+	}
+	if len(s.queue) >= s.backend.cfg.MaxPendingTurns {
+		output := s.activeOutput
+		if output == nil {
+			s.queueRejected = true
+		}
+		s.mu.Unlock()
+		if output != nil {
+			output.queueFull()
+		}
+		return
+	}
+	s.queue = append(s.queue, pendingTurn{parent: ctx, event: copyEvent})
+	s.mu.Unlock()
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
+}
+
+func cleanEvent(ev *ihtml.ChatClientEvent) (ihtml.ChatClientEvent, error) {
+	// JSON cloning also detaches maps and pointers held by the websocket caller.
+	data, err := json.Marshal(ev)
+	if err != nil {
+		return ihtml.ChatClientEvent{}, err
+	}
+	var out ihtml.ChatClientEvent
+	if err = json.Unmarshal(data, &out); err != nil {
+		return out, err
+	}
+	out.Messages = nil
+	for i := len(ev.Messages) - 1; i >= 0; i-- {
+		if ev.Messages[i].Role == "user" {
+			out.Messages = []ihtml.ChatMessage{ev.Messages[i]}
+			break
+		}
+	}
+	out.ToolCall, out.Inspect = nil, nil
+	out.InspectID = ""
+	return out, nil
+}
+
+func (s *session) loop() {
+	defer close(s.done)
+	for {
+		s.mu.Lock()
+		if s.closed || s.ctx.Err() != nil {
+			s.queue = nil
+			s.mu.Unlock()
+			return
+		}
+		if len(s.queue) == 0 {
+			s.mu.Unlock()
+			select {
+			case <-s.ctx.Done():
+			case <-s.wake:
+			}
+			continue
+		}
+		next := s.queue[0]
+		s.queue = s.queue[1:]
+		ctx, cancel := context.WithCancel(s.ctx)
+		s.active = cancel
+		s.mu.Unlock()
+		stop := context.AfterFunc(next.parent, cancel)
+		if next.parent.Err() != nil {
+			cancel()
+		}
+		s.run(ctx, cancel, &next.event)
+		stop()
+		cancel()
+		s.mu.Lock()
+		s.active = nil
+		s.activeOutput = nil
+		s.mu.Unlock()
+	}
+}
+
+func (s *session) emit(ev ihtml.ChatStreamEvent) (err error) {
+	s.emitMu.Lock()
+	defer s.emitMu.Unlock()
+	defer func() {
+		if recover() != nil {
+			err = errors.New("assistant: Emit panicked")
+		}
+		if err != nil {
+			s.cancel()
+		}
+	}()
+	if s.ctx.Err() != nil {
+		return s.ctx.Err()
+	}
+	return s.sctx.Emit(ev)
+}
+
+func (s *session) run(ctx context.Context, cancel context.CancelFunc, ev *ihtml.ChatClientEvent) {
+	p := newProjection(s, ctx, cancel)
+	s.mu.Lock()
+	s.activeOutput = p
+	rejected := s.queueRejected
+	s.queueRejected = false
+	s.mu.Unlock()
+	var req *agent.TurnRequest
+	var result *agent.TurnResult
+	var runErr error
+	defer func() {
+		if recover() != nil {
+			runErr = errors.New("assistant: turn panicked")
+		}
+		p.mu.Lock()
+		p.finished = true
+		if p.err != nil {
+			runErr = p.err
+		} else if ctx.Err() != nil {
+			runErr = ctx.Err()
+		}
+		p.mu.Unlock()
+		if runErr == nil && (result == nil || result.FinishReason == "agent_error") {
+			runErr = errors.New("assistant: engine did not complete successfully")
+		}
+		if complete := s.backend.cfg.CompleteTurn; complete != nil && req != nil {
+			if err := safeComplete(complete, ctx, &s.sctx, req, result, runErr); err != nil {
+				runErr = err
+			}
+		}
+		if runErr == nil && ctx.Err() != nil {
+			runErr = ctx.Err()
+		}
+		p.end(result, runErr)
+	}()
+	models, err := s.backend.Models(ctx)
+	p.mu.Lock()
+	p.modelReady = models.ModelReady
+	p.started = true
+	p.send(ihtml.ChatStreamEvent{Type: ihtml.ChatStreamTurnStart})
+	if rejected || p.pendingNotice {
+		p.sendQueueFull()
+	}
+	p.mu.Unlock()
+	if err != nil {
+		runErr = errors.New("assistant: model metadata unavailable")
+		return
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	// A hook cannot mutate the connection's binding or replace its Emit callback.
+	hostContext := s.sctx
+	req, runErr = s.backend.cfg.PrepareTurn(ctx, &hostContext, ev)
+	if runErr != nil {
+		return
+	}
+	if req == nil {
+		runErr = errors.New("assistant: PrepareTurn returned nil")
+		return
+	}
+	copyRequest := *req
+	req = &copyRequest
+	req.StreamReasoning = false
+	req.Tools, runErr = s.governTools(req.Tools, ev, p)
+	if runErr != nil {
+		return
+	}
+	if ev.ToolsEnabled != nil && !*ev.ToolsEnabled {
+		req.Skills = nil
+	}
+	onDelta, onEvent := req.OnDelta, req.OnEvent
+	req.OnDelta = func(text string) { p.delta(text, onDelta) }
+	req.OnEvent = func(step agent.Step) { p.step(step, onEvent) }
+	if ctx.Err() == nil {
+		result, runErr = s.backend.cfg.Engine.RunTurn(ctx, req)
+	}
+}
+
+func safeComplete(fn func(context.Context, *ihtml.ChatSessionContext, *agent.TurnRequest, *agent.TurnResult, error) error,
+	ctx context.Context, sctx *ihtml.ChatSessionContext, req *agent.TurnRequest, result *agent.TurnResult, turnErr error) (err error) {
+	defer func() {
+		if recover() != nil {
+			err = errors.New("assistant: CompleteTurn panicked")
+		}
+	}()
+	copyContext := *sctx
+	return fn(ctx, &copyContext, req, result, turnErr)
+}
+
+func (s *session) governTools(tools []agent.Tool, ev *ihtml.ChatClientEvent, p *projection) ([]agent.Tool, error) {
+	if ev.ToolsEnabled != nil && !*ev.ToolsEnabled {
+		return nil, nil
+	}
+	guard := s.backend.cfg.ToolExecutionGuard
+	out := make([]agent.Tool, 0, len(tools))
+	for _, tool := range tools {
+		if s.sctx.Access.ReadOnly && tool.Effect != agent.ToolEffectRead {
+			continue
+		}
+		if tool.ApprovalRequired && guard == nil {
+			continue
+		}
+		if tool.Handler == nil || strings.TrimSpace(tool.Name) == "" {
+			return nil, errors.New("assistant: invalid host tool")
+		}
+		handler, original := tool.Handler, tool
+		tool.Handler = func(ctx context.Context, args json.RawMessage) (result string, err error) {
+			defer func() {
+				if recover() != nil {
+					result, err = "", errors.New("assistant: tool panicked")
+				}
+			}()
+			if ctx.Err() != nil || p.ctx.Err() != nil {
+				return "", context.Canceled
+			}
+			if guard != nil {
+				hostContext := s.sctx
+				if err := guard(ctx, &hostContext, original, args); err != nil {
+					return "", ihtml.ErrAccessDenied
+				}
+			}
+			return handler(ctx, args)
+		}
+		out = append(out, tool)
+	}
+	return out, nil
+}
+
+type projection struct {
+	mu            sync.Mutex
+	session       *session
+	ctx           context.Context
+	cancel        context.CancelFunc
+	id            string
+	seq           int64
+	snapshot      string
+	finished      bool
+	err           error
+	emitFailed    bool
+	modelReady    bool
+	toolSeq       int64
+	started       bool
+	pendingNotice bool
+}
+
+func newProjection(s *session, ctx context.Context, cancel context.CancelFunc) *projection {
+	var id [16]byte
+	// crypto/rand.Read either fills the buffer or panics on modern Go.
+	_, _ = rand.Read(id[:])
+	return &projection{session: s, ctx: ctx, cancel: cancel, id: hex.EncodeToString(id[:])}
+}
+
+// All send calls hold mu across sequence assignment and synchronous emission.
+func (p *projection) send(ev ihtml.ChatStreamEvent) {
+	if p.emitFailed {
+		return
+	}
+	p.seq++
+	ev.RunID, ev.TurnID, ev.Seq = p.id, p.id+"_turn", p.seq
+	ev.ModelReady = p.modelReady
+	if err := p.session.emit(ev); err != nil {
+		p.err = err
+		p.emitFailed = true
+		p.cancel()
+	}
+}
+
+func (p *projection) callback(fn func()) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.finished || p.ctx.Err() != nil || p.err != nil {
+		return
+	}
+	defer func() {
+		if recover() != nil {
+			p.err = errors.New("assistant: callback panicked")
+			p.cancel()
+		}
+	}()
+	fn()
+}
+
+func (p *projection) delta(text string, host func(string)) {
+	p.callback(func() {
+		if host != nil {
+			host(text)
+		}
+		if text == p.snapshot {
+			return
+		}
+		delta := text
+		if strings.HasPrefix(text, p.snapshot) {
+			delta = strings.TrimPrefix(text, p.snapshot)
+		} else {
+			p.send(ihtml.ChatStreamEvent{Type: ihtml.ChatStreamAssistantReset})
+		}
+		p.snapshot = text
+		if delta != "" {
+			p.send(ihtml.ChatStreamEvent{Type: ihtml.ChatStreamAssistantDelta, Delta: delta, ContentFormat: p.session.backend.cfg.ContentFormat})
+		}
+	})
+}
+
+func (p *projection) queueFull() {
+	p.callback(func() {
+		if !p.started {
+			p.pendingNotice = true
+			return
+		}
+		p.sendQueueFull()
+	})
+}
+
+func (p *projection) sendQueueFull() {
+	p.pendingNotice = false
+	p.send(ihtml.ChatStreamEvent{Type: ihtml.ChatStreamAssistantStatus,
+		Status: "Pending message rejected: the turn queue is full."})
+}
+
+func (p *projection) step(step agent.Step, host func(agent.Step)) {
+	p.callback(func() {
+		if host != nil {
+			host(step)
+		}
+		if step.Kind != agent.StepToolCall {
+			return
+		}
+		status, summary := ihtml.ChatToolSuccess, "Tool completed."
+		switch {
+		case step.Err != "":
+			status, summary = ihtml.ChatToolError, "Tool failed."
+		case step.Replayed:
+			status, summary = ihtml.ChatToolCancelled, "Duplicate invocation suppressed."
+		case step.Completion == agent.ToolCompletionAsynchronous:
+			summary = "Request accepted; completion is not confirmed."
+		}
+		p.toolSeq++
+		p.send(ihtml.ChatStreamEvent{Type: ihtml.ChatStreamToolResult, ToolID: fmt.Sprintf("%s_tool_%d", p.id, p.toolSeq),
+			ToolName: step.ToolName, ToolStatus: status, ToolSummary: summary})
+	})
+}
+
+func (p *projection) end(result *agent.TurnResult, err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.finished = true
+	if err != nil || result == nil || result.FinishReason == "agent_error" {
+		message := "Assistant turn failed."
+		if errors.Is(err, context.Canceled) {
+			message = "Assistant turn cancelled."
+		}
+		p.send(ihtml.ChatStreamEvent{Type: ihtml.ChatStreamTurnError, Error: message})
+		return
+	}
+	p.send(ihtml.ChatStreamEvent{Type: ihtml.ChatStreamAssistantDone, Message: result.Text,
+		ContentFormat: p.session.backend.cfg.ContentFormat, FinishReason: result.FinishReason,
+		Usage: &ihtml.ChatUsage{InputTokens: result.Usage.InputTokens, OutputTokens: result.Usage.OutputTokens,
+			TotalTokens: result.Usage.InputTokens + result.Usage.OutputTokens}})
+}
+
+// String deliberately exposes no engine/provider configuration.
+func (b *Backend) String() string {
+	return fmt.Sprintf("assistant.Backend(queue=%d)", b.cfg.MaxPendingTurns)
+}
