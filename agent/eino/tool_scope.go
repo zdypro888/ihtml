@@ -43,6 +43,8 @@ type turnToolMiddleware struct {
 	mu            sync.Mutex
 	selected      map[string]struct{}
 	blockedCalls  map[string]struct{}
+	rejectedCalls map[string]struct{}
+	approvalArgs  map[string]json.RawMessage
 	replayedCalls map[string]struct{}
 	effectCalls   map[string]*effectCall
 	replayCounts  map[string]int
@@ -78,6 +80,8 @@ func newTurnToolMiddleware(ctx context.Context, sessionID string, tools []ai.Too
 		sessionID:     strings.TrimSpace(sessionID),
 		selected:      make(map[string]struct{}),
 		blockedCalls:  make(map[string]struct{}),
+		rejectedCalls: make(map[string]struct{}),
+		approvalArgs:  make(map[string]json.RawMessage),
 		replayedCalls: make(map[string]struct{}),
 		effectCalls:   make(map[string]*effectCall),
 		replayCounts:  make(map[string]int),
@@ -354,6 +358,19 @@ func (m *turnToolMiddleware) blocked(toolName, callID string) bool {
 	defer m.mu.Unlock()
 	_, blocked := m.blockedCalls[toolCallKey(toolName, callID)]
 	return blocked
+}
+
+func (m *turnToolMiddleware) rejected(toolName, callID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.rejectedCalls[toolCallKey(toolName, callID)]
+	return ok
+}
+
+func (m *turnToolMiddleware) approvalArguments(toolName, callID string) json.RawMessage {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append(json.RawMessage(nil), m.approvalArgs[toolCallKey(toolName, callID)]...)
 }
 
 func (m *turnToolMiddleware) replayed(toolName, callID string) bool {

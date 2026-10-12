@@ -40,6 +40,8 @@ type Config struct {
 	// never a client claim. Already-governed Handlers still own live revocation.
 	ToolExecutionGuard func(context.Context, *ihtml.ChatSessionContext, agent.Tool, json.RawMessage) error
 	Confirmation       *ConfirmationConfig
+	// NativeConfirmation and manual Confirmation are mutually exclusive.
+	NativeConfirmation *NativeConfirmationConfig
 	// CompleteTool persists actual manual execution evidence. It does not update
 	// the engine's pending invocation receipt or resume its model trajectory.
 	CompleteTool    func(context.Context, *ihtml.ChatSessionContext, *ConfirmedToolResult) error
@@ -97,6 +99,17 @@ func NewChecked(cfg Config) (*Backend, error) {
 		}
 		cfg.Confirmation = &c
 	}
+	if cfg.NativeConfirmation != nil {
+		c := *cfg.NativeConfirmation
+		native, ok := cfg.Engine.(agent.NativeApprovalEngine)
+		if !ok || !native.SupportsNativeApproval() {
+			return nil, errors.New("assistant: Engine does not support durable native approval")
+		}
+		if cfg.Confirmation != nil || c.Pause == nil || c.PrepareResume == nil || c.Pending == nil || cfg.ToolExecutionGuard == nil || cfg.CompleteTurn == nil {
+			return nil, errors.New("assistant: native confirmation requires durable hooks, CompleteTurn and ToolExecutionGuard; manual confirmation must be disabled")
+		}
+		cfg.NativeConfirmation = &c
+	}
 	return &Backend{cfg: cfg}, nil
 }
 
@@ -116,8 +129,8 @@ func cloneModels(m ihtml.ChatModels) ihtml.ChatModels {
 	m.ProtocolVersion = ihtml.ChatProtocolVersion
 	m.Models = append([]string{}, m.Models...)
 	m.AgentModes = append([]string{}, m.AgentModes...)
-	// Checkpoint resume is never supported; Models enables manual-only cards
-	// explicitly when the optional confirmation bridge is configured.
+	// Capability metadata comes from checked bridge configuration, never from a
+	// host's unverified model listing.
 	m.DeepApprovalResume = ""
 	if m.PreviewOnly {
 		m.ModelReady = false
@@ -139,6 +152,9 @@ func (b *Backend) Models(ctx context.Context) (models ihtml.ChatModels, err erro
 	}
 	if b.cfg.Confirmation != nil {
 		models.DeepApprovalResume = "manual_tool_only"
+	}
+	if b.cfg.NativeConfirmation != nil {
+		models.DeepApprovalResume = "checkpoint"
 	}
 	return models, err
 }
@@ -230,9 +246,19 @@ func (s *session) HandleEvent(ctx context.Context, ev *ihtml.ChatClientEvent) {
 		return
 	}
 	if ev.Type != ihtml.ChatClientUserMessage {
-		return
+		if s.backend.cfg.NativeConfirmation == nil || (ev.Type != ihtml.ChatClientConfirmTool && ev.Type != ihtml.ChatClientCancelTool) || ev.ToolCall == nil {
+			return
+		}
 	}
-	copyEvent, err := cleanEvent(ev)
+	var copyEvent ihtml.ChatClientEvent
+	var err error
+	if ev.Type == ihtml.ChatClientUserMessage {
+		copyEvent, err = cleanEvent(ev)
+	} else {
+		var call ihtml.ProposedToolCall
+		call, err = cloneToolCall(*ev.ToolCall)
+		copyEvent = ihtml.ChatClientEvent{Type: ev.Type, ToolCall: &call}
+	}
 	if err != nil {
 		return
 	}
@@ -285,6 +311,7 @@ func cleanEvent(ev *ihtml.ChatClientEvent) (ihtml.ChatClientEvent, error) {
 func (s *session) loop() {
 	defer close(s.done)
 	defer s.cleanupPendingTools()
+	s.restoreApprovals()
 	for {
 		s.mu.Lock()
 		if s.closed || s.ctx.Err() != nil {
@@ -313,7 +340,9 @@ func (s *session) loop() {
 		if next.parent.Err() != nil {
 			cancel()
 		}
-		if next.event.Type == ihtml.ChatClientCancelTool {
+		if s.backend.cfg.NativeConfirmation != nil {
+			s.run(ctx, cancel, &next.event)
+		} else if next.event.Type == ihtml.ChatClientCancelTool {
 			s.cancelToolAck(*next.event.ToolCall, false)
 		} else if next.event.Type == ihtml.ChatClientConfirmTool {
 			s.runConfirmedTool(ctx, cancel, &next.event, next.reject)
@@ -371,7 +400,24 @@ func (s *session) run(ctx context.Context, cancel context.CancelFunc, ev *ihtml.
 		if runErr == nil && (result == nil || result.FinishReason == "agent_error") {
 			runErr = errors.New("assistant: engine did not complete successfully")
 		}
-		if complete := s.backend.cfg.CompleteTurn; complete != nil && req != nil {
+		pauseDurable := false
+		if runErr == nil && result != nil && result.PendingApproval != nil {
+			if s.backend.cfg.NativeConfirmation == nil {
+				runErr = errors.New("assistant: native interruption is not configured")
+			} else {
+				host := s.sctx
+				cards, err := safeNativePause(s.backend.cfg.NativeConfirmation.Pause, ctx, &host, req, result)
+				if err != nil {
+					runErr = err
+				} else {
+					pauseDurable = true
+					p.mu.Lock()
+					runErr = p.approvalCards(cards)
+					p.mu.Unlock()
+				}
+			}
+		}
+		if complete := s.backend.cfg.CompleteTurn; !pauseDurable && complete != nil && req != nil {
 			if err := safeComplete(complete, ctx, &s.sctx, req, result, runErr); err != nil {
 				runErr = err
 			}
@@ -399,7 +445,27 @@ func (s *session) run(ctx context.Context, cancel context.CancelFunc, ev *ihtml.
 	}
 	// A hook cannot mutate the connection's binding or replace its Emit callback.
 	hostContext := s.sctx
-	req, runErr = s.backend.cfg.PrepareTurn(ctx, &hostContext, ev)
+	if ev.Type == ihtml.ChatClientConfirmTool || ev.Type == ihtml.ChatClientCancelTool {
+		req, runErr = s.backend.cfg.NativeConfirmation.PrepareResume(ctx, &hostContext, *ev.ToolCall, ev.Type == ihtml.ChatClientConfirmTool)
+		if runErr == nil && (req == nil || req.Resume == nil || !req.RequireApproval) {
+			runErr = errors.New("assistant: missing native resume binding")
+		}
+		if runErr == nil && ev.Type == ihtml.ChatClientCancelTool {
+			p.mu.Lock()
+			p.send(ihtml.ChatStreamEvent{Type: ihtml.ChatStreamCancelToolResult, ToolID: ev.ToolCall.ID, ConfirmationNonce: ev.ToolCall.ConfirmationNonce, ToolStatus: ihtml.ChatToolCancelled})
+			p.mu.Unlock()
+		}
+		if runErr == nil {
+			card, err := cloneToolCall(*ev.ToolCall)
+			if err != nil {
+				runErr = err
+			} else {
+				p.resumedCard = &card
+			}
+		}
+	} else {
+		req, runErr = s.backend.cfg.PrepareTurn(ctx, &hostContext, ev)
+	}
 	if runErr != nil {
 		return
 	}
@@ -409,6 +475,9 @@ func (s *session) run(ctx context.Context, cancel context.CancelFunc, ev *ihtml.
 	}
 	copyRequest := *req
 	req = &copyRequest
+	if s.backend.cfg.NativeConfirmation != nil {
+		req.RequireApproval = true
+	}
 	req.StreamReasoning = false
 	req.Tools, runErr = s.governTools(req.Tools, ev, p, req)
 	if runErr != nil {
@@ -503,6 +572,7 @@ type projection struct {
 	pendingNotice bool
 	pendingSteps  map[string]int
 	approvalTools map[string]bool
+	resumedCard   *ihtml.ProposedToolCall
 }
 
 func newProjection(s *session, ctx context.Context, cancel context.CancelFunc) *projection {
@@ -584,7 +654,7 @@ func (p *projection) step(step agent.Step, host func(agent.Step)) {
 		if host != nil {
 			host(step)
 		}
-		if step.Kind != agent.StepToolCall {
+		if step.Kind != agent.StepToolCall || step.ApprovalPending {
 			return
 		}
 		key := step.ToolName + "\x00" + string(confirmation.CanonicalBody(step.Args))
@@ -605,14 +675,21 @@ func (p *projection) step(step agent.Step, host func(agent.Step)) {
 		switch {
 		case step.Err != "":
 			status, summary = ihtml.ChatToolError, "Tool failed."
+		case step.ApprovalRejected:
+			status, summary = ihtml.ChatToolCancelled, "Tool rejected; not executed."
 		case step.Replayed:
 			status, summary = ihtml.ChatToolCancelled, "Duplicate invocation suppressed."
 		case step.Completion == agent.ToolCompletionAsynchronous:
 			summary = "Request accepted; completion is not confirmed."
 		}
 		p.toolSeq++
-		p.send(ihtml.ChatStreamEvent{Type: ihtml.ChatStreamToolResult, ToolID: fmt.Sprintf("%s_tool_%d", p.id, p.toolSeq),
-			ToolName: step.ToolName, ToolStatus: status, ToolSummary: summary})
+		event := ihtml.ChatStreamEvent{Type: ihtml.ChatStreamToolResult, ToolID: fmt.Sprintf("%s_tool_%d", p.id, p.toolSeq), ToolName: step.ToolName, ToolStatus: status, ToolSummary: summary}
+		if p.resumedCard != nil && p.resumedCard.Name == step.ToolName {
+			event.ToolID = p.resumedCard.ID
+			event.ToolCall = p.resumedCard
+			p.resumedCard = nil
+		}
+		p.send(event)
 	})
 }
 
@@ -626,6 +703,10 @@ func (p *projection) end(result *agent.TurnResult, err error) {
 			message = "Assistant turn cancelled."
 		}
 		p.send(ihtml.ChatStreamEvent{Type: ihtml.ChatStreamTurnError, Error: message})
+		return
+	}
+	if result.PendingApproval != nil {
+		p.send(ihtml.ChatStreamEvent{Type: ihtml.ChatStreamTurnPaused, Status: "Awaiting confirmation."})
 		return
 	}
 	p.send(ihtml.ChatStreamEvent{Type: ihtml.ChatStreamAssistantDone, Message: result.Text,

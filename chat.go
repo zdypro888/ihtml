@@ -63,6 +63,8 @@ const (
 	ChatStreamToolResult       = "tool_result"
 	ChatStreamAssistantDone    = "assistant_done"
 	ChatStreamTurnError        = "turn_error"
+	// TurnPaused ends the transport segment, not the durable Agent execution.
+	ChatStreamTurnPaused = "turn_paused"
 	// ChatStreamInspectRequest 由服务端(ui_page_inspect 工具)发起, 请求内核
 	// 回传当前页面的实时渲染状态; 内核以 inspect_result 帧应答同一 inspect_id。
 	ChatStreamInspectRequest = "inspect_request"
@@ -155,9 +157,12 @@ type ChatClientInspection struct {
 // ChatClientEvent 是客户端发来的 WS 事件:
 // type = user_message | confirm_tool | cancel_tool | cancel | inspect_result。
 type ChatClientEvent struct {
-	Type     string        `json:"type"`
-	Messages []ChatMessage `json:"messages,omitempty"`
-	Model    string        `json:"model,omitempty"`
+	// RequestID is a client idempotency hint, not identity or authorization.
+	// Hosts must namespace it by authenticated user and validate its length.
+	RequestID string        `json:"request_id,omitempty"`
+	Type      string        `json:"type"`
+	Messages  []ChatMessage `json:"messages,omitempty"`
+	Model     string        `json:"model,omitempty"`
 	// AgentMode 为空或 fast 时走低延迟单 Agent；deep 仅在服务端显式开启后可用。
 	AgentMode     string            `json:"agent_mode,omitempty"`
 	ToolsEnabled  *bool             `json:"tools_enabled,omitempty"`
@@ -226,11 +231,13 @@ type ChatTurnBudget struct {
 // confirmation_required / cancel_tool_result / tool_result / assistant_done /
 // turn_error。
 type ChatStreamEvent struct {
-	Type   string `json:"type"`
-	RunID  string `json:"run_id,omitempty"`
-	TurnID string `json:"turn_id,omitempty"`
-	Seq    int64  `json:"seq,omitempty"`
-	Delta  string `json:"delta,omitempty"`
+	// RestoredApproval marks a server-restored pending run, not client history.
+	RestoredApproval bool   `json:"restored_approval,omitempty"`
+	Type             string `json:"type"`
+	RunID            string `json:"run_id,omitempty"`
+	TurnID           string `json:"turn_id,omitempty"`
+	Seq              int64  `json:"seq,omitempty"`
+	Delta            string `json:"delta,omitempty"`
 	// ContentFormat applies only to assistant_delta.delta and
 	// assistant_done.message. Empty preserves the legacy auto-detected format;
 	// clients must render unknown values as plain text. HTML is always untrusted
@@ -579,7 +586,7 @@ func (g *chatWSEgressGuard) emitEvent(event ChatStreamEvent, backendEvent bool) 
 	g.turnBytes += payloadBytes
 	g.connectionEvents++
 	g.connectionBytes += payloadBytes
-	if backendEvent && (event.Type == ChatStreamAssistantDone || event.Type == ChatStreamTurnError) {
+	if backendEvent && (event.Type == ChatStreamAssistantDone || event.Type == ChatStreamTurnError || event.Type == ChatStreamTurnPaused) {
 		g.completeTurnLocked()
 	}
 	return nil

@@ -5740,11 +5740,11 @@
           this.notice(T('welcome'));
         }
       },
-      setActive(v) {
+      setActive(v, complete = true) {
         this.active = v;
         if (!this.dom) return;
         this.syncChatControls();
-        if (!v && this.turn && !this.turn.done) this.finishTurn(null);
+        if (!v && complete && this.turn && !this.turn.done) this.finishTurn(null);
       },
 
       clientContext() {
@@ -5965,6 +5965,7 @@
           if (destroyed || epoch !== requestEpoch || user !== resolvedUser || generation !== this.sendGeneration || !this.active || this.turn !== pendingTurn || pendingTurn.done || pendingTurn.cancelled) return false;
           ws.send(JSON.stringify({
             type: 'user_message',
+            request_id: Array.from(crypto.getRandomValues(new Uint8Array(16)), value => value.toString(16).padStart(2, '0')).join(''),
             messages: [{ role: 'user', content: text }],
             model: pendingTurn.requestModel,
             agent_mode: pendingTurn.agentMode,
@@ -6701,6 +6702,14 @@
           if (this.confirmationBusy !== rec || rec.status !== 'pending') return;
           ws.send(JSON.stringify(cancelEvent));
           rec.cancelSent = true;
+          if (rec.call.approval_resume === 'checkpoint') {
+            this.turn = t;
+            t.done = false;
+            t.cancelled = false;
+            t.acceptNextRun = true;
+            t.confirmingTool = true;
+            this.setActive(true);
+          }
           rec.cancelAckTimer = setTimeout(() => {
             if (rec.cancelPending) this.failCancellation(rec, T('cancellation_ack_timeout'), true);
           }, 12000);
@@ -6783,8 +6792,15 @@
         if (!runID) return this.turn;
         let t = this.turnsByRun.get(runID);
         if (!t && ev.type === 'turn_start') {
+          if (ev.restored_approval) {
+            const foreground = this.turn;
+            t = this.beginTurn('deep');
+            this.turn = foreground;
+            t.runSeq.set(runID, 0);
+            this.turnsByRun.set(runID, t);
+          }
           const candidate = this.turn;
-          if (candidate && (candidate.runSeq.size === 0 || candidate.acceptNextRun)) {
+          if (!t && candidate && (candidate.runSeq.size === 0 || candidate.acceptNextRun)) {
             candidate.acceptNextRun = false;
             candidate.runSeq.set(runID, 0);
             this.turnsByRun.set(runID, candidate);
@@ -6813,7 +6829,7 @@
         if (ev.type === 'cancel_tool_result') { this.handleCancellationResult(ev); this.notifyEvent(ev); return; }
         const t = this.eventTurn(ev);
         if (!t) return;
-        if (ev.agent || ev.budget || ev.type === 'assistant_plan' || ev.tool_call && ev.tool_call.approval_resume === 'manual_tool_only') {
+        if (ev.agent || ev.budget || ev.type === 'assistant_plan' || ev.tool_call && ['manual_tool_only', 'checkpoint'].includes(ev.tool_call.approval_resume)) {
           this.projectAgentEvent(ev, t);
         }
         switch (ev.type) {
@@ -6828,6 +6844,17 @@
           case 'tool_start': this.upsertTool(ev, 'running', t); break;
           case 'tool_result': this.upsertTool(ev, ev.tool_status || 'success', t); break;
           case 'confirmation_required': this.upsertTool(ev, 'pending', t); break;
+          case 'turn_paused':
+            cancelAssistantRender(t);
+            this.clearTransientStatus(t);
+            this.finalizeThinking(t);
+            t.answer.classList.remove('streaming');
+            t.confirmingTool = false;
+            t.done = false;
+            if (this.turn === t) this.setActive(false, false);
+            this.appendStatus(ev.status || T('tool_pending'), false, t);
+            this.updateProcess(t);
+            break;
           case 'assistant_done': this.finishTurn(ev, t); break;
           case 'turn_error': this.turnError(ev.error || 'error', t); break;
         }

@@ -156,12 +156,18 @@ const (
 
 // Step 一次引擎轮次内的执行轨迹条目，用于审计与回放。
 type Step struct {
-	Kind       StepKind
-	ToolName   string
-	Args       json.RawMessage
-	Result     string
-	Err        string
-	Completion ToolCompletion
+	// ToolCallID correlates call/result evidence across suspended segments.
+	ToolCallID string
+	// ApprovalPending is an unresolved call, never successful execution evidence.
+	ApprovalPending bool
+	// ApprovalRejected means this call was explicitly denied before execution.
+	ApprovalRejected bool
+	Kind             StepKind
+	ToolName         string
+	Args             json.RawMessage
+	Result           string
+	Err              string
+	Completion       ToolCompletion
 	// Replayed means the model repeated the exact same write/execute invocation
 	// in one turn. The original call remains in Steps; this entry is evidence of
 	// the suppressed replay and did not invoke the business handler again.
@@ -210,6 +216,12 @@ const (
 
 // TurnRequest 一轮对话请求。
 type TurnRequest struct {
+	// RequireApproval enables native suspension for ApprovalRequired tools.
+	// The host must persist PendingApproval and authenticate decisions; this is
+	// not business authorization. Handlers must still enforce live permission.
+	RequireApproval bool
+	// Resume is trusted host state, never decoded directly from browser input.
+	Resume *ResumeRequest
 	// Mode selects the orchestration profile. Empty defaults to TurnModeDeep.
 	Mode TurnMode
 	// SessionID 是 host 侧会话 ID（落库主键），引擎可用它做日志关联。
@@ -269,6 +281,8 @@ type TurnRequest struct {
 
 // TurnResult 一轮对话结果。
 type TurnResult struct {
+	// PendingApproval means the run is suspended, not successfully completed.
+	PendingApproval *PendingApproval
 	// Text 模型最终答复（给用户看的）。
 	Text string
 	// EngineSession 引擎侧会话标识；调用方应持久化以便下一轮传回。
@@ -284,10 +298,39 @@ type TurnResult struct {
 	ToolExposure ToolExposure
 }
 
+// PendingApproval is an opaque runtime checkpoint with exact tool invocations.
+// Persist it privately; expose only redacted signed cards to clients.
+type PendingApproval struct {
+	CheckPointID string         `json:"checkpoint_id"`
+	Tools        []ApprovalTool `json:"tools"`
+}
+
+type ApprovalTool struct {
+	ToolCallID  string          `json:"tool_call_id"`
+	InterruptID string          `json:"interrupt_id"`
+	ToolName    string          `json:"tool_name"`
+	Args        json.RawMessage `json:"args"`
+}
+
+// ResumeRequest targets explicit interrupt IDs. False rejects without invoking
+// the handler; omitted targets remain suspended. It requires the exact original
+// EngineSession and capability set, plus fresh host-owned tool handlers.
+type ResumeRequest struct {
+	CheckPointID string
+	Decisions    map[string]bool
+}
+
 // Engine 跑一轮带工具的对话。实现：einoengine。
 type Engine interface {
 	// RunTurn 阻塞直到本轮完成（模型给出最终文本或出错）。
 	RunTurn(ctx context.Context, req *TurnRequest) (*TurnResult, error)
 	// Name 引擎标识（配置值），用于日志与会话落库。
 	Name() string
+}
+
+// NativeApprovalEngine explicitly advertises the suspension contract. Merely
+// implementing Engine does not imply RequireApproval will be honored.
+type NativeApprovalEngine interface {
+	Engine
+	SupportsNativeApproval() bool
 }

@@ -161,6 +161,8 @@ func chatHTTPTimeout(ms int) time.Duration {
 // Name 实现 ai.Engine。
 func (e *Engine) Name() string { return EngineEino }
 
+func (e *Engine) SupportsNativeApproval() bool { return e != nil && e.runtime != nil }
+
 // RunTurn selects an explicit Eino execution profile. Product conversations use
 // DeepAgent; bounded internal transformations use a plain ChatModelAgent.
 func (e *Engine) RunTurn(ctx context.Context, req *ai.TurnRequest) (*ai.TurnResult, error) {
@@ -206,6 +208,24 @@ func (e *Engine) RunTurn(ctx context.Context, req *ai.TurnRequest) (*ai.TurnResu
 		}
 	}
 	managedSession := engineSession != "" && e.runtime != nil
+	if req.RequireApproval && (mode != ai.TurnModeDeep || !managedSession) {
+		return nil, errors.New("native approval requires a managed Deep session")
+	}
+	if req.Resume != nil && (!req.RequireApproval || req.EngineSession == "" || engineSession != req.EngineSession || req.Resume.CheckPointID == "" || len(req.Resume.Decisions) == 0) {
+		return nil, errors.New("invalid or changed approval resume binding")
+	}
+	if req.Resume != nil && req.Resume.CheckPointID != approvalCheckpointID(engineSession) {
+		return nil, errors.New("approval checkpoint belongs to another session")
+	}
+	if managedSession && req.Resume == nil {
+		_, pending, err := e.runtime.Get(ctx, approvalCheckpointID(engineSession))
+		if err != nil {
+			return nil, err
+		}
+		if pending {
+			return nil, errors.New("session is awaiting approval; resume or reject the pending execution first")
+		}
+	}
 	slog.Debug("Eino 执行模式", "mode", mode, "session", req.SessionID,
 		"managed_session", managedSession, "tools", len(req.Tools), "skills", len(req.Skills))
 	includeHistory := true
@@ -251,9 +271,13 @@ func (e *Engine) RunTurn(ctx context.Context, req *ai.TurnRequest) (*ai.TurnResu
 	runner := adk.NewRunner(ctx, runnerConfig)
 	var blockedToolCall func(string, string) bool
 	var replayedToolCall func(string, string) bool
+	var rejectedToolCall func(string, string) bool
+	var approvalArguments func(string, string) json.RawMessage
 	if toolScope != nil {
 		blockedToolCall = toolScope.blocked
 		replayedToolCall = toolScope.replayed
+		rejectedToolCall = toolScope.rejected
+		approvalArguments = toolScope.approvalArguments
 	}
 	runOptions := turnRunOptions(e.cfg.Provider, req)
 	if e.cfg.Provider == ProviderOpenAI && e.cfg.OpenAIAPI == "responses" {
@@ -268,11 +292,30 @@ func (e *Engine) RunTurn(ctx context.Context, req *ai.TurnRequest) (*ai.TurnResu
 		runOptions = []adk.AgentRunOption{adk.WithChatModelOptions(options)}
 	}
 	outputLimit := e.outputTokenLimit()
+	if req.RequireApproval {
+		runOptions = append(runOptions, adk.WithCheckPointID(approvalCheckpointID(engineSession)))
+	}
 	if req.MaxOutputTokens > 0 {
 		outputLimit = req.MaxOutputTokens
 	}
-	result, err := collect(runner.Run(ctx, msgs, runOptions...), req.OnEvent, req.OnDelta, req.StreamReasoning,
-		outputLimit, blockedToolCall, replayedToolCall, toolCompletions(req.Tools))
+	var iter *adk.AsyncIterator[*adk.AgentEvent]
+	if req.Resume != nil {
+		targets := make(map[string]any, len(req.Resume.Decisions))
+		for id, decision := range req.Resume.Decisions {
+			if id == "" {
+				return nil, errors.New("empty approval interrupt ID")
+			}
+			targets[id] = decision
+		}
+		iter, err = runner.ResumeWithParams(ctx, req.Resume.CheckPointID, &adk.ResumeParams{Targets: targets}, runOptions...)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		iter = runner.Run(ctx, msgs, runOptions...)
+	}
+	result, err := collect(iter, req.OnEvent, req.OnDelta, req.StreamReasoning,
+		outputLimit, blockedToolCall, replayedToolCall, toolCompletions(req.Tools), toolObservation{rejected: rejectedToolCall, args: approvalArguments})
 	terminalFailure := err != nil || result != nil && result.FinishReason == "agent_error"
 	if terminalFailure && managedSession {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
@@ -546,7 +589,7 @@ func (e *Engine) newDeepAgent(
 		WithoutGeneralSubAgent: !e.cfg.EnableGeneralSubAgent,
 		ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{
 			Tools: immediateTools,
-			ToolCallMiddlewares: []compose.ToolMiddleware{{
+			ToolCallMiddlewares: []compose.ToolMiddleware{approvalMiddleware(req.Tools, req.RequireApproval, toolScope), {
 				Name:      "ihtml_deferred_tool_scope",
 				Invokable: toolScope.guardInvokable,
 			}},
@@ -664,6 +707,7 @@ func capabilityFingerprint(tools []ai.Tool, stableScope string) string {
 			item.RequiredAction,
 			strconv.FormatBool(item.ResolvePermissionTarget != nil),
 			strconv.FormatBool(item.GroupSensitive),
+			strconv.FormatBool(item.ApprovalRequired),
 			item.Description,
 			string(schema),
 		}, "\x1f"))
@@ -850,7 +894,12 @@ func readStream(sr *schema.StreamReader[*schema.Message], role schema.RoleType, 
 }
 
 // collect 消费 ADK 事件流：配对 tool 调用与结果、累计用量、取最终文本。
-func collect(iter *adk.AsyncIterator[*adk.AgentEvent], onEvent func(ai.Step), onDelta func(string), showReasoning bool, maxTokens int, blockedToolCall, replayedToolCall func(string, string) bool, completions map[string]ai.ToolCompletion) (*ai.TurnResult, error) {
+type toolObservation struct {
+	rejected func(string, string) bool
+	args     func(string, string) json.RawMessage
+}
+
+func collect(iter *adk.AsyncIterator[*adk.AgentEvent], onEvent func(ai.Step), onDelta func(string), showReasoning bool, maxTokens int, blockedToolCall, replayedToolCall func(string, string) bool, completions map[string]ai.ToolCompletion, observations ...toolObservation) (*ai.TurnResult, error) {
 	res := &ai.TurnResult{}
 	// tool_call 步骤按 ToolCallID 待配对；结果事件到达时回填。
 	pending := map[string]int{} // tool call id -> res.Steps 下标
@@ -863,6 +912,30 @@ func collect(iter *adk.AsyncIterator[*adk.AgentEvent], onEvent func(ai.Step), on
 			break
 		}
 		if event == nil {
+			continue
+		}
+		if event.Action != nil && event.Action.Interrupted != nil {
+			info := event.Action.Interrupted
+			pendingApproval := &ai.PendingApproval{CheckPointID: info.CheckPointID}
+			for _, point := range info.InterruptContexts {
+				if point == nil || !point.IsRootCause {
+					continue
+				}
+				payload, ok := point.Info.(string)
+				var item ai.ApprovalTool
+				if !ok || json.Unmarshal([]byte(payload), &item) != nil || item.ToolName == "" || !json.Valid(item.Args) {
+					terminalErr = errors.New("unsupported native interrupt")
+					continue
+				}
+				item.InterruptID = point.ID
+				pendingApproval.Tools = append(pendingApproval.Tools, item)
+			}
+			if pendingApproval.CheckPointID == "" || len(pendingApproval.Tools) == 0 {
+				terminalErr = errors.New("incomplete approval checkpoint")
+			} else {
+				res.PendingApproval = pendingApproval
+				res.FinishReason = "awaiting_approval"
+			}
 			continue
 		}
 		if event.Err != nil {
@@ -908,6 +981,7 @@ func collect(iter *adk.AsyncIterator[*adk.AgentEvent], onEvent func(ai.Step), on
 			}
 			for _, tc := range msg.ToolCalls {
 				step := ai.Step{
+					ToolCallID: tc.ID,
 					Kind:       ai.StepToolCall,
 					ToolName:   tc.Function.Name,
 					Args:       json.RawMessage(tc.Function.Arguments),
@@ -927,7 +1001,7 @@ func collect(iter *adk.AsyncIterator[*adk.AgentEvent], onEvent func(ai.Step), on
 			idx, found := pending[msg.ToolCallID]
 			if !found {
 				// 理论上不会发生；单独记一条避免丢审计。
-				res.Steps = append(res.Steps, ai.Step{Kind: ai.StepToolCall, ToolName: mo.ToolName, Result: msg.Content, Completion: completions[mo.ToolName]})
+				res.Steps = append(res.Steps, ai.Step{Kind: ai.StepToolCall, ToolCallID: msg.ToolCallID, ToolName: mo.ToolName, Result: msg.Content, Completion: completions[mo.ToolName]})
 				idx = len(res.Steps) - 1
 			} else {
 				delete(pending, msg.ToolCallID)
@@ -939,6 +1013,15 @@ func collect(iter *adk.AsyncIterator[*adk.AgentEvent], onEvent func(ai.Step), on
 			if replayedToolCall != nil && replayedToolCall(msg.ToolName, msg.ToolCallID) {
 				res.Steps[idx].Replayed = true
 			}
+			if len(observations) > 0 {
+				observation := observations[0]
+				if observation.rejected != nil {
+					res.Steps[idx].ApprovalRejected = observation.rejected(msg.ToolName, msg.ToolCallID)
+				}
+				if len(res.Steps[idx].Args) == 0 && observation.args != nil {
+					res.Steps[idx].Args = observation.args(msg.ToolName, msg.ToolCallID)
+				}
+			}
 			if onEvent != nil {
 				onEvent(res.Steps[idx])
 			}
@@ -946,6 +1029,18 @@ func collect(iter *adk.AsyncIterator[*adk.AgentEvent], onEvent func(ai.Step), on
 	}
 	if terminalErr != nil {
 		return preservePartialAgentError(res, pending, terminalErr)
+	}
+	if res.PendingApproval != nil {
+		for i := range res.Steps {
+			for _, call := range res.PendingApproval.Tools {
+				if res.Steps[i].Kind == ai.StepToolCall && res.Steps[i].ToolCallID == call.ToolCallID {
+					res.Steps[i].ApprovalPending = true
+				}
+			}
+		}
+		res.Text = finalText
+		res.FinishReason = "awaiting_approval"
+		return res, nil
 	}
 	if finalText == "" {
 		for _, idx := range pending {

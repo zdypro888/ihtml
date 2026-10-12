@@ -499,7 +499,9 @@ func (m *budgetedChatModel) Stream(ctx context.Context, input []*schema.Message,
 	}
 	reader, writer := schema.Pipe[*schema.Message](1)
 	go func() {
-		defer stream.Close()
+		var closeOnce sync.Once
+		closeStream := func() { closeOnce.Do(stream.Close) }
+		defer closeStream()
 		defer writer.Close()
 		var observed ihtml.ChatUsage
 		var callBytes atomic.Int64
@@ -509,10 +511,12 @@ func (m *budgetedChatModel) Stream(ctx context.Context, input []*schema.Message,
 				return
 			}
 			if recvErr != nil {
+				closeStream()
 				writer.Send(nil, recvErr)
 				return
 			}
 			if limitErr := m.budget.takeModelOutput(message, &callBytes); limitErr != nil {
+				closeStream()
 				writer.Send(nil, limitErr)
 				return
 			}

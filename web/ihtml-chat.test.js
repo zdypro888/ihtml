@@ -260,6 +260,53 @@ test('getMessages is UTF-8 bounded to 100 messages and 512 KiB and can be remoun
   assert.doesNotMatch(JSON.stringify(result.byteBounded), /\ufffd/);
 });
 
+test('checkpoint pause enables confirmation without false completion and restores cards', async (t) => {
+  const page = await fixture(t);
+  await page.evaluate(async () => {
+    window.a = ihtml.mountChat('#a'); await a.ready(); await a.chat.send('Write');
+    window.nativeCall = { id: 'native', name: 'write', risk: 'high', approval_resume: 'checkpoint', confirmation_nonce: 'n', confirmation_token: 'SIGNED', confirmation_expires: Math.floor(Date.now() / 1000) + 600, body: { value: 1 } };
+    sockets[0].emit({ type: 'turn_start', run_id: 'pause', seq: 1 });
+    sockets[0].emit({ type: 'confirmation_required', run_id: 'pause', seq: 2, tool_call: nativeCall });
+    sockets[0].emit({ type: 'turn_paused', run_id: 'pause', seq: 3, status: 'Awaiting confirmation' });
+  });
+  assert.equal(await page.evaluate(() => a.chat.busy), false);
+  assert.equal(await page.locator('#a .t-actions button:enabled').count(), 2);
+  assert.equal(await page.locator('#a .ihtml-msg.assistant').last().evaluate(card => card._turn.done), false);
+  await page.locator('#a .t-actions .ok').click();
+  await page.waitForFunction(() => sockets[0].sent.some(frame => frame.type === 'confirm_tool'));
+  assert.equal(await page.evaluate(() => a.chat.busy), true);
+  await page.evaluate(() => {
+    sockets[0].emit({ type: 'turn_start', run_id: 'resume', seq: 1 });
+    sockets[0].emit({ type: 'tool_result', run_id: 'resume', seq: 2, tool_call: nativeCall, tool_status: 'success', tool_summary: 'Stored' });
+    sockets[0].emit({ type: 'assistant_done', run_id: 'resume', seq: 3, message: 'Continued', content_format: 'text' });
+    sockets[0].emit({ type: 'turn_start', run_id: 'restore', seq: 1, restored_approval: true });
+    sockets[0].emit({ type: 'confirmation_required', run_id: 'restore', seq: 2, tool_call: { ...nativeCall, id: 'restored', confirmation_nonce: 'restored-nonce' } });
+    sockets[0].emit({ type: 'turn_paused', run_id: 'restore', seq: 3 });
+  });
+  assert.equal(await page.locator('#a .ihtml-tool[data-status="success"]').count(), 1);
+  assert.equal(await page.locator('#a .ihtml-tool[data-status="pending"]').count(), 1);
+  assert.equal(await page.evaluate(() => a.chat.busy), false);
+  await page.setViewportSize({ width: 390, height: 844 });
+  assert.equal(await page.locator('#a .t-actions button:enabled').count(), 2);
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.locator('#a').screenshot({ path: '/tmp/ihtml-native-approval-mobile.png' });
+});
+
+test('restored approval does not displace a foreground user request', async (t) => {
+  const page = await fixture(t);
+  await page.evaluate(async () => {
+    window.a = ihtml.mountChat('#a'); await a.ready(); await a.chat.send('New request');
+    sockets[0].emit({ type: 'turn_start', run_id: 'old', seq: 1, restored_approval: true });
+    sockets[0].emit({ type: 'confirmation_required', run_id: 'old', seq: 2, tool_call: { id: 'old-card', name: 'write', approval_resume: 'checkpoint', confirmation_nonce: 'n', confirmation_token: 'SIGNED', confirmation_expires: Math.floor(Date.now() / 1000) + 600 } });
+    sockets[0].emit({ type: 'turn_paused', run_id: 'old', seq: 3 });
+    sockets[0].emit({ type: 'turn_start', run_id: 'new', seq: 1 });
+    sockets[0].emit({ type: 'assistant_done', run_id: 'new', seq: 2, message: 'Foreground response', content_format: 'text' });
+  });
+  assert.equal(await page.locator('#a .answer').filter({ hasText: 'Foreground response' }).count(), 1);
+  assert.equal(await page.locator('#a .ihtml-tool[data-status="pending"]').count(), 1);
+  assert.equal(await page.evaluate(() => a.chat.busy), false);
+});
+
 test('manual_tool_only confirmation requires turn completion, reconnects and executes one historical card', async (t) => {
   const page = await fixture(t);
   await page.evaluate(async () => {

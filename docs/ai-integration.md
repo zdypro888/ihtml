@@ -17,8 +17,8 @@
 |---|---|---|
 | 模型循环与工具 | 内置 UI 领域工具与治理 | 宿主 Engine，宿主提供授权后的工具 |
 | 动态页面修改 | 内置页面工具与确认卡 | 不自动提供 UI 写工具；宿主显式授予能力 |
-| 工具确认 | 内置确认协议 | 可选 `ConfirmationConfig`，仅 `manual_tool_only`；必须配置执行 guard |
-| 确认后的计划 | 不应把 manual-only 描述为 checkpoint 恢复 | 仅执行指定的已签发 stored 调用，不恢复 Engine 计划、不追加模型循环 |
+| 工具确认 | 内置确认协议 | 可选 manual `ConfirmationConfig` 或原生 `NativeConfirmationConfig`；必须配置执行 guard |
+| 确认后的计划 | 不应把 manual-only 描述为 checkpoint 恢复 | manual 仅执行指定工具；native 从持久检查点恢复同一 Agent |
 | 浏览器 inspect | 内置页面检查协议 | 不自动实现 `inspect_request/inspect_result`；浏览器 context 始终不可信 |
 | 历史与断线恢复 | 遵循内置 chat 的会话治理 | 宿主拥有业务历史；连接内 pending 工具不代表持久恢复能力 |
 | 后续扩展入口 | 领域工具、模型工厂与既有 chat 配置 | `PrepareTurn`、`CompleteTurn`、`ToolExecutionGuard`、自定义 `agent.Engine`；完整私有协议可实现 `ChatBackend` |
@@ -118,7 +118,7 @@ ToolExecutionGuard 时不可执行。已返回工具仍应在 Handler 内检查�
 退出，因此宿主 Engine/hooks 必须响应 context，不能在回调里递归 Close。
 CompleteTurn 收到部分结果与错误，错误会抑制成功消息；若取消后仍需保存审计，
 宿主应使用自己管理的有界清理上下文，不能无限后台执行。
-桥接层可显式启用下述 manual-only 确认卡，不实现浏览器检查或 checkpoint 中断恢复。
+桥接层可显式启用下述 manual-only 或原生 checkpoint 确认卡，不实现浏览器检查。
 需要完整 UI 领域工具/inspect 时使用内置 chat 后端，或像 nbco 一样实现自己的
 ChatBackend。默认投影不暴露原始工具参数/结果或隐藏推理；确认卡的公开内容由宿主控制。
 
@@ -169,7 +169,45 @@ pending receipt，不重新运行模型或恢复原计划。复用 `EngineSessio
 
 默认签名 nonce 与 pending 调用是内存状态。即使使用共享 nonce store，也不等于
 持久化 pending handler/args；连接断开不支持持久恢复确认卡，页面显示缓存不是授权恢复。
-未来 checkpoint/inspect 接入必须另有明确状态、权限和恢复契约，不能伪称现有 manual-only 已支持。
+原生 checkpoint 使用下述独立接口，不能伪称现有 manual-only 已支持恢复。
+
+### 原生 Eino 暂停与恢复
+
+原生 DeepAgent 配置 `WithRuntimeStore` 后，宿主设置 `TurnRequest.RequireApproval=true`。
+`ApprovalRequired` 工具在进入副作用回执或业务 handler **之前**抛出 Eino 原生中断。
+`TurnResult.PendingApproval` 包含检查点与各工具的原始参数、interrupt ID；
+这是私有执行状态，不是可直接发送给浏览器的数据，也不是业务授权。
+暂停结果的 `FinishReason` 为 `awaiting_approval`，不能作为成功轮次归档。
+`Step.ApprovalPending/ApprovalRejected` 分别表示未执行与拒绝；跨恢复片段按
+`ToolCallID` 合并调用/结果证据，而不是把暂停的空结果当作成功或重复记一次调用。
+同一 EngineSession 尚有待确认检查点时，runtime 拒绝普通新 Run，避免覆盖旧计划。
+
+```go
+NativeConfirmation: &assistant.NativeConfirmationConfig{
+    Pause: persistCheckpointAndIssueSignedCards,
+    PrepareResume: claimOriginalTurnAndBuildAuthorizedResume,
+    Pending: loadAuthenticatedPendingCards,
+},
+CompleteTurn: persistFinalResultAndReleaseClaim,
+ToolExecutionGuard: verifyLiveAccessAndBusinessApproval,
+```
+
+三个 native hooks 与 manual `Confirmation` 互斥。`Pause` 必须在返回卡片前将
+原轮次、EngineSession、InvocationScope、工具参数、检查点、进度及签名卡绑定持久化。
+`PrepareResume` 必须验证当前用户与渠道、签名及到期时间，原子消费决策并领取原轮次，
+从服务器记录构造 `ResumeRequest{CheckPointID, Decisions}`，不能接受客户端指定检查点、
+工具参数或权限。恢复保持原 session 和幂等 scope，使用当前授权工具与实时 handler；
+能力契约改变时 runtime 拒绝恢复。拒绝只返回未执行结果；未指定的中断继续等待。
+
+`Pending` 负责重连加载仍然有效的签名卡。`Pause` 失败不发成功，已保存状态但发送失败
+仍可重连恢复；不能把 socket 关闭等同撤销 durable approval。宿主应实现确认有效期、
+数据库原子领取、执行代次 fencing、暂停记录清理与审计聚合。崩溃后的未知副作用
+不可盲目重放，即使持久检查点存在，也不意味着外部调用恰好执行一次。
+
+协议发送 `confirmation_required` 后发送 `turn_paused`，释放 UI 的忙碌状态而不宣称完成。
+重连恢复以 `turn_start.restored_approval=true` 建立显示轮次。用户确认或拒绝启动新的
+传输片段，但恢复的是同一 durable Agent，不是另建模型循环。最终结束才调用
+`CompleteTurn` 并发送 `assistant_done`。直接使用 Engine 的宿主需自行处理这些契约。
 
 ## 可扩展对话页面
 

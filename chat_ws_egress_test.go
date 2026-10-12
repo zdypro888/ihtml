@@ -156,6 +156,26 @@ func TestChatWSEgressAllowsNormalSnapshotAndConfirmation(t *testing.T) {
 	}
 }
 
+func TestChatWSEgressPauseReleasesSegmentWithoutResettingConnectionQuota(t *testing.T) {
+	writer := &recordingChatWSWriter{}
+	guard := newChatWSEgressGuard(writer, &sync.Mutex{})
+	if err := guard.beginTurn(); err != nil {
+		t.Fatal(err)
+	}
+	if err := guard.emit(ChatStreamEvent{Type: ChatStreamTurnPaused}); err != nil {
+		t.Fatal(err)
+	}
+	if guard.turnActive || guard.connectionEvents != 1 {
+		t.Fatal("pause failed to close segment")
+	}
+	if err := guard.beginTurn(); err != nil {
+		t.Fatal(err)
+	}
+	if guard.turnEvents != 0 || guard.connectionEvents != 1 {
+		t.Fatal("connection quota reset")
+	}
+}
+
 func TestChatWSEgressOversizedFrameLocksAfterOneTerminalError(t *testing.T) {
 	writer := &recordingChatWSWriter{}
 	guard := newChatWSEgressGuard(writer, &sync.Mutex{})
