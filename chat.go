@@ -190,8 +190,8 @@ type ChatAgentStage struct {
 	Phase        string `json:"phase,omitempty"` // turn / plan / inspect / review / approval
 	Status       string `json:"status"`          // running / completed / paused / error
 	Summary      string `json:"summary,omitempty"`
-	// ApprovalResume 明示确认后的恢复能力。当前 deep 使用 manual_tool_only：
-	// 只执行确认卡，不会静默恢复或宣称整个计划完成。
+	// ApprovalResume 明示确认后的恢复能力：manual_tool_only 只执行确认卡，
+	// checkpoint 由宿主持久化审批并恢复原计划，不由客户端猜测。
 	ApprovalResume string `json:"approval_resume,omitempty"`
 }
 
@@ -318,8 +318,8 @@ type ChatModels struct {
 	CurrentModel string   `json:"current_model"`
 	Models       []string `json:"models"`
 	AgentModes   []string `json:"agent_modes,omitempty"`
-	// DeepApprovalResume 当前为 manual_tool_only；未来安全接入 ADK checkpoint
-	// 后可升级为 checkpoint，而无需客户端猜测。
+	// DeepApprovalResume 由实际后端声明为 manual_tool_only 或 checkpoint；
+	// 后者要求原生中断/恢复和宿主持久化审批均已接通。
 	DeepApprovalResume string `json:"deep_approval_resume,omitempty"`
 	RequestTimeoutMS   int64  `json:"request_timeout_ms"`
 	// ModelSelect 为 true 时前端展示模型选择器(默认隐藏——
