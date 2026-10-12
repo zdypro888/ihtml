@@ -1078,7 +1078,7 @@
     }
 
     // Business previews pass through the same redaction boundary as facts.
-    function reviewView(review, translator) {
+    function reviewView(review, translator, fieldLabel) {
       if (!review || typeof review !== 'object') return null;
       const t = typeof translator === 'function' ? translator : makeT('en');
       const rows = []; let truncated = false;
@@ -1102,7 +1102,15 @@
           return;
         }
         const left = display(before), right = display(after);
-        if (left !== right || (truncated && JSON.stringify(before) !== JSON.stringify(after))) rows.push({label: path || t('review_field'), before: left, after: right});
+        let label = path || t('review_field');
+        if (typeof fieldLabel === 'function') {
+          try {
+            const supplied = fieldLabel(path.split(' / ').join('.'));
+            if (supplied === null) return;
+            if (typeof supplied === 'string' && supplied) label = safeText(supplied, 320);
+          } catch { /* keep the original field path */ }
+        }
+        if (left !== right || (truncated && JSON.stringify(before) !== JSON.stringify(after))) rows.push({label, before: left, after: right});
         if (depth >= 4 && (object(before) || object(after))) truncated = true;
       };
       visit(review.before, review.after, '', 0);

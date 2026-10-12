@@ -26,6 +26,8 @@
  * UI check (e.g. retyping an amount). Only literal true proceeds. The detached
  * toolCall omits secrets; the hook cannot rewrite the executable card. Backend
  * authorization and one-time consumption remain required. Timeout: 2 minutes.
+ * reviewFieldLabel(path) -> string | null translates host-specific fields;
+ * null omits a technical metadata field from the business preview.
  * API: ready(), refreshAuth(), refreshConfig(), destroy(), root/user/config,
  * chat.send(text?) -> Promise<boolean>; chat.draft(text) sets input without
  * sending; chat.open()/close()/cancel()/clear(),
@@ -6515,7 +6517,7 @@
           }
           rec.body.appendChild(facts);
         }
-        const review = chatTraceCore && typeof chatTraceCore.reviewView === 'function' ? chatTraceCore.reviewView(rec.call.review, T) : null;
+        const review = chatTraceCore && typeof chatTraceCore.reviewView === 'function' ? chatTraceCore.reviewView(rec.call.review, T, opts.reviewFieldLabel) : null;
         if (review && (review.rows.length || review.scope || review.blockingReason)) {
           const section = el('section', 't-review');
           if (review.scope) section.appendChild(el('strong', '', review.scope));
@@ -7554,7 +7556,7 @@
           opts.routing = opts.routing || (opts.standalone ? 'hash' : 'memory');
           if (opts.routing !== 'memory' && opts.routing !== 'hash') throw new TypeError('ihtml.mount: routing must be "memory" or "hash"');
         }
-        for (const name of ['onChatEvent', 'contextProvider', 'beforeConfirm']) {
+        for (const name of ['onChatEvent', 'contextProvider', 'beforeConfirm', 'reviewFieldLabel']) {
           if (opts[name] != null && typeof opts[name] !== 'function') throw new TypeError('ihtml: ' + name + ' must be a function');
         }
         if (opts.initialMessages != null) {

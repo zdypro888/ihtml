@@ -84,7 +84,7 @@ test('deep-only capabilities hide Fast, replace stale saved Fast and send only D
 test('host review and confirmation check are safe, detached and preserve the executable card', async (t) => {
   const page = await fixture(t, { width: 390, height: 844 });
   await page.evaluate(async () => {
-    window.a = ihtml.mountChat('#a', { beforeConfirm: ({toolCall, signal}) => {
+    window.a = ihtml.mountChat('#a', { reviewFieldLabel: path => path === 'amount' ? 'Reviewed amount' : path, beforeConfirm: ({toolCall, signal}) => {
       window.checked = toolCall; toolCall.body.amount = 999;
       window.checkSignal = signal;
       return new Promise(resolve => { window.resolveCheck = resolve; });
@@ -100,6 +100,7 @@ test('host review and confirmation check are safe, detached and preserve the exe
   await review.waitFor();
   assert.match(await review.innerText(), /20/);
   assert.match(await review.innerText(), /100/);
+  assert.match(await review.innerText(), /Reviewed amount/);
   assert.doesNotMatch(await review.innerText(), /OLD_SECRET|NEW_SECRET|PRIVATE_TOKEN/);
   assert.equal(await review.locator('img').count(), 0);
   const bounds = await review.boundingBox();
