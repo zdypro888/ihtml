@@ -50,7 +50,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: stable
+          # Staticcheck's pinned parser supports Go 1.26 export data. Keep
+          # lint on the module toolchain; the test matrix still covers stable.
+          go-version-file: go.mod
           cache: true
       - name: staticcheck
         run: |
