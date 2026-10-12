@@ -265,12 +265,24 @@ func htmlEscape(s string) string {
 	return r.Replace(s)
 }
 
+// UIAssets serves only the trusted SDK script and styles. Hosts embedding
+// mountChat can reuse the UI without installing a workspace or its write APIs.
+// Mount behind the host's own authentication if desired.
+func UIAssets() http.Handler {
+	h := &Handler{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /ihtml.js", h.handleBundle("text/javascript; charset=utf-8", "web/ihtml-lib.js", "web/ihtml.js"))
+	mux.HandleFunc("GET /ihtml.css", h.handleAsset("web/ihtml.css", "text/css; charset=utf-8"))
+	return mux
+}
+
 func (h *Handler) routes() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", h.handlePage)
 	// /ihtml.js = 标准库 + 内核 拼接下发(宿主只需引入一个脚本)
-	mux.HandleFunc("GET /ihtml.js", h.handleBundle("text/javascript; charset=utf-8", "web/ihtml-lib.js", "web/ihtml.js"))
-	mux.HandleFunc("GET /ihtml.css", h.handleAsset("web/ihtml.css", "text/css; charset=utf-8"))
+	assets := UIAssets()
+	mux.Handle("GET /ihtml.js", assets)
+	mux.Handle("GET /ihtml.css", assets)
 
 	mux.HandleFunc("GET /api/config", h.withUser(h.handleConfig))
 	mux.HandleFunc("GET /api/items", h.withUser(h.handleListItems))

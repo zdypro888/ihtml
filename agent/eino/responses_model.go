@@ -90,8 +90,15 @@ func (m *responsesChatModel) request(input []*schema.Message, opts ...einomodel.
 	} else if responsesMinimumEffort(model) == "low" && (effort == "none" || effort == "minimal") {
 		effort = "low"
 	}
-	if effort != "" {
-		body["reasoning"] = map[string]any{"effort": effort}
+	if effort != "" || m.cfg.ReasoningSummary != "" {
+		reasoning := map[string]any{}
+		if effort != "" {
+			reasoning["effort"] = effort
+		}
+		if !call.DisableReasoning && effort != "none" && m.cfg.ReasoningSummary != "" {
+			reasoning["summary"] = m.cfg.ReasoningSummary
+		}
+		body["reasoning"] = reasoning
 	}
 	if call.JSONOutput {
 		body["text"] = map[string]any{"format": map[string]any{"type": "json_object"}}

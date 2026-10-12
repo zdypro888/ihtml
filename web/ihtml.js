@@ -22,8 +22,13 @@
  * onReady/onAuthError, initialMessages: [{role, content, contentFormat?}],
  * contextProvider({context, user, signal}) -> partial ChatClientContext | Promise,
  * onChatEvent(event) -> void (detached snapshot, confirmation secrets omitted).
+ * beforeConfirm({toolCall, signal}) -> true | Promise<true> adds a host-owned
+ * UI check (e.g. retyping an amount). Only literal true proceeds. The detached
+ * toolCall omits secrets; the hook cannot rewrite the executable card. Backend
+ * authorization and one-time consumption remain required. Timeout: 2 minutes.
  * API: ready(), refreshAuth(), refreshConfig(), destroy(), root/user/config,
- * chat.send(text?) -> Promise<boolean>; chat.open()/close()/cancel()/clear(),
+ * chat.send(text?) -> Promise<boolean>; chat.draft(text) sets input without
+ * sending; chat.open()/close()/cancel()/clear(),
  * chat.getMessages() -> [{role, content, contentFormat}] (detached, bounded
  * display-only snapshot, not canonical history or model input),
  * chat.enabled/busy/readOnly. clear() rotates csid; initialMessages are display
@@ -428,7 +433,7 @@
       if (typeof opts.connectionAuth === 'function') return String(await opts.connectionAuth() || '');
       return typeof opts.connectionAuth === 'string' ? opts.connectionAuth : '';
     }
-    function boundedChatHook(invoke, signal) {
+    function boundedChatHook(invoke, signal, timeoutMS = 5000) {
       return new Promise((resolve, reject) => {
         let timer; let settled = false;
         const finish = (error, value) => {
@@ -440,7 +445,7 @@
         };
         const abort = () => finish(staleRequestError());
         signal.addEventListener('abort', abort, { once: true });
-        timer = setTimeout(() => finish(new Error('ihtml: host callback unavailable')), 5000);
+        timer = setTimeout(() => { finish(new Error('ihtml: host callback unavailable')); }, timeoutMS);
         Promise.resolve().then(() => {
           if (signal.aborted) throw staleRequestError();
           return invoke();
@@ -5511,7 +5516,7 @@
               const disabled = unavailable || readOnly || confirmationBusy || !!rec.cancelPending || !!rec.confirmPending;
               rec.card.classList.toggle('confirmation-busy', disabled);
               rec.body.setAttribute('aria-busy', String(!!rec.cancelPending || !!rec.confirmPending));
-              rec.body.querySelectorAll('.t-actions button').forEach((button) => { button.disabled = disabled; });
+              rec.body.querySelectorAll('.t-actions button').forEach((button) => { button.disabled = disabled || (button.classList.contains('ok') && !!rec.call.review?.blocking_reason); });
             }
           }
         }
@@ -5630,6 +5635,7 @@
               if (generation !== this.wsGeneration || this.ws !== ws) return;
               this.ws = null;
               this.wsPromise = null;
+              this.expireConnectionConfirmations();
               if (this.confirmationBusy && this.confirmationBusy.cancelPending && this.confirmationBusy.cancelSent) {
                 this.failCancellation(this.confirmationBusy, T('cancellation_ack_timeout'), true);
               }
@@ -5658,6 +5664,7 @@
         this.wsGeneration++;
         this.ws = null;
         this.wsPromise = null;
+        this.expireConnectionConfirmations();
         if (ws) { try { ws.close(); } catch { /* 忽略 */ } }
       },
       reset() {
@@ -5700,12 +5707,32 @@
             segment.frame = 0;
           }
           for (const rec of turn.tools.values()) {
+            if (rec.confirmAbort) rec.confirmAbort.abort();
+            rec.confirmAbort = null;
             if (rec.countdown) clearInterval(rec.countdown);
             rec.countdown = 0;
             if (rec.cancelAckTimer) clearTimeout(rec.cancelAckTimer);
             rec.cancelAckTimer = 0;
           }
         }
+      },
+      expireConnectionConfirmations() {
+        if (this.modelInfo?.confirmation_scope !== 'connection' || !this.log) return;
+        for (const card of Array.from(this.log.children)) {
+          const turn = card._turn;
+          if (!turn) continue;
+          for (const rec of turn.tools.values()) {
+            if (rec.status !== 'pending') continue;
+            if (rec.confirmAbort) rec.confirmAbort.abort();
+            if (this.confirmationBusy === rec) this.confirmationBusy = null;
+            rec.confirmPending = false;
+            this.setToolStatus(rec, 'cancelled', turn);
+            rec.lastEvent = Object.assign({}, rec.lastEvent, { tool_summary: T('confirm_expired') });
+            this.renderToolRecord(rec, rec.lastEvent, turn);
+          }
+          this.updateProcess(turn);
+        }
+        this.syncChatControls();
       },
       resetForAuth() {
         this.sendGeneration++;
@@ -5795,7 +5822,10 @@
             device_pixel_ratio: dimension(viewport.device_pixel_ratio, context.viewport.device_pixel_ratio),
             mode: viewport.mode === 'mobile' || viewport.mode === 'pc' ? viewport.mode : context.viewport.mode,
           },
-          page: { path, title: text(page.title, context.page.title, 300), visible_text: text(page.visible_text, context.page.visible_text, 1800) },
+          page: { path, title: text(page.title, context.page.title, 300), visible_text: text(page.visible_text, context.page.visible_text, 1800),
+            query_filters: (Array.isArray(page.query_filters) ? page.query_filters : []).slice(0, 32)
+              .filter(filter => filter && typeof filter.name === 'string' && typeof filter.value === 'string' && !isTechnicalSecretKey(filter.name))
+              .map(filter => ({ name: clip(filter.name, 96), value: clip(filter.value, 320) })) },
           locale: text(source.locale, context.locale, 64),
           time_zone: text(source.time_zone, context.time_zone, 128),
           user_agent: text(source.user_agent, context.user_agent, 512),
@@ -6409,6 +6439,7 @@
         if (!rec || !t) return;
         const previous = rec.status;
         if (previous === status) return;
+        if (status !== 'pending' && rec.confirmAbort) rec.confirmAbort.abort();
         if (rec.countedPending && status !== 'pending') { t.pendingCount = Math.max(0, t.pendingCount - 1); rec.countedPending = false; }
         if (!rec.countedPending && status === 'pending') { t.pendingCount++; rec.countedPending = true; }
         if (rec.countedError && status !== 'error') { t.errorCount = Math.max(0, t.errorCount - 1); rec.countedError = false; }
@@ -6484,6 +6515,26 @@
           }
           rec.body.appendChild(facts);
         }
+        const review = chatTraceCore && typeof chatTraceCore.reviewView === 'function' ? chatTraceCore.reviewView(rec.call.review, T) : null;
+        if (review && (review.rows.length || review.scope || review.blockingReason)) {
+          const section = el('section', 't-review');
+          if (review.scope) section.appendChild(el('strong', '', review.scope));
+          if (review.blockingReason) section.appendChild(el('p', 't-interaction-error', review.blockingReason));
+          if (review.rows.length) {
+            const table = el('table'); const head = el('tr');
+            for (const label of [T('review_field'), T('review_before'), T('review_after')]) head.appendChild(el('th', '', label));
+            const thead = el('thead'); thead.appendChild(head);table.appendChild(thead);
+            const body = el('tbody');
+            for (const row of review.rows) {
+              const tr = el('tr');
+              for (const text of [row.label, row.before, row.after]) tr.appendChild(el('td', '', text));
+              body.appendChild(tr);
+            }
+            table.appendChild(body);section.appendChild(table);
+          }
+          if (review.truncated) section.appendChild(el('small', '', T('review_partial')));
+          rec.body.appendChild(section);
+        }
         const meta = el('div', 't-meta');
         if (rec.call.risk) meta.appendChild(el('span', 'ihtml-chip risk-' + rec.call.risk, RISK_LABEL[rec.call.risk] || rec.call.risk));
         if (rec.status === 'pending' && rec.call.confirmation_expires) {
@@ -6537,7 +6588,7 @@
           okBtn.setAttribute('aria-label', T('confirm_this_action') + ' · ' + view.title);
           noBtn.setAttribute('aria-label', T('dismiss_tool') + ' · ' + view.title);
           const interactionBusy = !!this.confirmationBusy || this.active || this.sending || !!rec.cancelPending || !!rec.confirmPending;
-          okBtn.disabled = interactionBusy;
+          okBtn.disabled = interactionBusy || !!review?.blockingReason;
           noBtn.disabled = interactionBusy;
           okBtn.onclick = (event) => { event.preventDefault(); okBtn.disabled = true; noBtn.disabled = true; this.confirmTool(rec); };
           noBtn.onclick = (event) => { event.preventDefault(); okBtn.disabled = true; noBtn.disabled = true; this.cancelTool(rec); };
@@ -6636,6 +6687,7 @@
       async confirmTool(rec) {
         if (destroyed || !this.enabled || authRefreshing || readOnly) return;
         if (!rec || rec.status !== 'pending') return;
+        if (rec.call.review?.blocking_reason) return;
         if (this.active || this.sending || this.confirmationBusy) {
           this.syncChatControls();
           ui.toast(T('confirmation_busy'), 'warn');
@@ -6649,8 +6701,30 @@
         this.syncChatControls();
         let ws;
         try {
+          if (typeof opts.beforeConfirm === 'function') {
+            const controller = new AbortController();
+            rec.confirmAbort = controller;
+            let approved;
+            try {
+              const toolCall = JSON.parse(JSON.stringify(rec.call, (key, value) => isTechnicalSecretKey(key) ? undefined : value));
+              approved = await boundedChatHook(() => opts.beforeConfirm({ toolCall, signal: controller.signal }), controller.signal, 120000);
+            } finally {
+              controller.abort();
+              if (rec.confirmAbort === controller) rec.confirmAbort = null;
+            }
+            if (this.confirmationBusy !== rec || rec.status !== 'pending') return;
+            if (destroyed || authRefreshing || readOnly) throw staleRequestError();
+            if (approved !== true) {
+              this.confirmationBusy = null;
+              rec.confirmPending = false;
+              this.renderToolRecord(rec, rec.lastEvent, rec.ownerTurn);
+              this.syncChatControls();
+              return;
+            }
+          }
           ws = await this.ensureWS();
           if (this.confirmationBusy !== rec || rec.status !== 'pending') return;
+          if (destroyed || authRefreshing || readOnly) throw staleRequestError();
           ws.send(JSON.stringify({ type: 'confirm_tool', tool_call: rec.call }));
         } catch {
           if (this.confirmationBusy !== rec) return;
@@ -7316,6 +7390,13 @@
         close: () => panel.close(),
       },
       chat: {
+        draft: (text) => {
+          if (typeof text !== 'string') throw new TypeError('ihtml.chat.draft: text must be a string');
+          if (destroyed || authRefreshing || !chat.dom) return false;
+          chat.dom.input.value = chatContentCore.clipUTF8(text, 64 * 1024).text;
+          chat.resizeComposer();
+          return true;
+        },
         open: () => chat.open(),
         close: () => chat.close(),
         send: async (text) => {
@@ -7473,7 +7554,7 @@
           opts.routing = opts.routing || (opts.standalone ? 'hash' : 'memory');
           if (opts.routing !== 'memory' && opts.routing !== 'hash') throw new TypeError('ihtml.mount: routing must be "memory" or "hash"');
         }
-        for (const name of ['onChatEvent', 'contextProvider']) {
+        for (const name of ['onChatEvent', 'contextProvider', 'beforeConfirm']) {
           if (opts[name] != null && typeof opts[name] !== 'function') throw new TypeError('ihtml: ' + name + ' must be a function');
         }
         if (opts.initialMessages != null) {

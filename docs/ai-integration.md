@@ -269,3 +269,38 @@ getMessages 返回至多 100 条、合计 512 KiB 的独立显示快照，不含
 前端测试首次运行先执行 `npm ci` 和 `npx playwright install chromium`。
 `agent/eino` 包保留原生工具多轮、Responses 回传/取消/预算测试；assistant 包验证
 队列、取消、投影、权限与生命周期；前端验证嵌入、隔离和异步扩展。
+
+### 仅复用 UI、模型或 PostgreSQL 存储
+
+宿主已有业务 Agent 时，可分别采用 `UIAssets()`、`ihtml.mountChat()` 与
+`agent/eino.NewChatModel()`，无需创建第二个 Agent，也无需开放工作区的 Item
+写接口。`UIAssets()` 仅提供 `/ihtml.js` 和 `/ihtml.css`，支持 ETag。
+模型配置中的 `ReasoningSummary` 可选 `auto`、`concise`、`detailed`；不显示推理
+不等于删除下一轮所需的加密推理状态。Responses 原始输出仍仅保存在服务端。
+
+宿主操作卡可附 `OperationReview{Scope, Before, After, BlockingReason}`。SDK
+以纯文本呈现变化并隐藏敏感键，长预览明确标为部分内容。阻塞原因会禁用确认；
+宿主仍须在实际执行时重新验证规则，UI 禁用不是授权边界。
+`mountChat` 的 `beforeConfirm({toolCall, signal})` 可以完成宿主的金额复核等
+额外交互：只接受字面量 `true`，异常、超时、取消均不发送确认。工具参数为脱离
+执行对象且移除秘密字段的副本，不能通过钩子修改将要执行的原始卡片。
+钩子最长等待两分钟，宿主应监听 `signal` 关闭对话框。它不是服务端审批证明。
+
+对于确认卡绑定原 WebSocket 的宿主，模型能力响应应声明
+`confirmation_scope: "connection"`。SDK 在断线时废弃这些未执行的卡片，不能
+通过重连执行。默认会话级卡片的历史确认和原生 checkpoint 恢复行为不变。
+`client_context.page.query_filters` 可提供最多 32 条命名查询条件；上下文和过滤
+条件均为不可信浏览器输入，宿主仍必须重新执行权限与查询校验。
+
+`agent/eino/sqlstore.New[*schema.Message](db, Config{Namespace: "my-host"})`
+提供 PostgreSQL 事件和 checkpoint 存储；显式 `Init(ctx)` 安装三张
+`ihtml_agent_*` 表。宿主也可以在自己的版本迁移中安装同一 schema。
+批次追加与序号分配在一个事务中完成，重复事件导致整批回滚。事件、游标和
+checkpoint 按命名空间隔离，默认序列化器保留 typed Eino 消息。
+`DeleteSession` 清理事件及对应 runner / approval checkpoint。
+
+**存储不提供模型执行锁或宿主审批事实。** 宿主必须确保同一会话只有一个执行
+者，并自行负责会话归属、能力变更、审批持久化、失效和保留周期。只有接通这些
+边界后才能声明跨进程恢复；不可把模型私有工作记忆直接当作用户可读取的聊天
+记录。事件与 checkpoint 单条上限 16 MiB。
+测试：设置 `IHTML_TEST_POSTGRES_DSN` 后执行 `go test -race ./agent/eino/sqlstore`。

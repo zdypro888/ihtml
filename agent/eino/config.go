@@ -34,6 +34,7 @@ type Config struct {
 	MaxTokens              int     `json:"max_tokens"`
 	MaxCompletionTokens    int     `json:"max_completion_tokens"`
 	ReasoningEffort        string  `json:"reasoning_effort"`
+	ReasoningSummary       string  `json:"reasoning_summary,omitempty"`
 	Temperature            float32 `json:"temperature"`
 	TimeoutMS              int     `json:"timeout_ms"`
 	MaxTurns               int     `json:"max_turns"`
@@ -66,6 +67,9 @@ func NewChatModel(ctx context.Context, cfg Config) (einomodel.ToolCallingChatMod
 }
 
 func validateConfig(cfg Config) error {
+	if cfg.ReasoningSummary != "" && cfg.ReasoningSummary != "auto" && cfg.ReasoningSummary != "concise" && cfg.ReasoningSummary != "detailed" {
+		return errors.New("unsupported reasoning summary")
+	}
 	if strings.TrimSpace(cfg.APIKey) == "" {
 		return errors.New("agent requires an explicit API key")
 	}

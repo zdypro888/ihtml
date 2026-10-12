@@ -1146,3 +1146,12 @@ test('template runtime breakpoint and placement resolution inherit without hidin
   assert.equal(template.resolvePlacement(version, 'hero', 'mobile').unassigned, true);
   assert.equal(template.resolvePlacement(version, 'new-item', 'desktop'), null);
 });
+
+test('host operation previews distinguish changed fields and redact credentials', () => {
+ const view=chatTrace.reviewView({scope:'Example',before:{min:20,max:50000,token:'old-secret',nested:{currency:'CNY',password:'old-pw'}},after:{min:100,max:50000,token:'new-secret',nested:{currency:'VND',password:'new-pw'}}},makeT('zh'));
+ assert.equal(view.scope,'Example');assert.deepEqual(view.rows.map(r=>r.label),['min','nested / currency']);
+ assert.equal(view.rows[0].before,'20');assert.equal(view.rows[0].after,'100');
+ assert.doesNotMatch(JSON.stringify(view),/old-secret|new-secret|old-pw|new-pw/);
+ const bounded=chatTrace.reviewView({before:{},after:Object.fromEntries(Array.from({length:100},(_,i)=>['field'+i,i]))});
+ assert.equal(bounded.rows.length,24);assert.equal(bounded.truncated,true);
+});

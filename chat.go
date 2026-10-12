@@ -111,9 +111,15 @@ type ChatClientViewport struct {
 
 // ChatClientPage 描述当前页面状态(路径/标题/可见文本), 属不可信数据。
 type ChatClientPage struct {
-	Path        string `json:"path,omitempty"`
-	Title       string `json:"title,omitempty"`
-	VisibleText string `json:"visible_text,omitempty"`
+	QueryFilters []ChatQueryFilter `json:"query_filters,omitempty"`
+	Path         string            `json:"path,omitempty"`
+	Title        string            `json:"title,omitempty"`
+	VisibleText  string            `json:"visible_text,omitempty"`
+}
+
+type ChatQueryFilter struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
 }
 
 // ChatClientContext 是随 user_message 上送的页面上下文。
@@ -289,22 +295,32 @@ type ChatStreamEvent struct {
 
 // ProposedToolCall 是一次工具调用的描述; 需人工确认的调用带 HMAC 签名的
 // confirmation_token, 前端确认后原样带回执行。
+// OperationReview is the host-provided, redacted business preview. It grants no
+// authority; servers must revalidate the operation and live permissions.
+type OperationReview struct {
+	Scope          string `json:"scope"`
+	Before         any    `json:"before"`
+	After          any    `json:"after"`
+	BlockingReason string `json:"blocking_reason,omitempty"`
+}
+
 type ProposedToolCall struct {
-	ID                   string         `json:"id,omitempty"`
-	Name                 string         `json:"name,omitempty"`
-	Title                string         `json:"title,omitempty"`
-	Method               string         `json:"method"`
-	Path                 string         `json:"path"`
-	Query                map[string]any `json:"query,omitempty"`
-	Body                 any            `json:"body,omitempty"`
-	Risk                 string         `json:"risk"` // low / medium / high / blocked
-	RequiresConfirmation bool           `json:"requires_confirmation"`
-	Reason               string         `json:"reason"`
-	AgentMode            string         `json:"agent_mode,omitempty"`
-	ApprovalResume       string         `json:"approval_resume,omitempty"`
-	ConfirmationToken    string         `json:"confirmation_token,omitempty"`
-	ConfirmationNonce    string         `json:"confirmation_nonce,omitempty"`
-	ConfirmationExpires  int64          `json:"confirmation_expires,omitempty"`
+	Review               *OperationReview `json:"review,omitempty"`
+	ID                   string           `json:"id,omitempty"`
+	Name                 string           `json:"name,omitempty"`
+	Title                string           `json:"title,omitempty"`
+	Method               string           `json:"method"`
+	Path                 string           `json:"path"`
+	Query                map[string]any   `json:"query,omitempty"`
+	Body                 any              `json:"body,omitempty"`
+	Risk                 string           `json:"risk"` // low / medium / high / blocked
+	RequiresConfirmation bool             `json:"requires_confirmation"`
+	Reason               string           `json:"reason"`
+	AgentMode            string           `json:"agent_mode,omitempty"`
+	ApprovalResume       string           `json:"approval_resume,omitempty"`
+	ConfirmationToken    string           `json:"confirmation_token,omitempty"`
+	ConfirmationNonce    string           `json:"confirmation_nonce,omitempty"`
+	ConfirmationExpires  int64            `json:"confirmation_expires,omitempty"`
 }
 
 // ChatModels 是 GET /api/chat/models 的响应。
@@ -321,7 +337,10 @@ type ChatModels struct {
 	// DeepApprovalResume 由实际后端声明为 manual_tool_only 或 checkpoint；
 	// 后者要求原生中断/恢复和宿主持久化审批均已接通。
 	DeepApprovalResume string `json:"deep_approval_resume,omitempty"`
-	RequestTimeoutMS   int64  `json:"request_timeout_ms"`
+	// Connection-scoped cards are invalidated on disconnect; the default is
+	// session-scoped. The backend must enforce the same ownership rule.
+	ConfirmationScope string `json:"confirmation_scope,omitempty"`
+	RequestTimeoutMS  int64  `json:"request_timeout_ms"`
 	// ModelSelect 为 true 时前端展示模型选择器(默认隐藏——
 	// 模型是运维概念, 不该暴露给终端用户)。
 	ModelSelect bool `json:"model_select,omitempty"`

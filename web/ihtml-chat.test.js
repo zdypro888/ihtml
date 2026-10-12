@@ -22,13 +22,14 @@ async function fixture(t, viewport = { width: 1100, height: 800 }, device = {}) 
     window.calls = []; window.sockets = []; window.events = [];
     window.identity = 'alice'; window.readOnly = false; window.configStatus = 200;
     window.agentModes = ['fast', 'deep'];
+    window.confirmationScope = 'session';
     window.fetch = async (url, init) => {
       const pathname = new URL(url).pathname;
       calls.push({ url: String(url), headers: init.headers });
       const data = pathname.endsWith('/api/config')
         ? { user: identity, chat: true, read_only: readOnly, params: {} }
         : pathname.endsWith('/api/chat/models')
-          ? { model_ready: true, model_select: false, models: [], agent_modes: agentModes, deep_approval_resume: 'manual_tool_only' }
+          ? { model_ready: true, model_select: false, models: [], agent_modes: agentModes, deep_approval_resume: 'manual_tool_only', confirmation_scope: confirmationScope }
           : {};
       const status = pathname.endsWith('/api/config') ? configStatus : 200;
       return { ok: status === 200, status, statusText: 'Unavailable', text: async () => JSON.stringify(data) };
@@ -78,6 +79,63 @@ test('deep-only capabilities hide Fast, replace stale saved Fast and send only D
     return { mode: sockets[0].sent[0].agent_mode, selected: a.root.querySelector('[aria-checked="true"]').dataset.agentMode };
   });
   assert.deepEqual(result, { mode: 'deep', selected: 'deep' });
+});
+
+test('host review and confirmation check are safe, detached and preserve the executable card', async (t) => {
+  const page = await fixture(t, { width: 390, height: 844 });
+  await page.evaluate(async () => {
+    window.a = ihtml.mountChat('#a', { beforeConfirm: ({toolCall, signal}) => {
+      window.checked = toolCall; toolCall.body.amount = 999;
+      window.checkSignal = signal;
+      return new Promise(resolve => { window.resolveCheck = resolve; });
+    } });
+    await a.ready(); a.chat.draft('Draft before sending');
+    if (sockets.length || !a.root.querySelector('textarea').value.includes('Draft before sending')) throw new Error('draft sent a request or lost text');
+    await a.chat.send('Adjust');
+    sockets[0].emit({type:'turn_start',run_id:'review',seq:1});
+    sockets[0].emit({type:'confirmation_required',run_id:'review',seq:2,tool_call:{id:'review',name:'write',title:'Adjust',method:'POST',path:'/adjust',body:{amount:100},confirmation_token:'PRIVATE_TOKEN',confirmation_nonce:'n',review:{scope:'Player',before:{amount:20,api_key:'OLD_SECRET'},after:{amount:100,api_key:'NEW_SECRET',name:'<img src=x onerror=alert(1)>'}}}});
+    sockets[0].emit({type:'assistant_done',run_id:'review',seq:3,message:'Ready'});
+  });
+  const review = page.locator('#a .t-review');
+  await review.waitFor();
+  assert.match(await review.innerText(), /20/);
+  assert.match(await review.innerText(), /100/);
+  assert.doesNotMatch(await review.innerText(), /OLD_SECRET|NEW_SECRET|PRIVATE_TOKEN/);
+  assert.equal(await review.locator('img').count(), 0);
+  const bounds = await review.boundingBox();
+  assert.ok(bounds.width <= 390, 'review stays within the mobile viewport');
+  await page.locator('#a .t-actions .ok').click();
+  await page.waitForFunction(() => !!window.resolveCheck);
+  assert.equal(await page.evaluate(() => checked.confirmation_token), undefined);
+  assert.equal(await page.evaluate(() => sockets[0].sent.length), 1);
+  await page.evaluate(() => resolveCheck(false));
+  await page.waitForFunction(() => !a.root.querySelector('.t-actions .ok').disabled);
+  await page.locator('#a .t-actions .ok').click();
+  await page.waitForFunction(() => !checkSignal.aborted);
+  await page.evaluate(() => resolveCheck(true));
+  await page.waitForFunction(() => sockets[0].sent.length === 2);
+  const sent = await page.evaluate(() => sockets[0].sent[1].tool_call);
+  assert.equal(sent.body.amount, 100);
+  assert.equal(sent.confirmation_token, 'PRIVATE_TOKEN');
+});
+
+test('connection-scoped confirmation aborts the host check and expires on disconnect', async (t) => {
+  const page = await fixture(t);
+  await page.evaluate(async () => {
+    confirmationScope = 'connection';
+    window.a = ihtml.mountChat('#a', {beforeConfirm:({signal}) => {window.checkSignal = signal; return new Promise(resolve => {window.resolveCheck = resolve;});}});
+    await a.ready();await a.chat.send('Propose');
+    sockets[0].emit({type:'turn_start',run_id:'r',seq:1});
+    sockets[0].emit({type:'confirmation_required',run_id:'r',seq:2,tool_call:{id:'c',name:'write',confirmation_nonce:'n',confirmation_token:'SIGNED'}});
+    sockets[0].emit({type:'assistant_done',run_id:'r',seq:3,message:'Ready'});
+  });
+  await page.locator('#a .t-actions .ok').click();
+  await page.waitForFunction(() => !!window.checkSignal);
+  await page.evaluate(() => {sockets[0].close();resolveCheck(true);});
+  await page.waitForFunction(() => checkSignal.aborted);
+  assert.equal(await page.locator('#a .ihtml-tool[data-status="pending"]').count(), 0);
+  assert.equal(await page.evaluate(() => sockets.length), 1);
+  assert.equal(await page.evaluate(() => sockets[0].sent.length), 1);
 });
 
 test('legacy missing or empty modes still select and send Fast', async (t) => {

@@ -2061,3 +2061,8 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
 .ihtml-root.ihtml-mobile .ui-btn, .ihtml-root.ihtml-mobile .ihtml-chat-head button,
 .ihtml-root.ihtml-mobile .ihtml-hostmenu .mi { min-height: 42px; }
 .ihtml-root.ihtml-mobile .ihtml-chat-foot button { min-height: 44px; }
+
+.ihtml-root .t-review { margin: 12px 0; max-width: 100%; overflow-x: auto; }
+.ihtml-root .t-review table { width: 100%; border-collapse: collapse; font-size: 12px; table-layout: fixed; }
+.ihtml-root .t-review th, .ihtml-root .t-review td { padding: 8px; text-align: left; vertical-align: top; overflow-wrap: anywhere; white-space: pre-wrap; border-bottom: 1px solid var(--ui-border); }
+.ihtml-root .t-review th { font-weight: 600; }

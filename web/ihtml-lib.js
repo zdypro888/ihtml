@@ -34,7 +34,7 @@
       params_title: '操作参数', debug_title: '调试详情', tools_called: '调用 {n} 个工具',
       process_steps: '过程', steps_completed: '已完成 {n} 个步骤', tools_running: '正在执行 {n} 项', answering: '正在整理回答',
       reasoning_step: '分析步骤 {n}', reasoning_streaming: '正在分析', reasoning_complete: '分析完成', technical_details: '技术详情',
-      request_summary: '请求摘要', result_data: '返回结果', diagnostic_data: '诊断信息', tool_reason: '为什么需要确认',
+      request_summary: '请求摘要', result_data: '返回结果', diagnostic_data: '诊断信息', tool_reason: '为什么需要确认', review_field: '设置项', review_before: '修改前', review_after: '修改后', review_missing: '未设置', review_partial: '这里只展示部分变更，请核对完整操作内容。',
       confirm_this_action: '确认此操作', dismiss_tool: '暂不执行', answer_complete: '回答已完成',
       answer_complete_summary: '回答已完成：{summary}', answer_truncated: '回答过长，已仅展示前面部分。',
       answer_table: '数据表格', answer_code: '代码内容', opens_new_window: '在新窗口打开',
@@ -154,7 +154,7 @@
       params_title: 'Parameters', debug_title: 'Debug', tools_called: '{n} tool calls',
       process_steps: 'Process', steps_completed: '{n} steps completed', tools_running: '{n} running', answering: 'Preparing the answer',
       reasoning_step: 'Reasoning step {n}', reasoning_streaming: 'Analyzing', reasoning_complete: 'Analysis complete', technical_details: 'Technical details',
-      request_summary: 'Request summary', result_data: 'Result', diagnostic_data: 'Diagnostics', tool_reason: 'Why confirmation is required',
+      request_summary: 'Request summary', result_data: 'Result', diagnostic_data: 'Diagnostics', tool_reason: 'Why confirmation is required', review_field: 'Setting', review_before: 'Before', review_after: 'After', review_missing: 'Not set', review_partial: 'Only part of the changes is shown. Review the complete operation.',
       confirm_this_action: 'Confirm this action', dismiss_tool: 'Not now', answer_complete: 'Answer complete',
       answer_complete_summary: 'Answer complete: {summary}', answer_truncated: 'This answer was too long, so only the first part is shown.',
       answer_table: 'Data table', answer_code: 'Code content', opens_new_window: 'opens in a new window',
@@ -1077,6 +1077,38 @@
       return { action: safeText(t(actionKey, vars), ACTION_LIMIT), facts: facts.slice(0, 8) };
     }
 
+    // Business previews pass through the same redaction boundary as facts.
+    function reviewView(review, translator) {
+      if (!review || typeof review !== 'object') return null;
+      const t = typeof translator === 'function' ? translator : makeT('en');
+      const rows = []; let truncated = false;
+      const display = value => {
+        if (value === undefined) return t('review_missing');
+        const text = technicalText(value, t);
+        if (text.length > 1200) truncated = true;
+        return safeText(text, 1200);
+      };
+      const object = value => value && typeof value === 'object' && !Array.isArray(value);
+      const visit = (before, after, path, depth) => {
+        if (rows.length >= 24) { truncated = true; return; }
+        if ((object(before) || object(after)) && (before == null || object(before)) && (after == null || object(after)) && depth < 4) {
+          const keys = new Set([...Object.keys(object(before) ? before : {}), ...Object.keys(object(after) ? after : {})]);
+          for (const key of keys) {
+            if (rows.length >= 24) { truncated = true; break; }
+            if (isSensitiveKey(key)) continue;
+            const child = path ? path + ' / ' + safeText(key, 120) : safeText(key, 120);
+            visit(object(before) ? before[key] : undefined, object(after) ? after[key] : undefined, child, depth + 1);
+          }
+          return;
+        }
+        const left = display(before), right = display(after);
+        if (left !== right || (truncated && JSON.stringify(before) !== JSON.stringify(after))) rows.push({label: path || t('review_field'), before: left, after: right});
+        if (depth >= 4 && (object(before) || object(after))) truncated = true;
+      };
+      visit(review.before, review.after, '', 0);
+      return {scope: safeText(review.scope, 320), blockingReason: safeText(review.blocking_reason, 600), rows, truncated};
+    }
+
     function toolView(call, event, translator) {
       const t = typeof translator === 'function' ? translator : makeT('zh');
       const ev = event && typeof event === 'object' ? event : {};
@@ -1113,7 +1145,7 @@
       };
     }
 
-    return { toolView, safeText };
+    return { toolView, safeText, reviewView };
   })();
 
   /* ---------- fmt: 数字/金额/时间格式化(AI 生成代码的标准件) ---------- */

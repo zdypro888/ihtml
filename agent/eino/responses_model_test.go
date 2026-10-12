@@ -60,7 +60,7 @@ func TestResponsesRequestAndStatelessRoundTrip(t *testing.T) {
 		json.NewEncoder(w).Encode(responseFixture("completed", responseReasoning(), responseText("done"), responseCall("lookup", `{}`)))
 	}))
 	defer server.Close()
-	m := newResponsesChatModel(Config{APIKey: "dummy", BaseURL: server.URL + "/v1", Model: "gpt-6.1-sol", MaxTokens: 700, MaxCompletionTokens: 900, ReasoningEffort: "medium"})
+	m := newResponsesChatModel(Config{APIKey: "dummy", BaseURL: server.URL + "/v1", Model: "gpt-6.1-sol", MaxTokens: 700, MaxCompletionTokens: 900, ReasoningEffort: "medium", ReasoningSummary: "auto"})
 	bound, err := m.WithTools([]*schema.ToolInfo{{Name: "lookup", Desc: "lookup"}})
 	if err != nil {
 		t.Fatal(err)
@@ -83,6 +83,12 @@ func TestResponsesRequestAndStatelessRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	first := bodies[0]
+	if _, exists := first["reasoning"].(map[string]any)["summary"]; exists {
+		t.Fatal("disabled reasoning must not request a summary")
+	}
+	if bodies[1]["reasoning"].(map[string]any)["summary"] != "auto" {
+		t.Fatal("reasoning summary was not sent to the provider")
+	}
 	if first["store"] != false || first["max_output_tokens"] != float64(321) || first["reasoning"].(map[string]any)["effort"] != "low" {
 		t.Fatalf("wrong Responses options: %v", first)
 	}
