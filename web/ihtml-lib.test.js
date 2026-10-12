@@ -426,6 +426,7 @@ test('cancel acknowledgements correlate by card id and nonce without accepting a
 
 test('turn stop and cancellation transport failures preserve honest confirmation states', () => {
   assert.equal(chatAgent.statusAfterTurnStop('running'), 'error', 'a started tool becomes locked and unknown, not falsely cancelled');
+  assert.equal(chatAgent.statusAfterTurnStop('running', true), 'unknown', 'an interrupted write is not an execution failure');
   assert.equal(chatAgent.statusAfterTurnStop('pending'), 'pending', 'a normal stop never revokes a signed confirmation card');
   assert.equal(chatAgent.statusAfterTurnStop('success'), 'success');
   assert.equal(chatAgent.cancellationFailureTerminal(false, false), false, 'a request that was never sent may be retried');

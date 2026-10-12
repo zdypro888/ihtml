@@ -74,6 +74,7 @@ const (
 	ChatToolSuccess   = "success"
 	ChatToolError     = "error"
 	ChatToolCancelled = "cancelled"
+	ChatToolUnknown   = "unknown"
 
 	// ChatToolBudget* 是 assistant_budget 快照和内置语义工具
 	// 返回的稳定机器可读值；客户端不应匹配本地化错误文案。

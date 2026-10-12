@@ -139,6 +139,30 @@ test('connection-scoped confirmation aborts the host check and expires on discon
   assert.equal(await page.evaluate(() => sockets[0].sent.length), 1);
 });
 
+for (const ending of ['disconnect', 'stop']) test('confirmed write stays unknown after ' + ending + ', with safe verification links', async t => {
+  const page = await fixture(t);
+  await page.evaluate(async () => {
+    window.a = ihtml.mountChat('#a', {verificationLinks: call => {
+      if (call.confirmation_token) throw new Error('hook must not receive signature');
+      return [{label:'Check records',url:'/audit?player=42'}, {label:'Unsafe',url:'javascript:alert(1)'}, {label:'External',url:'https://elsewhere.test/'}];
+    }});
+    await a.ready();await a.chat.send('Write');
+    sockets[0].emit({type:'turn_start',run_id:'r',seq:1});
+    sockets[0].emit({type:'confirmation_required',run_id:'r',seq:2,tool_call:{id:'c',name:'write',method:'POST',path:'/adjust',confirmation_nonce:'n',confirmation_token:'SIGNED'}});
+    sockets[0].emit({type:'assistant_done',run_id:'r',seq:3,message:'Ready'});
+  });
+  await page.locator('#a .t-actions .ok').click();
+  await page.waitForFunction(() => sockets[0].sent.length === 2);
+  await page.evaluate(ending => { if (ending === 'stop') a.chat.cancel(); else sockets[0].close(); }, ending);
+  const card = page.locator('#a .ihtml-tool[data-status="unknown"]');
+  await card.waitFor();
+  assert.match(await card.innerText(), /Do not repeat/);
+  assert.equal(await card.locator('.t-actions button').count(), 0);
+  assert.equal(await card.locator('.t-verification a').count(), 1);
+  assert.match(await card.locator('.t-verification a').getAttribute('href'), /host.test\/audit/);
+  assert.equal(await page.evaluate(() => sockets.length), 1);
+});
+
 test('legacy missing or empty modes still select and send Fast', async (t) => {
   const page = await fixture(t);
   for (const modes of [undefined, null, []]) {

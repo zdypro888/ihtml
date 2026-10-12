@@ -28,6 +28,8 @@
  * authorization and one-time consumption remain required. Timeout: 2 minutes.
  * reviewFieldLabel(path) -> string | null translates host-specific fields;
  * null omits a technical metadata field from the business preview.
+ * verificationLinks(toolCall) -> [{label, url}] supplies same-origin records
+ * to check when a write has no authoritative execution result.
  * API: ready(), refreshAuth(), refreshConfig(), destroy(), root/user/config,
  * chat.send(text?) -> Promise<boolean>; chat.draft(text) sets input without
  * sending; chat.open()/close()/cancel()/clear(),
@@ -5020,7 +5022,7 @@
     /* ---------- AI 对话抽屉 ---------- */
     const TOOL_STATUS_LABEL = {
       running: T('tool_running'), pending: T('tool_pending'), success: T('tool_success'),
-      error: T('tool_error'), cancelled: T('tool_cancelled'),
+      error: T('tool_error'), cancelled: T('tool_cancelled'), unknown: T('tool_unknown'),
     };
     const RISK_LABEL = { low: T('risk_low'), medium: T('risk_medium'), high: T('risk_high'), blocked: T('risk_blocked') };
 
@@ -6059,7 +6061,7 @@
           agentMode: chatAgentCore.selectMode(this.agentModes, agentMode),
           agentState: chatAgentCore.initialState(agentMode), agentOverview: null,
           text: '', textBytes: 0, textTruncated: false, contentFormat: 'auto', lastKind: '', lastStatusNode: null,
-          tools: new Map(), toolCount: 0, pendingCount: 0, errorCount: 0, done: false,
+          tools: new Map(), toolCount: 0, pendingCount: 0, errorCount: 0, unknownCount: 0, done: false,
           turnFailed: false,
           runSeq: new Map(), acceptNextRun: false, renderFrame: 0, lastRenderAt: 0,
           cancelled: false, confirmingTool: false,
@@ -6079,6 +6081,7 @@
         return t.toolCount + reasoning + deep;
       },
       processSummaryText(t) {
+        if (t.unknownCount > 0) return T('tools_unknown', {n: t.unknownCount});
         if (t.cancelled) return T('turn_stopped');
         if (t.pendingCount > 0) return T('tools_pending', { n: t.pendingCount });
         if (!t.done) {
@@ -6105,11 +6108,12 @@
         this.clearTransientStatus(t);
         this.finalizeThinking(t);
         for (const rec of t.tools.values()) {
-          const nextStatus = chatAgentCore.statusAfterTurnStop(rec.status);
+          const mutating = rec.confirmSent || /^(POST|PUT|PATCH|DELETE)$/i.test(rec.call.method || '');
+          const nextStatus = chatAgentCore.statusAfterTurnStop(rec.status, mutating);
           if (nextStatus === rec.status) continue;
           this.setToolStatus(rec, nextStatus, t);
           this.releaseAnonymousTool(t, rec.id);
-          rec.lastEvent = Object.assign({}, rec.lastEvent, { tool_summary: T('turn_stop_unknown') });
+          rec.lastEvent = Object.assign({}, rec.lastEvent, { tool_summary: T(nextStatus === 'unknown' ? 'execution_unknown' : 'turn_stop_unknown') });
           this.renderToolRecord(rec, rec.lastEvent, t);
         }
         if (!t.pBody.childNodes.length) this.appendStatus(T('turn_stopped'), false, t);
@@ -6121,7 +6125,7 @@
       },
       hasBlockingProcess(t) {
         if (!t) return false;
-        if (t.pendingCount > 0 || t.errorCount > 0) return true;
+        if (t.pendingCount > 0 || t.errorCount > 0 || t.unknownCount > 0) return true;
         return Array.from(t.tools.values()).some((rec) => rec.status === 'running');
       },
       updateProcess(t) {
@@ -6140,7 +6144,7 @@
           this.finalizeThinking(t);
           if (t.agentOverview && !t.agentState.manualPaused && !t.errorCount) t.agentOverview.open = false;
           if (!t.pBody.childNodes.length) t.process.remove();
-          else if (t.pendingCount === 0 && t.errorCount === 0) { collapsed = t.process.open; t.process.open = false; }
+          else if (t.pendingCount === 0 && t.errorCount === 0 && !t.unknownCount) { collapsed = t.process.open; t.process.open = false; }
           else t.process.open = true;
         } else if (t.text && !this.hasBlockingProcess(t) && !(t.agentState && t.agentState.manualPaused)) {
           collapsed = t.process.open;
@@ -6446,6 +6450,8 @@
         if (!rec.countedPending && status === 'pending') { t.pendingCount++; rec.countedPending = true; }
         if (rec.countedError && status !== 'error') { t.errorCount = Math.max(0, t.errorCount - 1); rec.countedError = false; }
         if (!rec.countedError && status === 'error') { t.errorCount++; rec.countedError = true; }
+        if (previous === 'unknown') t.unknownCount = Math.max(0, (t.unknownCount || 0) - 1);
+        if (status === 'unknown') t.unknownCount = (t.unknownCount || 0) + 1;
         rec.status = status;
         rec.card.dataset.status = status;
         rec.chip.textContent = TOOL_STATUS_LABEL[status] || status;
@@ -6516,6 +6522,20 @@
             facts.appendChild(row);
           }
           rec.body.appendChild(facts);
+        }
+        if (rec.status === 'unknown' && typeof opts.verificationLinks === 'function') {
+          try {
+            const call = JSON.parse(JSON.stringify(rec.call, (key, value) => isTechnicalSecretKey(key) ? undefined : value));
+            const links = opts.verificationLinks(call);
+            const nav = el('nav', 't-verification');
+            for (const item of (Array.isArray(links) ? links : []).slice(0, 4)) {
+              const url = new URL(String(item.url || ''), location.href);
+              if (url.origin !== location.origin || !/^https?:$/.test(url.protocol) || url.username || url.password || Array.from(url.searchParams.keys()).some(isTechnicalSecretKey)) continue;
+              const link = el('a', '', chatTraceCore.safeText(item.label, 100));
+              link.href = url.href; nav.appendChild(link);
+            }
+            if (nav.childNodes.length) rec.body.appendChild(nav);
+          } catch { /* verification UI must never alter execution */ }
         }
         const review = chatTraceCore && typeof chatTraceCore.reviewView === 'function' ? chatTraceCore.reviewView(rec.call.review, T, opts.reviewFieldLabel) : null;
         if (review && (review.rows.length || review.scope || review.blockingReason)) {
@@ -6600,7 +6620,7 @@
           rec.body.setAttribute('aria-labelledby', rec.title.id);
           if (primary) rec.body.setAttribute('aria-describedby', primary.id);
         }
-        if (rec.status === 'pending' || rec.status === 'error') rec.card.open = true;
+        if (rec.status === 'pending' || rec.status === 'error' || rec.status === 'unknown') rec.card.open = true;
         else if (['success', 'cancelled'].includes(rec.status)) rec.card.open = false;
         if (hadFocus) queueMicrotask(() => {
           const owner = rec.ownerTurn;
@@ -6728,6 +6748,7 @@
           if (this.confirmationBusy !== rec || rec.status !== 'pending') return;
           if (destroyed || authRefreshing || readOnly) throw staleRequestError();
           ws.send(JSON.stringify({ type: 'confirm_tool', tool_call: rec.call }));
+          rec.confirmSent = true;
         } catch {
           if (this.confirmationBusy !== rec) return;
           this.confirmationBusy = null;
@@ -6995,8 +7016,10 @@
           this.finalizeThinking(t);
           for (const rec of t.tools.values()) {
             if (rec.status !== 'running') continue;
-            this.setToolStatus(rec, 'error', t);
-            rec.lastEvent = Object.assign({}, rec.lastEvent, { tool_summary: msg });
+            const mutating = rec.confirmSent || /^(POST|PUT|PATCH|DELETE)$/i.test(rec.call.method || '');
+            const status = mutating ? 'unknown' : 'error';
+            this.setToolStatus(rec, status, t);
+            rec.lastEvent = Object.assign({}, rec.lastEvent, { tool_summary: status === 'unknown' ? T('execution_unknown') : msg });
             this.renderToolRecord(rec, rec.lastEvent, t);
           }
           if (t.text || t.textTruncated) replaceAssistantPreservingView(t.answer, renderAssistant(t.text, t.contentFormat, t.answer, t.textTruncated));
@@ -7556,7 +7579,7 @@
           opts.routing = opts.routing || (opts.standalone ? 'hash' : 'memory');
           if (opts.routing !== 'memory' && opts.routing !== 'hash') throw new TypeError('ihtml.mount: routing must be "memory" or "hash"');
         }
-        for (const name of ['onChatEvent', 'contextProvider', 'beforeConfirm', 'reviewFieldLabel']) {
+        for (const name of ['onChatEvent', 'contextProvider', 'beforeConfirm', 'reviewFieldLabel', 'verificationLinks']) {
           if (opts[name] != null && typeof opts[name] !== 'function') throw new TypeError('ihtml: ' + name + ' must be a function');
         }
         if (opts.initialMessages != null) {

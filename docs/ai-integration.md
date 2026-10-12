@@ -304,3 +304,9 @@ checkpoint 按命名空间隔离，默认序列化器保留 typed Eino 消息。
 边界后才能声明跨进程恢复；不可把模型私有工作记忆直接当作用户可读取的聊天
 记录。事件与 checkpoint 单条上限 16 MiB。
 测试：设置 `IHTML_TEST_POSTGRES_DSN` 后执行 `go test -race ./agent/eino/sqlstore`。
+
+确认帧发出后若连接中断，或用户停止尚未回报结果的写操作，工具卡显示 `unknown`
+而非“失败”或“已取消”，且没有重新执行按钮。已收到的成功/失败结果不会改写。
+宿主可以通过 `verificationLinks(toolCall)` 提供核对记录的链接，仅允许同源 HTTP(S)
+地址，回调得到的是移除秘密字段的副本。`reviewFieldLabel(path)` 可将业务字段
+翻译成可读名称，返回 `null` 隐藏版本号等技术元数据。
