@@ -45,7 +45,7 @@ func TestNativeConfirmationPersistsBeforePauseAndResumesOriginal(t *testing.T) {
 			if c.ConfirmationToken != "signed" || !claimed.CompareAndSwap(0, 1) {
 				return nil, errors.New("invalid or repeated consent")
 			}
-			return &agent.TurnRequest{RequireApproval: true, EngineSession: "original", InvocationScope: "same-turn", Resume: &agent.ResumeRequest{CheckPointID: "checkpoint", Decisions: map[string]bool{"point": approved}}}, nil
+			return &agent.TurnRequest{RequireApproval: true, EngineSession: "original", InvocationScope: "same-turn", Resume: &agent.ResumeRequest{CheckPointID: "checkpoint", ToolCallID: "call-1", Decisions: map[string]bool{"point": approved}}}, nil
 		},
 		Pending: func(context.Context, *ihtml.ChatSessionContext) ([]ihtml.ProposedToolCall, error) { return nil, nil },
 	}
@@ -166,5 +166,25 @@ func TestNativePauseFailureRunsHostCleanup(t *testing.T) {
 		if cleanup.Load() != 1 {
 			t.Fatalf("cleanup=%d", cleanup.Load())
 		}
+	}
+}
+
+func TestNativeResumedCardMatchesExactParallelInvocation(t *testing.T) {
+	r := newRecorder()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &session{ctx: ctx, cancel: cancel, sctx: ihtml.ChatSessionContext{Emit: r.emit}}
+	p := newProjection(s, ctx, cancel)
+	p.resumedCard = &ihtml.ProposedToolCall{ID: "card-b", Name: "write"}
+	p.resumedToolCallID = "call-b"
+	// Alpha12 may replay A's completed output before B's rejection.
+	p.step(agent.Step{Kind: agent.StepToolCall, ToolName: "write", ToolCallID: "call-a", Args: []byte(`{"value":1}`), Result: "stored"}, nil)
+	p.step(agent.Step{Kind: agent.StepToolCall, ToolName: "write", ToolCallID: "call-b", Args: []byte(`{"value":2}`), ApprovalRejected: true}, nil)
+	events := r.snapshot()
+	if len(events) != 2 || events[0].ToolCall != nil || events[0].ToolID == "card-b" {
+		t.Fatalf("unrelated output consumed card: %+v", events)
+	}
+	if events[1].ToolID != "card-b" || events[1].ToolStatus != ihtml.ChatToolCancelled {
+		t.Fatalf("rejection lost exact card binding: %+v", events[1])
 	}
 }

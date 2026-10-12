@@ -19,6 +19,8 @@ type NativeConfirmationConfig struct {
 	// PrepareResume authenticates ownership, validates/consumes the exact signed
 	// card, records consent, and atomically claims the original suspended turn.
 	// Return fresh authorized handlers and original session/invocation binding.
+	// Resume.ToolCallID must come from the stored invocation for this card, never
+	// from client input or a name-only match; it correlates resumed tool results.
 	// False must target rejection, never execute the handler. Concurrent/replayed,
 	// expired or revoked consent must fail closed. A failed/crashed claim must not
 	// be blindly retried: tool side effects can have an unknown outcome.

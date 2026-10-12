@@ -447,7 +447,7 @@ func (s *session) run(ctx context.Context, cancel context.CancelFunc, ev *ihtml.
 	hostContext := s.sctx
 	if ev.Type == ihtml.ChatClientConfirmTool || ev.Type == ihtml.ChatClientCancelTool {
 		req, runErr = s.backend.cfg.NativeConfirmation.PrepareResume(ctx, &hostContext, *ev.ToolCall, ev.Type == ihtml.ChatClientConfirmTool)
-		if runErr == nil && (req == nil || req.Resume == nil || !req.RequireApproval) {
+		if runErr == nil && (req == nil || req.Resume == nil || req.Resume.ToolCallID == "" || !req.RequireApproval) {
 			runErr = errors.New("assistant: missing native resume binding")
 		}
 		if runErr == nil && ev.Type == ihtml.ChatClientCancelTool {
@@ -461,6 +461,7 @@ func (s *session) run(ctx context.Context, cancel context.CancelFunc, ev *ihtml.
 				runErr = err
 			} else {
 				p.resumedCard = &card
+				p.resumedToolCallID = req.Resume.ToolCallID
 			}
 		}
 	} else {
@@ -556,23 +557,24 @@ func (s *session) governTools(tools []agent.Tool, ev *ihtml.ChatClientEvent, p *
 }
 
 type projection struct {
-	mu            sync.Mutex
-	session       *session
-	ctx           context.Context
-	cancel        context.CancelFunc
-	id            string
-	seq           int64
-	snapshot      string
-	finished      bool
-	err           error
-	emitFailed    bool
-	modelReady    bool
-	toolSeq       int64
-	started       bool
-	pendingNotice bool
-	pendingSteps  map[string]int
-	approvalTools map[string]bool
-	resumedCard   *ihtml.ProposedToolCall
+	mu                sync.Mutex
+	session           *session
+	ctx               context.Context
+	cancel            context.CancelFunc
+	id                string
+	seq               int64
+	snapshot          string
+	finished          bool
+	err               error
+	emitFailed        bool
+	modelReady        bool
+	toolSeq           int64
+	started           bool
+	pendingNotice     bool
+	pendingSteps      map[string]int
+	approvalTools     map[string]bool
+	resumedCard       *ihtml.ProposedToolCall
+	resumedToolCallID string
 }
 
 func newProjection(s *session, ctx context.Context, cancel context.CancelFunc) *projection {
@@ -684,7 +686,7 @@ func (p *projection) step(step agent.Step, host func(agent.Step)) {
 		}
 		p.toolSeq++
 		event := ihtml.ChatStreamEvent{Type: ihtml.ChatStreamToolResult, ToolID: fmt.Sprintf("%s_tool_%d", p.id, p.toolSeq), ToolName: step.ToolName, ToolStatus: status, ToolSummary: summary}
-		if p.resumedCard != nil && p.resumedCard.Name == step.ToolName {
+		if p.resumedCard != nil && p.resumedToolCallID != "" && p.resumedToolCallID == step.ToolCallID && p.resumedCard.Name == step.ToolName {
 			event.ToolID = p.resumedCard.ID
 			event.ToolCall = p.resumedCard
 			p.resumedCard = nil

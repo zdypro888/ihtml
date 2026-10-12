@@ -292,6 +292,20 @@ test('checkpoint pause enables confirmation without false completion and restore
   await page.locator('#a').screenshot({ path: '/tmp/ihtml-native-approval-mobile.png' });
 });
 
+test('disconnect preserves suspended approval without false completion', async (t) => {
+  const page = await fixture(t);
+  await page.evaluate(async () => {
+    window.a = ihtml.mountChat('#a'); await a.ready(); await a.chat.send('Write');
+    sockets[0].emit({ type: 'turn_start', run_id: 'pause', seq: 1 });
+    sockets[0].emit({ type: 'confirmation_required', run_id: 'pause', seq: 2, tool_call: { id: 'native', name: 'write', approval_resume: 'checkpoint', confirmation_nonce: 'n', confirmation_token: 'SIGNED', confirmation_expires: Math.floor(Date.now() / 1000) + 600 } });
+    sockets[0].emit({ type: 'turn_paused', run_id: 'pause', seq: 3 });
+    sockets[0].close();
+  });
+  assert.equal(await page.evaluate(() => a.chat.busy), false);
+  assert.equal(await page.locator('#a .ihtml-msg.assistant').last().evaluate(card => card._turn.done), false);
+  assert.equal(await page.locator('#a .t-actions button:enabled').count(), 2);
+});
+
 test('restored approval does not displace a foreground user request', async (t) => {
   const page = await fixture(t);
   await page.evaluate(async () => {

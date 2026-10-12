@@ -318,6 +318,8 @@ type ApprovalTool struct {
 type ResumeRequest struct {
 	CheckPointID string
 	Decisions    map[string]bool
+	// ToolCallID is host-owned display correlation, not resume authority.
+	ToolCallID string
 }
 
 // Engine 跑一轮带工具的对话。实现：einoengine。

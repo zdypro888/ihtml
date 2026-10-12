@@ -5635,7 +5635,7 @@
               }
               if (this.dom && !destroyed) this.systemNote(T('chat_disconnected'));
               if (this.active && this.turn && !this.turn.done) this.turnError(T('chat_disconnected'));
-              else this.setActive(false);
+              else this.setActive(false, false);
             };
             ws.onmessage = (ev) => {
               if (destroyed || generation !== this.wsGeneration || this.ws !== ws) return;

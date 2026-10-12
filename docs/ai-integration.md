@@ -195,7 +195,8 @@ ToolExecutionGuard: verifyLiveAccessAndBusinessApproval,
 三个 native hooks 与 manual `Confirmation` 互斥。`Pause` 必须在返回卡片前将
 原轮次、EngineSession、InvocationScope、工具参数、检查点、进度及签名卡绑定持久化。
 `PrepareResume` 必须验证当前用户与渠道、签名及到期时间，原子消费决策并领取原轮次，
-从服务器记录构造 `ResumeRequest{CheckPointID, Decisions}`，不能接受客户端指定检查点、
+从服务器记录构造 `ResumeRequest{CheckPointID, Decisions, ToolCallID}`，其中 `ToolCallID`
+必须对应这张卡的原始调用，用于精确关联同名并行工具结果；不能接受客户端指定检查点、
 工具参数或权限。恢复保持原 session 和幂等 scope，使用当前授权工具与实时 handler；
 能力契约改变时 runtime 拒绝恢复。拒绝只返回未执行结果；未指定的中断继续等待。
 
