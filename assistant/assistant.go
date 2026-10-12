@@ -1,5 +1,6 @@
 // Package assistant bridges ihtml's chat protocol to a host-owned agent.Engine.
-// It does not authenticate users, persist transcripts, or implement approvals.
+// It does not authenticate users or persist transcripts. Optional signed manual
+// confirmations still require a host-owned live execution guard.
 package assistant
 
 import (
@@ -12,9 +13,11 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/zdypro888/ihtml"
 	"github.com/zdypro888/ihtml/agent"
+	"github.com/zdypro888/ihtml/confirmation"
 )
 
 // Config contains no provider credentials. Hooks must respect cancellation and
@@ -36,8 +39,12 @@ type Config struct {
 	// ApprovalRequired tools: it must verify host-owned approval and live access,
 	// never a client claim. Already-governed Handlers still own live revocation.
 	ToolExecutionGuard func(context.Context, *ihtml.ChatSessionContext, agent.Tool, json.RawMessage) error
-	MaxPendingTurns    int    // default 16; per connection, excluding the active turn
-	ContentFormat      string // default text; HTML remains untrusted model output
+	Confirmation       *ConfirmationConfig
+	// CompleteTool persists actual manual execution evidence. It does not update
+	// the engine's pending invocation receipt or resume its model trajectory.
+	CompleteTool    func(context.Context, *ihtml.ChatSessionContext, *ConfirmedToolResult) error
+	MaxPendingTurns int    // default 16; per connection, excluding the active turn
+	ContentFormat   string // default text; HTML remains untrusted model output
 }
 
 type Backend struct{ cfg Config }
@@ -74,6 +81,22 @@ func NewChecked(cfg Config) (*Backend, error) {
 		models := cloneModels(*cfg.Models)
 		cfg.Models = &models
 	}
+	if cfg.Confirmation != nil {
+		c := *cfg.Confirmation
+		if !c.Signer.Available() || c.Scope == nil || c.Preview == nil || cfg.ToolExecutionGuard == nil {
+			return nil, errors.New("assistant: confirmation requires Signer, Scope, Preview and ToolExecutionGuard")
+		}
+		if c.MaxPendingTools == 0 {
+			c.MaxPendingTools = 16
+		}
+		if c.ToolTimeout == 0 {
+			c.ToolTimeout = 30 * time.Second
+		}
+		if c.MaxPendingTools < 1 || c.MaxPendingTools > 256 || c.ToolTimeout < time.Millisecond || c.ToolTimeout > 10*time.Minute {
+			return nil, errors.New("assistant: invalid confirmation limits")
+		}
+		cfg.Confirmation = &c
+	}
 	return &Backend{cfg: cfg}, nil
 }
 
@@ -93,7 +116,8 @@ func cloneModels(m ihtml.ChatModels) ihtml.ChatModels {
 	m.ProtocolVersion = ihtml.ChatProtocolVersion
 	m.Models = append([]string{}, m.Models...)
 	m.AgentModes = append([]string{}, m.AgentModes...)
-	// This bridge neither signs confirmation cards nor resumes checkpoints.
+	// Checkpoint resume is never supported; Models enables manual-only cards
+	// explicitly when the optional confirmation bridge is configured.
 	m.DeepApprovalResume = ""
 	if m.PreviewOnly {
 		m.ModelReady = false
@@ -108,10 +132,15 @@ func (b *Backend) Models(ctx context.Context) (models ihtml.ChatModels, err erro
 		}
 	}()
 	if b.cfg.Models != nil {
-		return cloneModels(*b.cfg.Models), nil
+		models = cloneModels(*b.cfg.Models)
+	} else {
+		models, err = b.cfg.ModelsProvider(ctx)
+		models = cloneModels(models)
 	}
-	models, err = b.cfg.ModelsProvider(ctx)
-	return cloneModels(models), err
+	if b.cfg.Confirmation != nil {
+		models.DeepApprovalResume = "manual_tool_only"
+	}
+	return models, err
 }
 
 func (b *Backend) NewSession(ctx context.Context, sctx *ihtml.ChatSessionContext) (ihtml.ChatSession, error) {
@@ -128,7 +157,12 @@ func (b *Backend) NewSession(ctx context.Context, sctx *ihtml.ChatSessionContext
 	copyContext.APIs = append([]ihtml.APISpec(nil), sctx.APIs...)
 	ctx, cancel := context.WithCancel(ctx)
 	s := &session{backend: b, sctx: copyContext, ctx: ctx, cancel: cancel,
-		wake: make(chan struct{}, 1), done: make(chan struct{})}
+		wake: make(chan struct{}, 1), done: make(chan struct{}), pendingTools: make(map[string]*pendingTool)}
+	if b.cfg.Confirmation != nil {
+		s.cancelTools = make(chan pendingTurn, b.cfg.Confirmation.MaxPendingTools)
+		s.cancelDone = make(chan struct{})
+		go s.cancelToolLoop()
+	}
 	go s.loop()
 	return s, nil
 }
@@ -136,22 +170,29 @@ func (b *Backend) NewSession(ctx context.Context, sctx *ihtml.ChatSessionContext
 type pendingTurn struct {
 	parent context.Context
 	event  ihtml.ChatClientEvent
+	reject bool
 }
 
 type session struct {
-	backend       *Backend
-	sctx          ihtml.ChatSessionContext
-	ctx           context.Context
-	cancel        context.CancelFunc
-	wake          chan struct{}
-	done          chan struct{}
-	mu            sync.Mutex
-	emitMu        sync.Mutex
-	queue         []pendingTurn
-	active        context.CancelFunc
-	activeOutput  *projection
-	queueRejected bool
-	closed        bool
+	backend         *Backend
+	sctx            ihtml.ChatSessionContext
+	ctx             context.Context
+	cancel          context.CancelFunc
+	wake            chan struct{}
+	done            chan struct{}
+	mu              sync.Mutex
+	emitMu          sync.Mutex
+	queue           []pendingTurn
+	rejections      []pendingTurn
+	pendingMu       sync.Mutex
+	pendingTools    map[string]*pendingTool
+	pendingReserved int
+	cancelTools     chan pendingTurn
+	cancelDone      chan struct{}
+	active          context.CancelFunc
+	activeOutput    *projection
+	queueRejected   bool
+	closed          bool
 }
 
 // Close cancels active and queued work and waits for all host work to unwind.
@@ -163,6 +204,9 @@ func (s *session) Close() {
 	s.cancel()
 	s.mu.Unlock()
 	<-s.done
+	if s.cancelDone != nil {
+		<-s.cancelDone
+	}
 }
 
 func (s *session) HandleEvent(ctx context.Context, ev *ihtml.ChatClientEvent) {
@@ -171,7 +215,9 @@ func (s *session) HandleEvent(ctx context.Context, ev *ihtml.ChatClientEvent) {
 	}
 	if ev.Type == ihtml.ChatClientCancel {
 		s.mu.Lock()
+		s.releaseDroppedConfirmationsLocked()
 		s.queue = nil
+		s.rejections = nil
 		s.queueRejected = false
 		if s.active != nil {
 			s.active()
@@ -179,8 +225,10 @@ func (s *session) HandleEvent(ctx context.Context, ev *ihtml.ChatClientEvent) {
 		s.mu.Unlock()
 		return
 	}
-	// Confirmation, checkpoint resume and inspection are host-specific protocols,
-	// not capabilities this bridge can safely emulate.
+	if s.backend.cfg.Confirmation != nil && (ev.Type == ihtml.ChatClientConfirmTool || ev.Type == ihtml.ChatClientCancelTool) {
+		s.handleToolEvent(ctx, ev)
+		return
+	}
 	if ev.Type != ihtml.ChatClientUserMessage {
 		return
 	}
@@ -236,6 +284,7 @@ func cleanEvent(ev *ihtml.ChatClientEvent) (ihtml.ChatClientEvent, error) {
 
 func (s *session) loop() {
 	defer close(s.done)
+	defer s.cleanupPendingTools()
 	for {
 		s.mu.Lock()
 		if s.closed || s.ctx.Err() != nil {
@@ -243,7 +292,7 @@ func (s *session) loop() {
 			s.mu.Unlock()
 			return
 		}
-		if len(s.queue) == 0 {
+		if len(s.queue) == 0 && len(s.rejections) == 0 {
 			s.mu.Unlock()
 			select {
 			case <-s.ctx.Done():
@@ -251,8 +300,12 @@ func (s *session) loop() {
 			}
 			continue
 		}
-		next := s.queue[0]
-		s.queue = s.queue[1:]
+		var next pendingTurn
+		if len(s.rejections) > 0 {
+			next, s.rejections = s.rejections[0], s.rejections[1:]
+		} else {
+			next, s.queue = s.queue[0], s.queue[1:]
+		}
 		ctx, cancel := context.WithCancel(s.ctx)
 		s.active = cancel
 		s.mu.Unlock()
@@ -260,7 +313,13 @@ func (s *session) loop() {
 		if next.parent.Err() != nil {
 			cancel()
 		}
-		s.run(ctx, cancel, &next.event)
+		if next.event.Type == ihtml.ChatClientCancelTool {
+			s.cancelToolAck(*next.event.ToolCall, false)
+		} else if next.event.Type == ihtml.ChatClientConfirmTool {
+			s.runConfirmedTool(ctx, cancel, &next.event, next.reject)
+		} else {
+			s.run(ctx, cancel, &next.event)
+		}
 		stop()
 		cancel()
 		s.mu.Lock()
@@ -351,7 +410,7 @@ func (s *session) run(ctx context.Context, cancel context.CancelFunc, ev *ihtml.
 	copyRequest := *req
 	req = &copyRequest
 	req.StreamReasoning = false
-	req.Tools, runErr = s.governTools(req.Tools, ev, p)
+	req.Tools, runErr = s.governTools(req.Tools, ev, p, req)
 	if runErr != nil {
 		return
 	}
@@ -377,7 +436,7 @@ func safeComplete(fn func(context.Context, *ihtml.ChatSessionContext, *agent.Tur
 	return fn(ctx, &copyContext, req, result, turnErr)
 }
 
-func (s *session) governTools(tools []agent.Tool, ev *ihtml.ChatClientEvent, p *projection) ([]agent.Tool, error) {
+func (s *session) governTools(tools []agent.Tool, ev *ihtml.ChatClientEvent, p *projection, req *agent.TurnRequest) ([]agent.Tool, error) {
 	if ev.ToolsEnabled != nil && !*ev.ToolsEnabled {
 		return nil, nil
 	}
@@ -394,6 +453,14 @@ func (s *session) governTools(tools []agent.Tool, ev *ihtml.ChatClientEvent, p *
 			return nil, errors.New("assistant: invalid host tool")
 		}
 		handler, original := tool.Handler, tool
+		if original.ApprovalRequired && s.backend.cfg.Confirmation != nil {
+			// The native receipt represents pending, not domain execution. Domain
+			// recovery/persistence callbacks must not run on that placeholder.
+			tool.RecoverResult, tool.ResultPersisted = nil, nil
+			p.mu.Lock()
+			p.approvalTools[tool.Name] = true
+			p.mu.Unlock()
+		}
 		tool.Handler = func(ctx context.Context, args json.RawMessage) (result string, err error) {
 			defer func() {
 				if recover() != nil {
@@ -402,6 +469,9 @@ func (s *session) governTools(tools []agent.Tool, ev *ihtml.ChatClientEvent, p *
 			}()
 			if ctx.Err() != nil || p.ctx.Err() != nil {
 				return "", context.Canceled
+			}
+			if original.ApprovalRequired && s.backend.cfg.Confirmation != nil {
+				return s.prepareTool(ctx, original, args, p, req)
 			}
 			if guard != nil {
 				hostContext := s.sctx
@@ -431,13 +501,15 @@ type projection struct {
 	toolSeq       int64
 	started       bool
 	pendingNotice bool
+	pendingSteps  map[string]int
+	approvalTools map[string]bool
 }
 
 func newProjection(s *session, ctx context.Context, cancel context.CancelFunc) *projection {
 	var id [16]byte
 	// crypto/rand.Read either fills the buffer or panics on modern Go.
 	_, _ = rand.Read(id[:])
-	return &projection{session: s, ctx: ctx, cancel: cancel, id: hex.EncodeToString(id[:])}
+	return &projection{session: s, ctx: ctx, cancel: cancel, id: hex.EncodeToString(id[:]), pendingSteps: make(map[string]int), approvalTools: make(map[string]bool)}
 }
 
 // All send calls hold mu across sequence assignment and synchronous emission.
@@ -514,6 +586,20 @@ func (p *projection) step(step agent.Step, host func(agent.Step)) {
 		}
 		if step.Kind != agent.StepToolCall {
 			return
+		}
+		key := step.ToolName + "\x00" + string(confirmation.CanonicalBody(step.Args))
+		if p.pendingSteps[key] > 0 {
+			p.pendingSteps[key]--
+			return
+		}
+		if p.approvalTools[step.ToolName] && step.Err == "" {
+			var receipt struct {
+				Status string `json:"status"`
+				ID     string `json:"id"`
+			}
+			if json.Unmarshal([]byte(step.Result), &receipt) == nil && receipt.Status == "pending" && receipt.ID != "" {
+				return
+			}
 		}
 		status, summary := ihtml.ChatToolSuccess, "Tool completed."
 		switch {

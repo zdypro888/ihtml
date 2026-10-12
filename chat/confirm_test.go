@@ -8,9 +8,61 @@ import (
 	"time"
 
 	"github.com/zdypro888/ihtml"
+	"github.com/zdypro888/ihtml/confirmation"
 )
 
 var testConfirmationScope = newConfirmationScope("session-a", "capability-a")
+
+func TestLegacyConfirmationWireSignatureIsFrozen(t *testing.T) {
+	signer := newConfirmSigner([]byte("legacy-wire-secret"))
+	call := ihtml.ProposedToolCall{
+		ID: "card-a", Name: "write", Title: "Update", Method: "TOOL", Path: "ui://write",
+		Query: map[string]any{"b": 2, "a": 1}, Body: map[string]any{"value": 3, "id": "a"},
+		Risk: "high", RequiresConfirmation: true, Reason: "changes data",
+		AgentMode: "deep", ApprovalResume: "manual_tool_only",
+		ConfirmationNonce: "nonce-a", ConfirmationExpires: 1900000000,
+	}
+	const want = "1cbfc85f6d504d55b73a97a043df50bbbe8695df503caabf582dff222b06ccb8"
+	if got := signer.sign("alice", testConfirmationScope, call); got != want {
+		t.Fatalf("legacy signature changed: got %s, want %s", got, want)
+	}
+}
+
+func TestChatAndPublicConfirmationInteroperate(t *testing.T) {
+	store := newMemoryConfirmNonceStore()
+	secret := []byte("same-host-confirmation-secret")
+	legacy := newConfirmSigner(secret, store)
+	shared, err := confirmation.NewChecked(confirmation.Config{Secret: secret, NonceStore: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, reverse := range []bool{false, true} {
+		call := ihtml.ProposedToolCall{
+			ID: "write-card", Name: "ui_item_put", Title: "Update item",
+			Method: "TOOL", Path: "ui://ui_item_put", Risk: "medium",
+			Body: map[string]any{"id": "item-a"}, RequiresConfirmation: true,
+			AgentMode: AgentModeDeep, ApprovalResume: "manual_tool_only",
+		}
+		var signed ihtml.ProposedToolCall
+		if reverse {
+			signed, err = shared.Prepare(context.Background(), "alice", confirmation.Scope(testConfirmationScope), call)
+		} else {
+			signed, err = legacy.prepareContext(context.Background(), "alice", testConfirmationScope, call)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ok bool
+		if reverse {
+			ok, err = legacy.consumeContext(context.Background(), "alice", testConfirmationScope, signed)
+		} else {
+			ok, err = shared.Consume(context.Background(), "alice", confirmation.Scope(testConfirmationScope), signed)
+		}
+		if err != nil || !ok {
+			t.Fatalf("cross-package consumption reverse=%v: %v, %v", reverse, ok, err)
+		}
+	}
+}
 
 func TestConfirmationSharedNonceStoreSurvivesSignerRestart(t *testing.T) {
 	shared := newMemoryConfirmNonceStore()
@@ -156,86 +208,6 @@ func TestInvalidCancelDoesNotBurnConfirmation(t *testing.T) {
 	}
 	if ok, err := signer.consumeContext(context.Background(), "alice", testConfirmationScope, call); err != nil || !ok {
 		t.Fatalf("invalid cancel burned valid card: ok=%v err=%v", ok, err)
-	}
-}
-
-func TestMemoryConfirmationNonceStoreHasHardCapacityAndReusesConsumedSlot(t *testing.T) {
-	store := newMemoryConfirmNonceStore(2)
-	ctx := context.Background()
-	expires := time.Now().Add(time.Hour)
-	if err := store.Put(ctx, "first", expires); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Put(ctx, "second", expires); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Put(ctx, "third", expires); err == nil {
-		t.Fatal("memory nonce store grew past its hard capacity")
-	}
-	if ok, err := store.Consume(ctx, "first", time.Now()); err != nil || !ok {
-		t.Fatalf("consume first nonce: ok=%v err=%v", ok, err)
-	}
-	if err := store.Put(ctx, "third", expires); err != nil {
-		t.Fatalf("consumed capacity was not reusable: %v", err)
-	}
-	if len(store.nonces) != 2 {
-		t.Fatalf("nonce count = %d, want 2", len(store.nonces))
-	}
-}
-
-func TestMemoryConfirmationNonceStoreCleansExpiredEntriesAtCapacity(t *testing.T) {
-	store := newMemoryConfirmNonceStore(2)
-	now := time.Now()
-	store.mu.Lock()
-	store.nonces["expired"] = now.Add(-time.Second)
-	store.nonces["live"] = now.Add(time.Hour)
-	store.nextCleanup = now.Add(-time.Second)
-	store.mu.Unlock()
-
-	if err := store.Put(context.Background(), "replacement", now.Add(time.Hour)); err != nil {
-		t.Fatalf("expired capacity was not reclaimed: %v", err)
-	}
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	if _, exists := store.nonces["expired"]; exists {
-		t.Fatal("expired nonce survived forced capacity cleanup")
-	}
-	if len(store.nonces) != 2 {
-		t.Fatalf("nonce count = %d, want 2", len(store.nonces))
-	}
-}
-
-func TestMemoryConfirmationNonceCleanupIsThrottled(t *testing.T) {
-	store := newMemoryConfirmNonceStore(8)
-	now := time.Now()
-	if err := store.Put(context.Background(), "live-a", now.Add(time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	store.mu.Lock()
-	store.nonces["expired"] = now.Add(-time.Second)
-	nextCleanup := store.nextCleanup
-	store.mu.Unlock()
-
-	if err := store.Put(context.Background(), "live-b", now.Add(time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	store.mu.Lock()
-	_, survivedThrottledPut := store.nonces["expired"]
-	unchangedSchedule := store.nextCleanup.Equal(nextCleanup)
-	store.nextCleanup = now.Add(-time.Second)
-	store.mu.Unlock()
-	if !survivedThrottledPut || !unchangedSchedule {
-		t.Fatal("ordinary Put performed an unthrottled full-map cleanup")
-	}
-
-	if err := store.Put(context.Background(), "live-c", now.Add(time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	store.mu.Lock()
-	_, survivedScheduledPut := store.nonces["expired"]
-	store.mu.Unlock()
-	if survivedScheduledPut {
-		t.Fatal("scheduled cleanup did not remove expired nonce")
 	}
 }
 

@@ -11,6 +11,23 @@
 不要同时启动两套 Agent 处理同一轮。核心 `ihtml` 不导入 Eino，AI 完全可选。
 通用包不依赖 nbco 的人员、Worker、审批数据库或业务工具。
 
+### 助手能力边界
+
+| 能力 | `chat.Backend`：完整 UI Agent | `assistant.Backend`：宿主 Engine |
+|---|---|---|
+| 模型循环与工具 | 内置 UI 领域工具与治理 | 宿主 Engine，宿主提供授权后的工具 |
+| 动态页面修改 | 内置页面工具与确认卡 | 不自动提供 UI 写工具；宿主显式授予能力 |
+| 工具确认 | 内置确认协议 | 可选 `ConfirmationConfig`，仅 `manual_tool_only`；必须配置执行 guard |
+| 确认后的计划 | 不应把 manual-only 描述为 checkpoint 恢复 | 仅执行指定的已签发 stored 调用，不恢复 Engine 计划、不追加模型循环 |
+| 浏览器 inspect | 内置页面检查协议 | 不自动实现 `inspect_request/inspect_result`；浏览器 context 始终不可信 |
+| 历史与断线恢复 | 遵循内置 chat 的会话治理 | 宿主拥有业务历史；连接内 pending 工具不代表持久恢复能力 |
+| 后续扩展入口 | 领域工具、模型工厂与既有 chat 配置 | `PrepareTurn`、`CompleteTurn`、`ToolExecutionGuard`、自定义 `agent.Engine`；完整私有协议可实现 `ChatBackend` |
+
+`manual_tool_only` 不是中断计划的恢复：确认后只执行一条服务端保存的调用。
+签名、nonce 与确认卡不授予业务权限，执行前的实时权限 guard 不可省略。
+跨连接、进程重启或页面重新挂载的持久恢复，需要宿主另行定义受保护的状态存储、
+身份绑定、幂等与审计；`initialMessages/getMessages()` 只能恢复显示，不能恢复待确认授权。
+
 ## 原生 Eino 与 Responses
 
 ```go
@@ -101,8 +118,58 @@ ToolExecutionGuard 时不可执行。已返回工具仍应在 Handler 内检查�
 退出，因此宿主 Engine/hooks 必须响应 context，不能在回调里递归 Close。
 CompleteTurn 收到部分结果与错误，错误会抑制成功消息；若取消后仍需保存审计，
 宿主应使用自己管理的有界清理上下文，不能无限后台执行。
-桥接层不实现确认卡/浏览器检查/中断恢复；需要这些能力时使用内置 chat 后端，
-或像 nbco 一样实现完整 ChatBackend。它不会对外投影原始工具参数/结果或隐藏推理。
+桥接层可显式启用下述 manual-only 确认卡，不实现浏览器检查或 checkpoint 中断恢复。
+需要完整 UI 领域工具/inspect 时使用内置 chat 后端，或像 nbco 一样实现自己的
+ChatBackend。默认投影不暴露原始工具参数/结果或隐藏推理；确认卡的公开内容由宿主控制。
+
+### 可选的手动工具确认
+
+```go
+signer, err := confirmation.NewChecked(confirmation.Config{})
+if err != nil { /* 在开始监听前处理错误 */ }
+backend, err := assistant.NewChecked(assistant.Config{
+    Engine: engine, Models: models,
+    PrepareTurn: prepareAuthorizedTurn,
+    CompleteTurn: persistModelTurn,
+    ToolExecutionGuard: verifyCurrentToolPermission,
+    Confirmation: &assistant.ConfirmationConfig{
+        Signer: signer,
+        Scope: func(ctx context.Context, session *ihtml.ChatSessionContext,
+            req *agent.TurnRequest) (confirmation.Scope, error) {
+            // SessionID/SessionCapability 必须来自宿主可信绑定，不能使用浏览器字段。
+            return confirmation.NewScope(req.SessionID, req.SessionCapability), nil
+        },
+        Preview: publicRedactedToolPreview,
+        MaxPendingTools: 16,
+        ToolTimeout: 30 * time.Second,
+    },
+    CompleteTool: persistConfirmedExecution,
+})
+```
+
+新增 import 为 `github.com/zdypro888/ihtml/confirmation` 与 `time`；命名 hooks 是
+宿主函数。`Preview(ctx, session, tool, args)` 返回 `ihtml.ProposedToolCall`，应只包含
+可以公开的标题、风险、原因与参数摘要，不能暴露凭据或敏感原始参数。
+桥接层生成确认 id/nonce/签名并绑定服务端 Scope。`ApprovalRequired` 工具被调用时
+保存原始 handler/args，发 `confirmation_required`，返回 pending receipt；此时**没有执行**。
+普通 Engine 轮次必须收尾，UI 才开放确认/撤销操作。
+
+确认后验证签名并消费 nonce，只执行 stored 调用，执行前再运行
+`ToolExecutionGuard`。签名表示调用完整性而非业务授权，guard 不可省略。
+撤销消费同一 nonce 并发送 `cancel_tool_result`，不执行 handler。
+`Access.ReadOnly` 会移除非读工具；不能为了让确认卡可点击而绕过真实写权限。
+
+`CompleteTool(ctx, session, *assistant.ConfirmedToolResult)` 接收实际执行证据，包括
+`Call/Tool/Args/Result/Err/Started/InvocationScope`。`Started` 区分执行前拒绝和已经进入 handler 的未知结果。
+宿主在此合并权威审计和产品历史；有错误时
+不能单凭 Result 宣称成功，更不能盲目重试未知副作用。它不自动改写或恢复 Eino 的
+pending receipt，不重新运行模型或恢复原计划。复用 `EngineSession` 时，新增 History
+可能不会重新注入已有原生工作记忆；后续轮次应在 `PrepareTurn` 中明确提供经过验证的
+当前状态/执行事实，例如可信 System 中的当前 scratch marker，而不是声称历史已同步 runtime。
+
+默认签名 nonce 与 pending 调用是内存状态。即使使用共享 nonce store，也不等于
+持久化 pending handler/args；连接断开不支持持久恢复确认卡，页面显示缓存不是授权恢复。
+未来 checkpoint/inspect 接入必须另有明确状态、权限和恢复契约，不能伪称现有 manual-only 已支持。
 
 ## 可扩展对话页面
 
@@ -152,8 +219,12 @@ getMessages 返回至多 100 条、合计 512 KiB 的独立显示快照，不含
 ## 运行与验证
 
 `go run ./example/assistant` 提供本机独立助手；没有显式密钥时仅运行标明预览的
-确定性 Engine。示例源码展示真实 Engine 和桥接层的组合，生产必须更换开发鉴权、
-增加规范历史存储、权限校验、执行超时及审计。预览不声称完成任何业务操作。
+确定性 Engine，完全不读取 API 凭据、不发模型请求。点击 `Mark scratch` 提议更新
+当前连接的内存标记，确认才修改；撤销无副作用，`Check marker` 读取真实标记。
+确认卡只影响 scratch，不写文件、业务数据或 UI 页面；HTTP UI 写入口全部拒绝。
+断开后的新连接从 `unmarked` 开始，不恢复待确认工具。
+示例源码展示真实 Engine 和桥接层的组合，生产必须更换开发鉴权、
+增加规范历史存储、权限校验、执行超时及审计。预览不声称完成任何真实业务操作。
 
 回归套件：`go test -race ./...`、`node --test web/*.test.js`、`go vet ./...`。
 前端测试首次运行先执行 `npm ci` 和 `npx playwright install chromium`。

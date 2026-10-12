@@ -664,15 +664,15 @@
         const mode = String(raw || '').trim().toLowerCase();
         if (KNOWN_MODES.includes(mode)) seen.add(mode);
       }
-      // Fast 是协议的安全基线；旧服务端未下发 agent_modes 时仍可用。
-      seen.add('fast');
-      return KNOWN_MODES.filter((mode) => seen.has(mode));
+      // Missing/empty legacy capabilities fall back to Fast; an explicit
+      // supported list must not gain capabilities the server did not declare.
+      return seen.size ? Array.from(seen) : ['fast'];
     }
 
     function selectMode(modes, preferred) {
       const available = normalizeModes(modes);
       const wanted = String(preferred || '').trim().toLowerCase();
-      return available.includes(wanted) ? wanted : 'fast';
+      return available.includes(wanted) ? wanted : available[0];
     }
 
     function requestSnapshot(modes, preferred, model, modelSelect) {

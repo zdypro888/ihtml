@@ -146,6 +146,8 @@ func TestToolEventReferenceAllowlistsAndBoundsDisplayMetadata(t *testing.T) {
 func TestOversizedConfirmationCardIsRejectedBeforeSigning(t *testing.T) {
 	rt, sink, _ := newTestRuntime(t)
 	rt.cfg.AllowUnconfirmedItemWrites = false
+	store := &countingConfirmNonceStore{ConfirmNonceStore: newMemoryConfirmNonceStore()}
+	rt.signer = newConfirmSigner([]byte("payload-guard-test"), store)
 	content := strings.Repeat("<", 220<<10)
 	arguments := `{"items":[{"id":"large-card","type":"html","content":"` + content + `"}]}`
 	out, err := findTool(t, rt, "ui_item_put").InvokableRun(context.Background(), arguments)
@@ -158,12 +160,8 @@ func TestOversizedConfirmationCardIsRejectedBeforeSigning(t *testing.T) {
 	if pending := rt.timeline.pendingCalls(); len(pending) != 0 {
 		t.Fatalf("oversized confirmation was signed: %+v", pending)
 	}
-	nonces := rt.signer.nonces.(*memoryConfirmNonceStore)
-	nonces.mu.Lock()
-	issued := len(nonces.nonces)
-	nonces.mu.Unlock()
-	if issued != 0 {
-		t.Fatalf("oversized confirmation reached signer: issued nonces=%d", issued)
+	if store.puts != 0 {
+		t.Fatalf("oversized confirmation reached signer: issued nonces=%d", store.puts)
 	}
 	sink.mu.Lock()
 	defer sink.mu.Unlock()
@@ -172,6 +170,16 @@ func TestOversizedConfirmationCardIsRejectedBeforeSigning(t *testing.T) {
 			t.Fatalf("oversized confirmation event escaped: encoded candidate=%#v", event)
 		}
 	}
+}
+
+type countingConfirmNonceStore struct {
+	ConfirmNonceStore
+	puts int
+}
+
+func (s *countingConfirmNonceStore) Put(ctx context.Context, nonce string, expiry time.Time) error {
+	s.puts++
+	return s.ConfirmNonceStore.Put(ctx, nonce, expiry)
 }
 
 func TestAcceptedConfirmationEventFitsInboundFrame(t *testing.T) {

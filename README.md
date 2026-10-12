@@ -29,6 +29,7 @@
 | `ihtml/agent` | 与引擎无关的 Tool、TurnRequest、流式 Step、Usage 与 Engine 契约 |
 | `ihtml/agent/eino` | 通用 Eino 执行循环、原生 Responses/Chat Completions/Claude 模型适配、动态工具与持久会话接口 |
 | `ihtml/assistant` | 将宿主的 `agent.Engine` 接到对话协议，宿主通过 PrepareTurn/CompleteTurn/ToolExecutionGuard 保留业务治理 |
+| `ihtml/confirmation` | 可复用确认卡签名与一次性核销；绑定用户、会话和能力边界，确认与撤销共用原子边界，不代替业务授权 |
 | `ihtml/chat/config` | 严格、版本化、可嵌入宿主配置的 AI JSON loader；SecretResolver 显式注入 |
 | `ihtml/sqlstore` | `database/sql` 持久化实现；驱动与 `*sql.DB` 生命周期由宿主拥有 |
 | `ihtml/redisbroadcast` | 多副本实时事件：非阻塞 Redis Pub/Sub + 用户级全局单调版本；`*redis.Client` 与 Broadcaster 生命周期均由宿主关闭 |

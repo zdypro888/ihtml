@@ -380,12 +380,23 @@ test('new accessibility and read-only strings exist in both locales', () => {
 
 test('chat agent modes default safely and request snapshots do not drift', () => {
   assert.deepEqual(chatAgent.normalizeModes(undefined), ['fast']);
-  assert.deepEqual(chatAgent.normalizeModes([' DEEP ', 'unknown', 'deep']), ['fast', 'deep']);
+  assert.deepEqual(chatAgent.normalizeModes([' DEEP ', 'unknown', 'deep']), ['deep']);
   assert.equal(chatAgent.selectMode(['fast'], 'deep'), 'fast');
   assert.equal(chatAgent.selectMode(['fast', 'deep'], 'deep'), 'deep');
   const snapshot = chatAgent.requestSnapshot(['fast', 'deep'], 'deep', 'model-a', true);
   assert.deepEqual(snapshot, { agentMode: 'deep', model: 'model-a' });
   assert.deepEqual(chatAgent.requestSnapshot(['fast'], 'deep', 'hidden-model', false), { agentMode: 'fast', model: '' });
+});
+
+test('explicit agent modes constrain restored selection and outgoing snapshots', () => {
+  for (const modes of [null, undefined, []]) {
+    assert.deepEqual(chatAgent.normalizeModes(modes), ['fast']);
+    assert.equal(chatAgent.selectMode(modes, 'deep'), 'fast');
+  }
+  assert.deepEqual(chatAgent.normalizeModes(['deep', 'fast', 'deep']), ['deep', 'fast']);
+  assert.equal(chatAgent.selectMode(['deep'], 'fast'), 'deep');
+  assert.equal(chatAgent.selectMode(['deep', 'fast'], 'obsolete'), 'deep');
+  assert.deepEqual(chatAgent.requestSnapshot(['deep'], 'fast', 'model-a', true), { agentMode: 'deep', model: 'model-a' });
 });
 
 test('confirmation dismissal builds cancel_tool without changing the signed card', () => {

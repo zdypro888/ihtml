@@ -5463,6 +5463,7 @@
           this.dom.panel.classList.toggle('has-agent-modes', deepAvailable);
           for (const [key, button] of Object.entries(this.dom.modeButtons || {})) {
             const selected = key === this.agentMode;
+            button.hidden = !this.agentModes.includes(key);
             button.setAttribute('aria-checked', String(selected));
             button.tabIndex = selected ? 0 : -1;
             button.disabled = !this.agentModes.includes(key) || this.active || this.sending;

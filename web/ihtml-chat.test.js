@@ -21,13 +21,14 @@ async function fixture(t, viewport = { width: 1100, height: 800 }, device = {}) 
   await page.evaluate(() => {
     window.calls = []; window.sockets = []; window.events = [];
     window.identity = 'alice'; window.readOnly = false; window.configStatus = 200;
+    window.agentModes = ['fast', 'deep'];
     window.fetch = async (url, init) => {
       const pathname = new URL(url).pathname;
       calls.push({ url: String(url), headers: init.headers });
       const data = pathname.endsWith('/api/config')
         ? { user: identity, chat: true, read_only: readOnly, params: {} }
         : pathname.endsWith('/api/chat/models')
-          ? { model_ready: true, model_select: false, models: [], agent_modes: ['fast', 'deep'], deep_approval_resume: 'manual_tool_only' }
+          ? { model_ready: true, model_select: false, models: [], agent_modes: agentModes, deep_approval_resume: 'manual_tool_only' }
           : {};
       const status = pathname.endsWith('/api/config') ? configStatus : 200;
       return { ok: status === 200, status, statusText: 'Unavailable', text: async () => JSON.stringify(data) };
@@ -51,6 +52,47 @@ async function fixture(t, viewport = { width: 1100, height: 800 }, device = {}) 
   await page.addScriptTag({ path: path.join(__dirname, 'ihtml.js') });
   return page;
 }
+
+test('deep-only capabilities hide Fast, replace stale saved Fast and send only Deep', async (t) => {
+  const page = await fixture(t);
+  await page.evaluate(async () => {
+    window.a = ihtml.mountChat('#a', { storageKey: 'mode-contract' }); await a.ready();
+    a.root.querySelector('[data-agent-mode="fast"]').click();
+    a.destroy(); window.agentModes = ['deep'];
+    window.a = ihtml.mountChat('#a', { storageKey: 'mode-contract' }); await a.ready();
+  });
+  for (const viewport of [{ width: 1100, height: 800 }, { width: 390, height: 844 }]) {
+    await page.setViewportSize(viewport);
+    assert.equal(await page.locator('#a [data-agent-mode="fast"]').isVisible(), false);
+    assert.equal(await page.locator('#a [data-agent-mode="deep"]').isVisible(), true);
+    assert.equal(await page.locator('#a [data-agent-mode="fast"]').evaluate(button => getComputedStyle(button).display), 'none');
+  }
+  assert.equal(await page.locator('#a [data-agent-mode="deep"]').getAttribute('aria-checked'), 'true');
+  await page.locator('#a [data-agent-mode="deep"]').focus();
+  await page.keyboard.press('ArrowRight');
+  assert.equal(await page.locator('#a [data-agent-mode="deep"]').getAttribute('aria-checked'), 'true');
+  const result = await page.evaluate(async () => {
+    // Even a stale programmatic click cannot select an undeclared mode.
+    a.root.querySelector('[data-agent-mode="fast"]').click();
+    await a.chat.send('Deep only');
+    return { mode: sockets[0].sent[0].agent_mode, selected: a.root.querySelector('[aria-checked="true"]').dataset.agentMode };
+  });
+  assert.deepEqual(result, { mode: 'deep', selected: 'deep' });
+});
+
+test('legacy missing or empty modes still select and send Fast', async (t) => {
+  const page = await fixture(t);
+  for (const modes of [undefined, null, []]) {
+    const result = await page.evaluate(async (modes) => {
+      window.agentModes = modes;
+      window.a = ihtml.mountChat('#a'); await a.ready();
+      await a.chat.send('Legacy');
+      const result = { mode: sockets.at(-1).sent[0].agent_mode, modebarHidden: a.root.querySelector('.ihtml-agent-modebar').hidden };
+      a.destroy(); return result;
+    }, modes);
+    assert.deepEqual(result, { mode: 'fast', modebarHidden: true });
+  }
+});
 
 test('inline assistant shares protocol, isolates instances, sanitizes content and observes detached events', async (t) => {
   const page = await fixture(t);
@@ -216,6 +258,80 @@ test('getMessages is UTF-8 bounded to 100 messages and 512 KiB and can be remoun
   assert.ok(result.bytes <= 512 * 1024);
   assert.deepEqual(result.replay, result.byteBounded);
   assert.doesNotMatch(JSON.stringify(result.byteBounded), /\ufffd/);
+});
+
+test('manual_tool_only confirmation requires turn completion, reconnects and executes one historical card', async (t) => {
+  const page = await fixture(t);
+  await page.evaluate(async () => {
+    window.a = ihtml.mountChat('#a'); await a.ready(); await a.chat.send('Two actions');
+    window.manualCalls = [1, 2].map(id => ({ id: 'c' + id, name: 'write', risk: 'high', approval_resume: 'manual_tool_only', confirmation_nonce: 'n' + id, confirmation_token: 'SIGNED' + id, confirmation_expires: Math.floor(Date.now() / 1000) + 600, body: { value: id } }));
+    sockets[0].emit({ type: 'turn_start', run_id: 'proposal', seq: 1 });
+    manualCalls.forEach((tool_call, i) => sockets[0].emit({ type: 'confirmation_required', run_id: 'proposal', seq: i + 2, tool_call }));
+  });
+  assert.equal(await page.locator('#a .t-actions button:disabled').count(), 4);
+  await page.evaluate(() => sockets[0].emit({ type: 'assistant_done', run_id: 'proposal', seq: 4, message: 'Awaiting explicit approval', content_format: 'text' }));
+  assert.equal(await page.locator('#a .t-actions button:enabled').count(), 4);
+  await page.evaluate(() => sockets[0].close());
+  await page.locator('#a .t-actions .ok').first().click();
+  await page.waitForFunction(() => sockets.length === 2 && sockets[1].sent.length === 1);
+  const confirmed = await page.evaluate(() => ({ frame: sockets[1].sent[0], busy: a.chat.busy, statuses: Array.from(a.root.querySelectorAll('.ihtml-tool')).map(n => n.dataset.status), disabled: a.root.querySelectorAll('.t-actions button:disabled').length }));
+  assert.equal(confirmed.frame.type, 'confirm_tool');
+  assert.equal(confirmed.frame.tool_call.id, 'c1');
+  assert.equal(confirmed.frame.tool_call.confirmation_token, 'SIGNED1');
+  assert.equal(confirmed.frame.messages, undefined);
+  assert.deepEqual(confirmed.statuses, ['running', 'pending']);
+  assert.equal(confirmed.busy, true);
+  assert.equal(confirmed.disabled, 2);
+  await page.evaluate(() => {
+    sockets[1].emit({ type: 'turn_start', run_id: 'confirmed', seq: 1 });
+    sockets[1].emit({ type: 'tool_start', run_id: 'confirmed', seq: 2, tool_call: manualCalls[0] });
+    sockets[1].emit({ type: 'tool_result', run_id: 'confirmed', seq: 3, tool_call: manualCalls[0], tool_status: 'success', tool_summary: 'Stored call executed' });
+    sockets[1].emit({ type: 'assistant_done', run_id: 'confirmed', seq: 4, message: 'Only the approved tool executed', content_format: 'text' });
+  });
+  assert.deepEqual(await page.evaluate(() => ({ busy: a.chat.busy, statuses: Array.from(a.root.querySelectorAll('.ihtml-tool')).map(n => n.dataset.status) })), { busy: false, statuses: ['success', 'pending'] });
+  await page.locator('#a .t-actions .ok').click();
+  await page.waitForFunction(() => sockets[1].sent.length === 2);
+  await page.evaluate(() => {
+    sockets[1].emit({ type: 'turn_start', run_id: 'rejected', seq: 1 });
+    sockets[1].emit({ type: 'tool_result', run_id: 'rejected', seq: 2, tool_call: manualCalls[1], tool_status: 'error', tool_summary: 'Approval rejected' });
+    sockets[1].emit({ type: 'turn_error', run_id: 'rejected', seq: 3, error: 'Approval rejected' });
+  });
+  assert.equal(await page.evaluate(() => a.chat.busy), false);
+  assert.equal(await page.locator('#a .ihtml-tool[data-status="error"]').count(), 1);
+});
+
+test('manual_tool_only cancellation matches id and nonce, waits for ACK, fails closed on timeout and expires locally', async (t) => {
+  const page = await fixture(t);
+  await page.evaluate(async () => {
+    window.a = ihtml.mountChat('#a'); await a.ready(); await a.chat.send('Actions');
+    window.manualCalls = [1, 2, 3, 4].map(id => ({ id: 'c' + id, name: 'write', approval_resume: 'manual_tool_only', confirmation_nonce: 'n' + id, confirmation_token: 'SIGNED' + id, confirmation_expires: Math.floor(Date.now() / 1000) + (id === 4 ? -1 : 600) }));
+    sockets[0].emit({ type: 'turn_start', run_id: 'proposal', seq: 1 });
+    manualCalls.forEach((tool_call, i) => sockets[0].emit({ type: 'confirmation_required', run_id: 'proposal', seq: i + 2, tool_call }));
+    sockets[0].emit({ type: 'assistant_done', run_id: 'proposal', seq: 6, message: 'Approve or dismiss' });
+  });
+  assert.equal(await page.locator('#a .ihtml-tool[data-status="cancelled"]').count(), 1);
+  await page.locator('#a .t-actions button:not(.ok)').first().click();
+  await page.waitForFunction(() => sockets[0].sent.length === 2);
+  assert.equal(await page.evaluate(() => sockets[0].sent[1].type), 'cancel_tool');
+  assert.equal(await page.evaluate(() => a.chat.busy), true);
+  await page.evaluate(() => sockets[0].emit({ type: 'cancel_tool_result', tool_id: 'c1', confirmation_nonce: 'WRONG', tool_status: 'cancelled' }));
+  assert.equal(await page.evaluate(() => a.chat.busy), true);
+  await page.evaluate(() => sockets[0].emit({ type: 'cancel_tool_result', tool_id: 'c1', confirmation_nonce: 'n1', tool_status: 'cancelled', tool_summary: 'Not executed' }));
+  assert.equal(await page.evaluate(() => a.chat.busy), false);
+  assert.equal(await page.locator('#a .ihtml-tool[data-status="cancelled"]').count(), 2);
+  await page.locator('#a .t-actions button:not(.ok)').first().click();
+  await page.waitForFunction(() => sockets[0].sent.length === 3);
+  await page.evaluate(() => sockets[0].emit({ type: 'cancel_tool_result', tool_id: 'c2', confirmation_nonce: 'n2', tool_status: 'error', error: 'Authorization: Bearer PRIVATE_SECRET' }));
+  assert.equal(await page.evaluate(() => a.chat.busy), false);
+  assert.doesNotMatch(await page.locator('#a').innerText(), /PRIVATE_SECRET/);
+  await page.evaluate(() => {
+    const original = window.setTimeout;
+    window.setTimeout = (fn, delay, ...args) => original(fn, delay === 12000 ? 50 : delay, ...args);
+  });
+  await page.locator('#a .t-actions button:not(.ok)').click();
+  await page.waitForFunction(() => !a.chat.busy);
+  assert.equal(await page.locator('#a .ihtml-tool[data-status="error"]').count(), 2);
+  assert.equal(await page.locator('#a .t-actions').count(), 0);
 });
 
 test('connectionAuth in flight is revoked; clear renews session and destroy permits remount', async (t) => {
