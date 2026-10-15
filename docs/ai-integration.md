@@ -303,6 +303,7 @@ checkpoint 按命名空间隔离，默认序列化器保留 typed Eino 消息。
 者，并自行负责会话归属、能力变更、审批持久化、失效和保留周期。只有接通这些
 边界后才能声明跨进程恢复；不可把模型私有工作记忆直接当作用户可读取的聊天
 记录。事件与 checkpoint 单条上限 16 MiB。
+宿主可配置 `Config.BeforeWrite(ctx, tx)`，在每次事件或 checkpoint 修改的同一事务中锁定并验证执行 owner；拒绝时整笔事务回滚。读取授权仍由宿主负责，`Init` 不调用该钩子。
 测试：设置 `IHTML_TEST_POSTGRES_DSN` 后执行 `go test -race ./agent/eino/sqlstore`。
 
 确认帧发出后若连接中断，或用户停止尚未回报结果的写操作，工具卡显示 `unknown`

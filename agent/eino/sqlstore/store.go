@@ -23,12 +23,18 @@ const MaxPayloadBytes = 16 << 20
 type Config struct {
 	Namespace       string
 	EventSerializer schema.Serializer
+	// BeforeWrite runs inside every mutation transaction before storage changes.
+	// Hosts can lock and verify their execution-owner row here, making fencing
+	// atomic with event/checkpoint writes. Return an error to roll back the write.
+	// Read methods do not call it; read authorization remains the host's job.
+	BeforeWrite func(context.Context, *sql.Tx) error
 }
 
 type Store[M adk.MessageType] struct {
-	db         *sql.DB
-	namespace  string
-	serializer schema.Serializer
+	db          *sql.DB
+	namespace   string
+	serializer  schema.Serializer
+	beforeWrite func(context.Context, *sql.Tx) error
 }
 
 func New[M adk.MessageType](db *sql.DB, cfg Config) (*Store[M], error) {
@@ -38,7 +44,7 @@ func New[M adk.MessageType](db *sql.DB, cfg Config) (*Store[M], error) {
 	if cfg.EventSerializer == nil {
 		cfg.EventSerializer = &schema.HumanReadableSerializer{}
 	}
-	return &Store[M]{db: db, namespace: cfg.Namespace, serializer: cfg.EventSerializer}, nil
+	return &Store[M]{db: db, namespace: cfg.Namespace, serializer: cfg.EventSerializer, beforeWrite: cfg.BeforeWrite}, nil
 }
 
 // Init is an explicit migration, never called by reads or New.
@@ -65,6 +71,23 @@ func validID(id string) error {
 		return errors.New("eino sqlstore: invalid identifier")
 	}
 	return nil
+}
+
+func (s *Store[M]) write(ctx context.Context, fn func(*sql.Tx) error) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if s.beforeWrite != nil {
+		if err := s.beforeWrite(ctx, tx); err != nil {
+			return err
+		}
+	}
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store[M]) AppendEvents(ctx context.Context, id string, events []*adk.SessionEvent[M]) error {
@@ -108,6 +131,11 @@ func (s *Store[M]) AppendEvents(ctx context.Context, id string, events []*adk.Se
 		return err
 	}
 	defer tx.Rollback()
+	if s.beforeWrite != nil {
+		if err := s.beforeWrite(ctx, tx); err != nil {
+			return err
+		}
+	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO ihtml_agent_sessions(namespace,session_id) VALUES($1,$2) ON CONFLICT DO NOTHING`, s.namespace, id); err != nil {
 		return err
 	}
@@ -250,15 +278,19 @@ func (s *Store[M]) Set(ctx context.Context, id string, b []byte) error {
 	if b == nil {
 		b = []byte{}
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO ihtml_agent_checkpoints(namespace,checkpoint_id,payload) VALUES($1,$2,$3) ON CONFLICT(namespace,checkpoint_id) DO UPDATE SET payload=EXCLUDED.payload`, s.namespace, id, b)
-	return err
+	return s.write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO ihtml_agent_checkpoints(namespace,checkpoint_id,payload) VALUES($1,$2,$3) ON CONFLICT(namespace,checkpoint_id) DO UPDATE SET payload=EXCLUDED.payload`, s.namespace, id, b)
+		return err
+	})
 }
 func (s *Store[M]) Delete(ctx context.Context, id string) error {
 	if err := validID(id); err != nil {
 		return err
 	}
-	_, err := s.db.ExecContext(ctx, `DELETE FROM ihtml_agent_checkpoints WHERE namespace=$1 AND checkpoint_id=$2`, s.namespace, id)
-	return err
+	return s.write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `DELETE FROM ihtml_agent_checkpoints WHERE namespace=$1 AND checkpoint_id=$2`, s.namespace, id)
+		return err
+	})
 }
 func (s *Store[M]) DeleteSession(ctx context.Context, id string) error {
 	if err := validID(id); err != nil {
@@ -269,6 +301,11 @@ func (s *Store[M]) DeleteSession(ctx context.Context, id string) error {
 		return err
 	}
 	defer tx.Rollback()
+	if s.beforeWrite != nil {
+		if err := s.beforeWrite(ctx, tx); err != nil {
+			return err
+		}
+	}
 	if _, err = tx.ExecContext(ctx, `DELETE FROM ihtml_agent_sessions WHERE namespace=$1 AND session_id=$2`, s.namespace, id); err != nil {
 		return err
 	}

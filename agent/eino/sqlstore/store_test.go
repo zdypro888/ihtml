@@ -123,3 +123,48 @@ func TestPostgresIsolationAtomicityAndRestart(t *testing.T) {
 		t.Fatalf("empty checkpoint: %v", err)
 	}
 }
+
+// Ownership changes and event/checkpoint writes share the host row lock. A
+// rejected guard must leave every storage mutation rolled back.
+func TestPostgresWriteGuardFencesAllMutations(t *testing.T) {
+	s := testStore(t, nil)
+	ctx := context.Background()
+	if err := s.AppendEvents(ctx, "session", []*adk.SessionEvent[*schema.Message]{event("first", "retained")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Set(ctx, "session/runner_checkpoint", []byte("retained")); err != nil {
+		t.Fatal(err)
+	}
+	denied := errors.New("owner changed")
+	guarded, err := New[*schema.Message](s.db, Config{Namespace: s.namespace, BeforeWrite: func(ctx context.Context, tx *sql.Tx) error {
+		// This write is deliberately before rejection: it too must roll back.
+		_, err := tx.ExecContext(ctx, `DELETE FROM ihtml_agent_events WHERE namespace=$1`, s.namespace)
+		if err != nil {
+			return err
+		}
+		return denied
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fn := range []func() error{
+		func() error {
+			return guarded.AppendEvents(ctx, "session", []*adk.SessionEvent[*schema.Message]{event("second", "denied")})
+		},
+		func() error { return guarded.Set(ctx, "session/runner_checkpoint", []byte("denied")) },
+		func() error { return guarded.Delete(ctx, "session/runner_checkpoint") },
+		func() error { return guarded.DeleteSession(ctx, "session") },
+	} {
+		if !errors.Is(fn(), denied) {
+			t.Fatal("write did not propagate ownership rejection")
+		}
+	}
+	loaded, err := guarded.LoadEvents(ctx, "session", nil)
+	if err != nil || len(loaded.Events) != 1 || loaded.Events[0].Message.Content != "retained" {
+		t.Fatalf("events changed: %v %v", loaded, err)
+	}
+	b, ok, err := guarded.Get(ctx, "session/runner_checkpoint")
+	if err != nil || !ok || string(b) != "retained" {
+		t.Fatal("checkpoint changed after rejected write")
+	}
+}
