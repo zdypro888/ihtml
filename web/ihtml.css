@@ -2078,3 +2078,22 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
 
 /* 流程摘要与详情不重复；hidden 不能被布局规则覆盖。 */
 .ihtml-chat .pbody[hidden], .ihtml-chat .ihtml-pline[hidden] { display: none !important; }
+
+/* 当前状态与历史分离；确认和异常始终可见，不依赖展开过程。 */
+.ihtml-chat .ihtml-trace-actions { display: grid; gap: 10px; min-width: 0; margin-top: 10px; }
+.ihtml-chat .ihtml-trace-actions[hidden], .ihtml-chat .t-summary[hidden],
+.ihtml-chat .ihtml-agent-overview[hidden] { display: none !important; }
+.ihtml-process.is-empty > summary { cursor: default; }
+.ihtml-process.is-empty > summary::after { display: none; }
+.ihtml-process .p-title { flex: 1 1 140px; font-weight: 500; }
+.ihtml-process .p-meta { flex: 0 1 auto; font-variant-numeric: tabular-nums; font-size: 11px; }
+.ihtml-process .pbody > .ihtml-tool,
+.ihtml-process .pbody > .ihtml-think { background: transparent; border-color: transparent; border-radius: 4px; }
+.ihtml-process .pbody > .ihtml-tool > summary { padding: 5px 22px 5px 0; min-height: 32px; }
+.ihtml-process .pbody > .ihtml-think > summary { padding-left: 0; }
+.ihtml-process .pbody > .ihtml-tool:not([open]) .t-summary { display: none; }
+.ihtml-trace-actions .ihtml-tool[data-status="pending"] > summary .t-summary { display: none; }
+.ihtml-trace-actions .t-reason { margin-top: 0; }
+@media (prefers-reduced-motion: reduce) {
+  .ihtml-process .p-dot, .ihtml-think .p-dot { animation: none !important; }
+}

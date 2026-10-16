@@ -1165,3 +1165,11 @@ test('host API cards use their readable title while retaining technical request 
  assert.ok(!view.facts.some(fact=>fact.value.includes('api_platform_user_delete')));
  assert.ok(view.request.includes('/api/v1/admin/users/virtual'));
 });
+
+
+test('completed host cards do not recycle proposal reasons as execution results',()=>{
+ const view=chatTrace.toolView({name:'api_save',title:'保存偏好',reason:'确认前请核对设置',method:'PUT',path:'/settings',body:{'操作':'更新设置'}},{type:'tool_result',tool_status:'success'},makeT('zh'));
+ assert.equal(view.summary,'保存偏好');
+ assert.ok(view.facts.some(f=>f.label==='操作'&&f.value==='更新设置'));
+ assert.ok(!view.summary.includes('确认前'));
+});

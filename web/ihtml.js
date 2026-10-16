@@ -5754,6 +5754,8 @@
             if (segment.frame) cancelAnimationFrame(segment.frame);
             segment.frame = 0;
           }
+          if (turn.clock) clearInterval(turn.clock);
+          turn.clock = 0;
           for (const rec of turn.tools.values()) {
             if (rec.confirmAbort) rec.confirmAbort.abort();
             rec.confirmAbort = null;
@@ -6086,7 +6088,7 @@
         card.appendChild(el('div', 'author', 'AI'));
         const process = el('details', 'ihtml-process active');
         process.setAttribute('aria-busy', 'true');
-        process.open = true;
+        process.open = false;
         const summary = el('summary', 'ihtml-process-head');
         const processDot = el('span', 'p-dot');
         processDot.setAttribute('aria-hidden', 'true');
@@ -6098,10 +6100,13 @@
         const answer = el('div', 'answer');
         answer.style.display = 'none';
         answer.setAttribute('aria-live', 'off');
-        card.append(process, answer);
+        const actions = el('div', 'ihtml-trace-actions');
+        actions.hidden = true;
+        card.append(process, answer, actions);
         this.log.appendChild(card);
         const turn = {
-          card, process, processSummary: summary, processDot, note, pBody, answer,
+          card, process, processSummary: summary, processLabel: label, processDot, note, pBody, answer, actions,
+          processPinned: false, elapsedMS: 0, clockStartedAt: null, clock: 0,
           agentMode: chatAgentCore.selectMode(this.agentModes, agentMode),
           agentState: chatAgentCore.initialState(agentMode), agentOverview: null,
           text: '', textBytes: 0, textTruncated: false, contentFormat: 'auto', lastKind: '', lastStatusNode: null,
@@ -6112,10 +6117,17 @@
           thinkingSegments: new Map(), activeThinkingID: '', legacyThinkingSeq: 0,
           anonymousToolQueues: new Map(), anonymousToolAliases: new Map(), anonymousToolSeq: 0,
         };
+        // 用户主动展开后保持阅读状态，后续流式事件不擅自收起。
+        summary.addEventListener('click', event => {
+          if (pBody.hidden) { event.preventDefault(); return; }
+          turn.processPinned = !process.open;
+          if (turn.processPinned) this.setFollowing(false);
+        });
         card._turn = turn;
         this.turn = turn;
         this.lastAnnouncement = '';
         this.announce(T('analyzing'));
+        this.updateProcess(turn);
         this.scroll(true);
         return turn;
       },
@@ -6132,13 +6144,14 @@
           const running = Array.from(t.tools.values()).filter((rec) => rec.status === 'running');
           if (running.length === 1) return T('running_tool', { name: running[0].title.textContent });
           if (running.length > 1) return T('tools_running', { n: running.length });
-          if (t.agentState && t.agentState.manualPaused) return T('agent_plan_paused');
+          if (t.agentState && t.agentState.manualPaused && t.agentState.plan.length) return T('agent_plan_paused');
           if (t.text) return T('answering');
-          return T('analyzing');
+          if (t.activeThinkingID) return T('reasoning_streaming');
+          return t.lastStatusNode && t.lastStatusNode.dataset.persistent !== 'true' ? t.lastStatusNode.textContent : T('analyzing');
         }
         if (t.turnFailed) return T('turn_failed');
         if (t.errorCount > 0) return T('tools_failed', { n: t.errorCount });
-        if (t.agentState && t.agentState.manualPaused) return T('agent_plan_paused');
+        if (t.agentState && t.agentState.manualPaused && t.agentState.plan.length) return T('agent_plan_paused');
         const steps = this.processStepCount(t);
         if (steps > 0) return T('steps_completed', { n: steps });
         return T('done');
@@ -6172,6 +6185,25 @@
         if (t.pendingCount > 0 || t.errorCount > 0 || t.unknownCount > 0) return true;
         return Array.from(t.tools.values()).some((rec) => rec.status === 'running');
       },
+      renderProcessMeta(t) {
+        const elapsed = t.elapsedMS + (t.clockStartedAt == null ? 0 : performance.now() - t.clockStartedAt);
+        const parts = [];
+        if (t.toolCount) parts.push(T('trace_tool_count', {n: t.toolCount}));
+        parts.push(T('trace_elapsed', {n: Math.max(0, Math.floor(elapsed / 1000))}));
+        t.note.textContent = parts.join(' · ');
+      },
+      syncProcessClock(t) {
+        // 等待人工确认不计入执行耗时；恢复执行时接着累计，销毁时统一回收。
+        const working = !t.done && !t.cancelled && !t.pendingCount;
+        if (working && t.clockStartedAt == null) t.clockStartedAt = performance.now();
+        if (!working && t.clockStartedAt != null) {
+          t.elapsedMS += performance.now() - t.clockStartedAt;
+          t.clockStartedAt = null;
+        }
+        if (working && !t.clock) t.clock = setInterval(() => this.renderProcessMeta(t), 1000);
+        if (!working && t.clock) { clearInterval(t.clock); t.clock = 0; }
+        this.renderProcessMeta(t);
+      },
       updateProcess(t) {
         t = t || this.turn;
         if (!t || !t.process || !t.process.isConnected) return;
@@ -6180,22 +6212,28 @@
         t.process.classList.toggle('active', !t.done);
         t.process.classList.toggle('pending', t.pendingCount > 0);
         t.process.classList.toggle('error', t.turnFailed || t.errorCount > 0);
-        t.process.classList.toggle('paused', !!(t.agentState && t.agentState.manualPaused));
+        t.process.classList.toggle('paused', !!(t.agentState && t.agentState.manualPaused && t.agentState.plan.length));
         t.process.dataset.state = t.cancelled ? 'cancelled' : (t.turnFailed || t.errorCount > 0 ? 'error' : (t.pendingCount > 0 ? 'pending' : (t.done ? 'complete' : 'running')));
         t.process.setAttribute('aria-busy', String(!t.done));
-        t.note.textContent = this.processSummaryText(t);
+        const status = this.processSummaryText(t);
+        t.processLabel.textContent = status;
+        this.syncProcessClock(t);
+        t.actions.hidden = !t.actions.childNodes.length;
+        // 无实际计划时，不再用第二张“操作确认”概览重复待确认工具卡。
+        if (t.agentOverview) t.agentOverview.hidden = !t.agentOverview._pinned && !t.agentState.plan.length && (t.pendingCount > 0 || t.agentState.manualPaused);
         // 通用等待提示只在摘要显示一次；不同的状态详情、错误和工具卡仍保留。
         for (const node of t.pBody.querySelectorAll('.ihtml-pline[data-persistent="false"]')) {
-          node.hidden = node.textContent.trim() === t.note.textContent.trim();
+          node.hidden = node.textContent.trim() === status.trim() || node.textContent.trim() === T('analyzing');
         }
         t.pBody.hidden = !Array.from(t.pBody.children).some((node) => !node.hidden);
+        t.process.classList.toggle('is-empty', t.pBody.hidden);
+        if (t.pBody.hidden) { collapsed = t.process.open; t.process.open = false; }
         if (t.done) {
           this.finalizeThinking(t);
-          if (t.agentOverview && !t.agentState.manualPaused && !t.errorCount) t.agentOverview.open = false;
-          if (!t.pBody.childNodes.length) t.process.remove();
-          else if (t.pendingCount === 0 && t.errorCount === 0 && !t.unknownCount) { collapsed = t.process.open; t.process.open = false; }
-          else t.process.open = true;
-        } else if (t.text && !this.hasBlockingProcess(t) && !(t.agentState && t.agentState.manualPaused)) {
+          if (t.agentOverview && !t.agentOverview._pinned && !t.agentState.manualPaused && !t.errorCount) t.agentOverview.open = false;
+          if (!t.pBody.childNodes.length && !t.toolCount && !t.turnFailed) t.process.remove();
+          else if (!t.processPinned) { collapsed = t.process.open; t.process.open = false; }
+        } else if (t.text && !t.processPinned && !this.hasBlockingProcess(t) && !(t.agentState && t.agentState.manualPaused)) {
           collapsed = t.process.open;
           t.process.open = false;
           if (t.agentOverview) t.agentOverview.open = false;
@@ -6219,7 +6257,7 @@
         if (node) node.textContent = text;
         else {
           node = el('div', 'ihtml-pline', text);
-          t.pBody.appendChild(node);
+          (isError ? t.actions : t.pBody).appendChild(node);
         }
         t.lastStatusNode = node;
         t.lastKind = 'status';
@@ -6248,13 +6286,13 @@
           segment.state = 'complete';
           segment.wrap.dataset.state = 'complete';
           segment.meta.textContent = T('reasoning_complete');
-          segment.wrap.open = false;
+          if (!segment.pinned) segment.wrap.open = false;
         }
         if (!segmentID || t.activeThinkingID === segmentID) t.activeThinkingID = '';
       },
       collapseThinking(t) {
         if (!t || !t.thinkingSegments) return;
-        for (const segment of t.thinkingSegments.values()) if (segment.state === 'running') segment.wrap.open = false;
+        for (const segment of t.thinkingSegments.values()) if (segment.state === 'running' && !segment.pinned) segment.wrap.open = false;
       },
       appendThinking(delta, ev, t = this.turn) {
         if (!t) return;
@@ -6272,7 +6310,7 @@
           if (t.activeThinkingID && t.activeThinkingID !== id) this.finalizeThinking(t, t.activeThinkingID);
           const wrap = el('details', 'ihtml-think');
           wrap.dataset.state = 'running';
-          wrap.open = !t.text;
+          wrap.open = false;
           const summary = el('summary', 'think-head');
           const dot = el('span', 'p-dot');
           dot.setAttribute('aria-hidden', 'true');
@@ -6283,7 +6321,8 @@
           pre.setAttribute('aria-live', 'off');
           wrap.append(summary, pre);
           t.pBody.appendChild(wrap);
-          segment = { id, wrap, pre, meta, text: '', state: 'running', frame: 0, follow: true, truncated: false };
+          segment = { id, wrap, pre, meta, text: '', state: 'running', frame: 0, follow: true, pinned: false, truncated: false };
+          summary.addEventListener('click', () => { segment.pinned = !wrap.open; if (segment.pinned) this.setFollowing(false); });
           pre.tabIndex = 0;
           let lastThinkingTop = pre.scrollTop;
           pre.addEventListener('scroll', () => {
@@ -6381,6 +6420,7 @@
           const body = el('div', 'body');
           details.append(summary, body);
           t.pBody.insertBefore(details, t.pBody.firstChild);
+          summary.addEventListener('click', () => { details._pinned = !details.open; if (details._pinned) this.setFollowing(false); });
           details._summary = summary;
           details._body = body;
           t.agentOverview = details;
@@ -6457,7 +6497,7 @@
         }
         const hasAgentError = agents.some((stage) => stage.status === 'error');
         if (state.manualPaused || hasAgentError) details.open = true;
-        else if (t.text || t.done) details.open = false;
+        else if ((t.text || t.done) && !details._pinned) details.open = false;
         this.updateProcess(t);
         this.scroll();
       },
@@ -6497,6 +6537,12 @@
           hasTechnical: source.hasTechnical !== undefined ? !!source.hasTechnical : true,
         };
       },
+      syncToolSummary(rec) {
+        if (!rec || !rec.view) return;
+        const summary = rec.note.textContent;
+        // 展开的卡片在正文展示结果；收起后才把结果缩略放回标题，避免读两遍。
+        rec.note.hidden = rec.card.open || !summary || summary === rec.view.title || summary === rec.view.action;
+      },
       setToolStatus(rec, status, t) {
         if (!rec || !t) return;
         const previous = rec.status;
@@ -6530,6 +6576,9 @@
       renderToolRecord(rec, ev, t) {
         if (!rec || !t) return;
         const hadFocus = rec.body.contains(doc.activeElement);
+        rec.attention = rec.attention || ['pending', 'error', 'unknown'].includes(rec.status);
+        const parent = rec.attention ? t.actions : t.pBody;
+        if (rec.card.parentNode !== parent) parent.appendChild(rec.card);
         if (rec.countdown) { clearInterval(rec.countdown); rec.countdown = 0; }
         const view = this.toolView(rec.call, ev || {});
         rec.view = view;
@@ -6538,6 +6587,7 @@
         // Never prefer raw protocol values again in this DOM projection.
         const resultSummary = view.summary || view.action || '';
         rec.note.textContent = resultSummary;
+        rec.note.hidden = rec.status === 'pending' || resultSummary === view.title || resultSummary === view.action;
         rec.body.replaceChildren();
         rec.body.removeAttribute('role');
         rec.body.removeAttribute('aria-labelledby');
@@ -6555,7 +6605,7 @@
           ? (view.action || resultSummary)
           : (resultSummary || view.action)));
         let primary = null;
-        if (primaryText) {
+        if (primaryText && primaryText !== view.title && primaryText !== view.action) {
           primary = el('div', 't-primary' + (rec.status === 'success' || rec.status === 'error' ? ' t-live-result' : ''), primaryText);
           primary.id = rec.domID + '-primary';
           rec.body.appendChild(primary);
@@ -6642,7 +6692,7 @@
           tick();
         }
         if (meta.childNodes.length) rec.body.appendChild(meta);
-        if (rec.call.approval_resume === 'manual_tool_only') {
+        if (rec.status === 'pending' && rec.call.approval_resume === 'manual_tool_only') {
           const manual = el('div', 'ihtml-agent-manual', T('agent_manual_confirm'));
           manual.setAttribute('role', 'note');
           rec.body.appendChild(manual);
@@ -6677,10 +6727,11 @@
           if (primary) rec.body.setAttribute('aria-describedby', primary.id);
         }
         if (rec.status === 'pending' || rec.status === 'error' || rec.status === 'unknown') rec.card.open = true;
-        else if (['success', 'cancelled'].includes(rec.status)) rec.card.open = false;
+        else if (['success', 'cancelled'].includes(rec.status) && !rec.pinned) rec.card.open = false;
+        this.syncToolSummary(rec);
         if (hadFocus) queueMicrotask(() => {
           const owner = rec.ownerTurn;
-          const target = owner && owner.process && !owner.process.open ? owner.processSummary : rec.summary;
+          const target = owner && rec.card.parentNode === owner.pBody && !owner.process.open ? owner.processSummary : rec.summary;
           if (target && target.isConnected) target.focus({ preventScroll: true });
         });
       },
@@ -6735,6 +6786,8 @@
             countedPending: false, countedError: false, countdown: 0, cancelAckTimer: 0,
             cancelPending: false, cancelSent: false, confirmPending: false, interactionError: '', lastEvent: {},
           };
+          summary.addEventListener('click', () => { rec.pinned = !card.open; if (rec.pinned) this.setFollowing(false); });
+          card.addEventListener('toggle', () => this.syncToolSummary(rec));
           t.tools.set(id, rec);
           t.toolCount++;
         }

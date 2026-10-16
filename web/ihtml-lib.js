@@ -17,7 +17,7 @@
       agent_model_budget: '模型 {used}/{max}', agent_subtask_budget: '子任务 {used}/{max}', agent_tool_budget: '工具 {used}/{max}',
       agent_root: '主代理', agent_inspector: '页面检查', agent_reviewer: 'UI 验收',
       agent_status_pending: '待处理', agent_status_running: '进行中', agent_status_completed: '完成', agent_status_paused: '暂停', agent_status_error: '失败',
-      agent_manual_confirm: '确认只执行此卡，Deep 计划不会自动恢复；完成后发送“继续”进行后续验收。',
+      agent_manual_confirm: '确认只执行此操作，不会自动继续其他操作；以实际结果为准。',
       composer_placeholder: '询问问题、分析数据，或描述想创建、修改的页面…', composer_hint: 'Enter 发送 · Shift+Enter 换行',
       welcome: '你可以直接提问、分析业务数据，也可以明确要求创建或修改页面。回答会以合适的 HTML 结构展示在这里。',
       session_reset: '新会话已开始。之前的对话上下文已清空, 页面 Item 不受影响。',
@@ -32,8 +32,8 @@
       cancellation_ack_timeout: '未收到服务器撤销回执，执行状态未知。请重新连接后再确认。', cancellation_failed: '撤销失败，执行状态未确认。',
       confirm_expired: '确认卡已过期, 请重新让 AI 发起。', expires_in: '有效期',
       params_title: '操作参数', debug_title: '调试详情', tools_called: '调用 {n} 个工具',
-      process_steps: '过程', steps_completed: '已完成 {n} 个步骤', tools_running: '正在执行 {n} 项', answering: '正在整理回答',
-      reasoning_step: '分析步骤 {n}', reasoning_streaming: '正在分析', reasoning_complete: '分析完成', technical_details: '技术详情',
+      process_steps: '处理过程', trace_tool_count: '{n} 条工具记录', trace_elapsed: '{n}秒', steps_completed: '已完成 {n} 个步骤', tools_running: '正在执行 {n} 项', answering: '正在整理回答',
+      reasoning_step: '分析摘要 {n}', reasoning_streaming: '正在分析', reasoning_complete: '分析完成', technical_details: '技术详情',
       request_summary: '请求摘要', result_data: '返回结果', diagnostic_data: '诊断信息', tool_reason: '为什么需要确认', review_field: '设置项', review_before: '修改前', review_after: '修改后', review_missing: '未设置', review_partial: '这里只展示部分变更，请核对完整操作内容。',
       confirm_this_action: '确认此操作', dismiss_tool: '暂不执行', answer_complete: '回答已完成',
       answer_complete_summary: '回答已完成：{summary}', answer_truncated: '回答过长，已仅展示前面部分。',
@@ -137,7 +137,7 @@
       agent_model_budget: 'Model {used}/{max}', agent_subtask_budget: 'Subtasks {used}/{max}', agent_tool_budget: 'Tools {used}/{max}',
       agent_root: 'Main agent', agent_inspector: 'Page inspector', agent_reviewer: 'UI reviewer',
       agent_status_pending: 'Pending', agent_status_running: 'Running', agent_status_completed: 'Done', agent_status_paused: 'Paused', agent_status_error: 'Failed',
-      agent_manual_confirm: 'Confirming runs only this card; the Deep plan stays paused. Send “continue” afterward for further verification.',
+      agent_manual_confirm: 'Confirmation runs only this operation. Other operations do not resume automatically; verify the actual result.',
       composer_placeholder: 'Ask a question, analyze data, or describe a page to create or change…', composer_hint: 'Enter to send · Shift+Enter for a new line',
       welcome: 'Ask a question, analyze business data, or explicitly ask me to create or change the page. Answers appear here using an appropriate HTML structure.',
       session_reset: 'New session started. Conversation context cleared; page items are unaffected.',
@@ -152,7 +152,7 @@
       cancellation_ack_timeout: 'No cancellation acknowledgement was received; execution status is unknown. Reconnect before taking further action.', cancellation_failed: 'Cancellation failed; execution status is not confirmed.',
       confirm_expired: 'Confirmation expired; ask the AI again.', expires_in: 'expires in',
       params_title: 'Parameters', debug_title: 'Debug', tools_called: '{n} tool calls',
-      process_steps: 'Process', steps_completed: '{n} steps completed', tools_running: '{n} running', answering: 'Preparing the answer',
+      process_steps: 'Process', trace_tool_count: '{n} tool records', trace_elapsed: '{n}s', steps_completed: '{n} steps completed', tools_running: '{n} running', answering: 'Preparing the answer',
       reasoning_step: 'Reasoning step {n}', reasoning_streaming: 'Analyzing', reasoning_complete: 'Analysis complete', technical_details: 'Technical details',
       request_summary: 'Request summary', result_data: 'Result', diagnostic_data: 'Diagnostics', tool_reason: 'Why confirmation is required', review_field: 'Setting', review_before: 'Before', review_after: 'After', review_missing: 'Not set', review_partial: 'Only part of the changes is shown. Review the complete operation.',
       confirm_this_action: 'Confirm this action', dismiss_tool: 'Not now', answer_complete: 'Answer complete',
@@ -1131,10 +1131,10 @@
       // 宿主已提供可读标题时，通用卡片不用内部工具标识重复充当操作说明。
       if (!meta && (ev.tool_title || source.title)) {
         projected.action = title;
-        projected.facts = projected.facts.filter(fact => fact.label !== t('tool_fact_operation'));
+        projected.facts = projected.facts.filter(fact => fact.label !== t('tool_fact_operation') || fact.value !== name);
       }
       const pending = ev.type === 'confirmation_required' || ev.tool_status === 'pending';
-      const summarySource = pending && source.reason ? source.reason : (ev.tool_summary || source.reason || projected.action);
+      const summarySource = pending && source.reason ? source.reason : (ev.tool_summary || projected.action);
       const summary = safeText(summarySource, SUMMARY_LIMIT);
       const reason = pending && source.reason ? safeText(source.reason, SUMMARY_LIMIT) : '';
       const requestPayload = {};

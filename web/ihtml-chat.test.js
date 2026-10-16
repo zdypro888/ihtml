@@ -762,7 +762,33 @@ test('generic working status appears only in summary and distinct details remain
  assert.equal(await page.locator('#a .pbody').isVisible(),false);
  assert.equal(await page.locator('#a .ihtml-pline:visible').count(),0);
  await page.evaluate(()=>sockets[0].emit({type:'assistant_status',run_id:'status-once',seq:2,status:'正在读取本机模拟数据'}));
- assert.equal(await page.locator('#a .pbody').isVisible(),true);
- assert.equal(await page.locator('#a .ihtml-pline:visible').textContent(),'正在读取本机模拟数据');
+ assert.equal(await page.locator('#a .p-title').textContent(),'正在读取本机模拟数据');
+ assert.equal(await page.locator('#a .ihtml-pline:visible').count(),0);
+ await page.evaluate(()=>a.destroy());
+});
+
+
+test('trace defaults to compact history while signed confirmations stay outside and visible', async(t)=>{
+ const page=await fixture(t,{width:393,height:740});
+ await page.evaluate(async()=>{window.a=ihtml.mountChat('#a',{locale:'zh-CN'});await a.ready();await a.chat.send('本机流程测试');sockets[0].emit({type:'turn_start',run_id:'compact',seq:1});sockets[0].emit({type:'assistant_thinking',run_id:'compact',seq:2,thinking_id:'summary',thinking:'只显示服务端提供的分析摘要'});sockets[0].emit({type:'confirmation_required',run_id:'compact',seq:3,tool_call:{id:'test-write',name:'fixture_save',title:'保存模拟设置',method:'PUT',path:'/fixture',body:{设置:'本机模拟'},risk:'low',confirmation_token:'fixture',confirmation_nonce:'fixture'}});sockets[0].emit({type:'assistant_done',run_id:'compact',seq:4,message:'等待确认。'});});
+ assert.equal(await page.locator('#a .ihtml-process').getAttribute('open'),null);
+ assert.equal(await page.locator('#a .ihtml-process .ihtml-tool').count(),0);
+ assert.equal(await page.locator('#a .ihtml-trace-actions .ihtml-tool[data-status="pending"]').isVisible(),true);
+ assert.equal(await page.getByRole('button',{name:'确认此操作 · 保存模拟设置',exact:true}).isEnabled(),true);
+ assert.equal(await page.locator('#a .think-body').isVisible(),false);
+ await page.evaluate(()=>a.destroy());
+});
+
+test('explicit trace and reasoning expansion survive streamed answers without being folded',async(t)=>{
+ const page=await fixture(t);
+ await page.evaluate(async()=>{window.a=ihtml.mountChat('#a',{locale:'zh-CN'});await a.ready();await a.chat.send('本机摘要');sockets[0].emit({type:'turn_start',run_id:'pinned',seq:1});sockets[0].emit({type:'assistant_thinking',run_id:'pinned',seq:2,thinking_id:'one',thinking:'已提供的分析摘要。'});});
+ await page.locator('#a .ihtml-process > summary').click();
+ await page.locator('#a .ihtml-think > summary').click();
+ await page.evaluate(()=>{sockets[0].emit({type:'assistant_delta',run_id:'pinned',seq:3,delta:'正式回答开始。'});sockets[0].emit({type:'assistant_done',run_id:'pinned',seq:4,message:'正式回答完成。'});});
+ assert.notEqual(await page.locator('#a .ihtml-process').getAttribute('open'),null);
+ assert.notEqual(await page.locator('#a .ihtml-think').getAttribute('open'),null);
+ assert.equal(await page.locator('#a .think-body').isVisible(),true);
+ assert.equal(await page.locator('#a .ihtml-chat-latest').isVisible(),true);
+ const frozen=await page.locator('#a .p-meta').textContent();await page.waitForTimeout(1200);assert.equal(await page.locator('#a .p-meta').textContent(),frozen);
  await page.evaluate(()=>a.destroy());
 });
