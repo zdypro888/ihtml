@@ -5350,22 +5350,18 @@
         input.addEventListener('input', () => {
           this.resizeComposer(); this.syncChatControls();
         });
-        let composing = false;
-        let composedAt = 0;
-        input.addEventListener('compositionstart', () => { composing = true; });
-        input.addEventListener('compositionend', () => { composing = false; composedAt = Date.now(); });
-        input.addEventListener('blur', () => { composing = false; });
+        const keyboard = lib.chatComposer.create();
+        input.addEventListener('compositionstart', () => keyboard.start());
+        input.addEventListener('compositionend', () => keyboard.end());
+        input.addEventListener('blur', () => keyboard.blur());
         input.addEventListener('keydown', (ev) => {
-          const imeActive = ev.isComposing || composing || ev.keyCode === 229;
           if (ev.key === 'Escape') {
-            if (imeActive) { ev.stopPropagation(); return; }
+            if (keyboard.active(ev)) { ev.stopPropagation(); return; }
             if (chatOnly) return;
             ev.preventDefault(); ev.stopPropagation(); this.close(); return;
           }
-          if (ev.key !== 'Enter') return;
-          if (rootEl.classList.contains('ihtml-mobile')) return;
-          if (ev.shiftKey || ev.altKey || ev.ctrlKey || ev.metaKey) return;
-          if (imeActive || Date.now() - composedAt < 80) return;
+          // 桌面与移动端一致；选词确认交给输入法，Shift+Enter 保留换行。
+          if (!keyboard.shouldSend(ev)) return;
           ev.preventDefault();
           this.send();
         });
@@ -6153,7 +6149,7 @@
         if (t.errorCount > 0) return T('tools_failed', { n: t.errorCount });
         if (t.agentState && t.agentState.manualPaused && t.agentState.plan.length) return T('agent_plan_paused');
         const steps = this.processStepCount(t);
-        if (steps > 0) return T('steps_completed', { n: steps });
+        if (steps > 0) return T('trace_completed', { n: steps });
         return T('done');
       },
       finishCancelled(t) {
@@ -6526,10 +6522,10 @@
         return {
           title: safeVisible(source.title || ev.tool_title || call.title || ev.tool_name || call.name || 'tool', 160),
           action: safeVisible(source.action || '', 320),
-          summary: safeVisible(source.summary || (!view && ev.tool_summary) || '', 500),
+          summary: safeVisible(source.summary || (!view && ev.tool_summary) || '', 32768),
           reason: safeVisible(source.reason || (!view && call.reason) || '', 500),
           facts: (Array.isArray(source.facts) ? source.facts : fallbackFacts).slice(0, 8).map((fact) => ({
-            label: safeVisible(fact && fact.label || '', 80), value: safeVisible(fact && fact.value || '', 320),
+            label: safeVisible(fact && fact.label || '', 80), value: safeVisible(fact && fact.value || '', 32768),
           })).filter((fact) => fact.label && fact.value),
           request: source.request !== undefined ? source.request : { method: call.method, path: call.path, query: call.query, body: call.body },
           result: source.result !== undefined ? source.result : ev.tool_result,
@@ -6692,7 +6688,8 @@
           tick();
         }
         if (meta.childNodes.length) rec.body.appendChild(meta);
-        if (rec.status === 'pending' && rec.call.approval_resume === 'manual_tool_only') {
+        // 宿主已有确认说明时不再叠加一段通用提示，保留空间展示完整名单。
+        if (rec.status === 'pending' && rec.call.approval_resume === 'manual_tool_only' && !view.reason) {
           const manual = el('div', 'ihtml-agent-manual', T('agent_manual_confirm'));
           manual.setAttribute('role', 'note');
           rec.body.appendChild(manual);
@@ -6752,7 +6749,7 @@
         const call = ev.tool_call && typeof ev.tool_call === 'object' ? ev.tool_call : {};
         const nonce = String(call.confirmation_nonce || '');
         const queueKey = this.anonymousToolQueueKey(ev, call);
-        let id = call.id || (nonce && t.anonymousToolAliases.get(nonce)) || '';
+        let id = call.id || ev.tool_id || (nonce && t.anonymousToolAliases.get(nonce)) || '';
         if (!id) {
           const queue = t.anonymousToolQueues.get(queueKey) || [];
           if (ev.type === 'tool_start') {
@@ -6792,7 +6789,8 @@
           t.toolCount++;
         }
         if (nonce) t.anonymousToolAliases.set(nonce, id);
-        if (ev.tool_call) rec.call = ev.tool_call;
+        // 开始/回执事件通常只有签名卡的引用，不能覆盖原来已验证的目标和标题。
+        if (ev.tool_call) rec.call = Object.assign({}, rec.call, ev.tool_call);
         const previous = rec.status;
         rec.lastEvent = Object.assign({}, rec.lastEvent, ev, { tool_call: rec.call });
         if (ev.type === 'tool_start') {

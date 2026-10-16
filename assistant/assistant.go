@@ -20,6 +20,14 @@ import (
 	"github.com/zdypro888/ihtml/confirmation"
 )
 
+// ToolResultView 是宿主显式脱敏后的显示投影；原始 Handler 返回值默认永不发送到浏览器。
+type ToolResultView struct {
+	Status  string // 仅允许 success/error/unknown，描述已完成接口内的业务结果。
+	Title   string
+	Summary string
+	Result  json.RawMessage
+}
+
 // Config contains no provider credentials. Hooks must respect cancellation and
 // be safe across connections. Engine.RunTurn must stop when its context ends.
 type Config struct {
@@ -42,8 +50,9 @@ type Config struct {
 	Confirmation       *ConfirmationConfig
 	// NativeConfirmation and manual Confirmation are mutually exclusive.
 	NativeConfirmation *NativeConfirmationConfig
-	// CompleteTool persists actual manual execution evidence. It does not update
-	// the engine's pending invocation receipt or resume its model trajectory.
+	// PresentToolResult 仅在接口执行成功时提供公开回执；可标记部分失败或未知，不扩大批准范围。
+	PresentToolResult func(context.Context, *ihtml.ChatSessionContext, agent.Tool, json.RawMessage, string) ToolResultView
+	// CompleteTool persists manual execution evidence; it does not resume the model trajectory.
 	CompleteTool    func(context.Context, *ihtml.ChatSessionContext, *ConfirmedToolResult) error
 	MaxPendingTurns int    // default 16; per connection, excluding the active turn
 	ContentFormat   string // default text; HTML remains untrusted model output
@@ -523,6 +532,7 @@ func (s *session) governTools(tools []agent.Tool, ev *ihtml.ChatClientEvent, p *
 			return nil, errors.New("assistant: invalid host tool")
 		}
 		handler, original := tool.Handler, tool
+		p.tools[tool.Name] = original
 		if original.ApprovalRequired && s.backend.cfg.Confirmation != nil {
 			// The native receipt represents pending, not domain execution. Domain
 			// recovery/persistence callbacks must not run on that placeholder.
@@ -573,6 +583,7 @@ type projection struct {
 	pendingNotice     bool
 	pendingSteps      map[string]int
 	approvalTools     map[string]bool
+	tools             map[string]agent.Tool
 	resumedCard       *ihtml.ProposedToolCall
 	resumedToolCallID string
 }
@@ -581,7 +592,7 @@ func newProjection(s *session, ctx context.Context, cancel context.CancelFunc) *
 	var id [16]byte
 	// crypto/rand.Read either fills the buffer or panics on modern Go.
 	_, _ = rand.Read(id[:])
-	return &projection{session: s, ctx: ctx, cancel: cancel, id: hex.EncodeToString(id[:]), pendingSteps: make(map[string]int), approvalTools: make(map[string]bool)}
+	return &projection{session: s, ctx: ctx, cancel: cancel, id: hex.EncodeToString(id[:]), pendingSteps: make(map[string]int), approvalTools: make(map[string]bool), tools: make(map[string]agent.Tool)}
 }
 
 // All send calls hold mu across sequence assignment and synchronous emission.
@@ -686,6 +697,16 @@ func (p *projection) step(step agent.Step, host func(agent.Step)) {
 		}
 		p.toolSeq++
 		event := ihtml.ChatStreamEvent{Type: ihtml.ChatStreamToolResult, ToolID: fmt.Sprintf("%s_tool_%d", p.id, p.toolSeq), ToolName: step.ToolName, ToolStatus: status, ToolSummary: summary}
+		if status == ihtml.ChatToolSuccess {
+			view := p.session.publicToolResult(p.ctx, p.tools[step.ToolName], step.Args, step.Result)
+			event.ToolTitle, event.ToolResult = view.Title, view.Result
+			if view.Status != "" {
+				event.ToolStatus = view.Status
+			}
+			if view.Summary != "" {
+				event.ToolSummary = view.Summary
+			}
+		}
 		if p.resumedCard != nil && p.resumedToolCallID != "" && p.resumedToolCallID == step.ToolCallID && p.resumedCard.Name == step.ToolName {
 			event.ToolID = p.resumedCard.ID
 			event.ToolCall = p.resumedCard
@@ -720,4 +741,28 @@ func (p *projection) end(result *agent.TurnResult, err error) {
 // String deliberately exposes no engine/provider configuration.
 func (b *Backend) String() string {
 	return fmt.Sprintf("assistant.Backend(queue=%d)", b.cfg.MaxPendingTurns)
+}
+
+// 展示钩子异常只丢弃展示内容；不能把已执行操作伪装成失败并诱导重试。
+func (s *session) publicToolResult(ctx context.Context, tool agent.Tool, args json.RawMessage, result string) (view ToolResultView) {
+	defer func() {
+		if recover() != nil {
+			view = ToolResultView{}
+		}
+	}()
+	if fn := s.backend.cfg.PresentToolResult; fn != nil {
+		host := s.sctx
+		view = fn(ctx, &host, tool, append(json.RawMessage(nil), args...), result)
+	}
+	if len(view.Title) > 1024 || len(view.Summary) > 32768 {
+		return ToolResultView{}
+	}
+	if view.Status != "" && view.Status != ihtml.ChatToolSuccess && view.Status != ihtml.ChatToolError && view.Status != ihtml.ChatToolUnknown {
+		view.Status = ""
+	}
+	raw, err := json.Marshal(view.Result)
+	if err != nil || len(raw) > 32768 {
+		view.Result = nil
+	}
+	return view
 }

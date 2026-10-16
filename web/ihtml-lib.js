@@ -32,7 +32,7 @@
       cancellation_ack_timeout: '未收到服务器撤销回执，执行状态未知。请重新连接后再确认。', cancellation_failed: '撤销失败，执行状态未确认。',
       confirm_expired: '确认卡已过期, 请重新让 AI 发起。', expires_in: '有效期',
       params_title: '操作参数', debug_title: '调试详情', tools_called: '调用 {n} 个工具',
-      process_steps: '处理过程', trace_tool_count: '{n} 条工具记录', trace_elapsed: '{n}秒', steps_completed: '已完成 {n} 个步骤', tools_running: '正在执行 {n} 项', answering: '正在整理回答',
+      process_steps: '处理过程', trace_completed: '本轮处理结束', trace_tool_count: '{n} 条工具记录', trace_elapsed: '{n}秒', steps_completed: '已完成 {n} 个步骤', tools_running: '正在执行 {n} 项', answering: '正在整理回答',
       reasoning_step: '分析摘要 {n}', reasoning_streaming: '正在分析', reasoning_complete: '分析完成', technical_details: '技术详情',
       request_summary: '请求摘要', result_data: '返回结果', diagnostic_data: '诊断信息', tool_reason: '为什么需要确认', review_field: '设置项', review_before: '修改前', review_after: '修改后', review_missing: '未设置', review_partial: '这里只展示部分变更，请核对完整操作内容。',
       confirm_this_action: '确认此操作', dismiss_tool: '暂不执行', answer_complete: '回答已完成',
@@ -152,7 +152,7 @@
       cancellation_ack_timeout: 'No cancellation acknowledgement was received; execution status is unknown. Reconnect before taking further action.', cancellation_failed: 'Cancellation failed; execution status is not confirmed.',
       confirm_expired: 'Confirmation expired; ask the AI again.', expires_in: 'expires in',
       params_title: 'Parameters', debug_title: 'Debug', tools_called: '{n} tool calls',
-      process_steps: 'Process', trace_tool_count: '{n} tool records', trace_elapsed: '{n}s', steps_completed: '{n} steps completed', tools_running: '{n} running', answering: 'Preparing the answer',
+      process_steps: 'Process', trace_completed: 'Turn finished', trace_tool_count: '{n} tool records', trace_elapsed: '{n}s', steps_completed: '{n} steps completed', tools_running: '{n} running', answering: 'Preparing the answer',
       reasoning_step: 'Reasoning step {n}', reasoning_streaming: 'Analyzing', reasoning_complete: 'Analysis complete', technical_details: 'Technical details',
       request_summary: 'Request summary', result_data: 'Result', diagnostic_data: 'Diagnostics', tool_reason: 'Why confirmation is required', review_field: 'Setting', review_before: 'Before', review_after: 'After', review_missing: 'Not set', review_partial: 'Only part of the changes is shown. Review the complete operation.',
       confirm_this_action: 'Confirm this action', dismiss_tool: 'Not now', answer_complete: 'Answer complete',
@@ -823,8 +823,8 @@
   const chatTrace = (() => {
     const TITLE_LIMIT = 120;
     const ACTION_LIMIT = 320;
-    const SUMMARY_LIMIT = 600;
-    const FACT_LIMIT = 220;
+    const SUMMARY_LIMIT = 32768;
+    const FACT_LIMIT = 32768;
     const TECHNICAL_LIMIT = 5000;
     const COLLECTION_LIMIT = 24;
     const SENSITIVE_KEY = /(?:authorization|auth|token|secret|password|passwd|cookie|credential|apikey|session|sessionid|sessionkey|nonce|signature|privatekey)$/;
@@ -3040,5 +3040,23 @@
     });
   })();
 
-  window.__ihtmlLib = { makeT, fmt, util, chart, template, chatAgent, chatTrace, chatContent, itemLayout, runtime };
+  // 输入法确认键不能发送：兼容 Safari 先 compositionend、后 keydown 的顺序。
+  const chatComposer = {
+    create(now = () => Date.now()) {
+      let composing = false, endedAt = -Infinity;
+      return {
+        start() { composing = true; },
+        end() { composing = false; endedAt = now(); },
+        blur() { composing = false; endedAt = now(); },
+        active(ev) { return composing || ev.isComposing || ev.keyCode === 229; },
+        shouldSend(ev) {
+          return ev.key === 'Enter' && !ev.defaultPrevented && !ev.repeat &&
+            !ev.shiftKey && !ev.altKey && !ev.ctrlKey && !ev.metaKey &&
+            !this.active(ev) && now() - endedAt >= 250;
+        },
+      };
+    },
+  };
+
+  window.__ihtmlLib = { makeT, fmt, util, chart, template, chatAgent, chatTrace, chatContent, chatComposer, itemLayout, runtime };
 })();

@@ -335,15 +335,35 @@ func (s *session) runConfirmedTool(ctx context.Context, cancel context.CancelFun
 		if ctx.Err() != nil {
 			runErr = ctx.Err()
 		}
-		status, summary := ihtml.ChatToolSuccess, "Tool completed."
+		status, summary := ihtml.ChatToolSuccess, "Operation completed."
+		view := ToolResultView{}
+		if evidence != nil {
+			view.Title = evidence.Call.Title
+			if runErr == nil {
+				public := s.publicToolResult(ctx, evidence.Tool, evidence.Args, evidence.Result)
+				if public.Title != "" {
+					view.Title = public.Title
+				}
+				view.Summary, view.Result, view.Status = public.Summary, public.Result, public.Status
+			}
+		}
 		if evidence != nil && evidence.Tool.Completion == agent.ToolCompletionAsynchronous {
 			summary = "Request accepted; completion is not confirmed."
 		}
 		if runErr != nil {
 			status, summary = ihtml.ChatToolError, "Not executed."
 			if started {
-				summary = "Tool failed; final execution state is not confirmed."
+				status, summary = ihtml.ChatToolUnknown, "Execution outcome unknown; check the original record before retrying."
 			}
+		}
+		if runErr == nil && view.Status != "" {
+			status = view.Status
+		}
+		if runErr == nil && view.Summary != "" {
+			summary = view.Summary
+		}
+		if view.Title != "" && view.Summary == "" {
+			summary = view.Title + ": " + summary
 		}
 		// Echo only bounded card identifiers, never unverified client card contents.
 		ref := ihtml.ProposedToolCall{ID: boundedReference(call.ID), ConfirmationNonce: boundedReference(call.ConfirmationNonce)}
@@ -354,7 +374,7 @@ func (s *session) runConfirmedTool(ctx context.Context, cancel context.CancelFun
 					return evidence.Tool.Name
 				}
 				return ""
-			}(), ToolStatus: status, ToolSummary: summary})
+			}(), ToolTitle: view.Title, ToolResult: view.Result, ToolStatus: status, ToolSummary: summary})
 		p.mu.Unlock()
 		if runErr != nil {
 			p.end(nil, runErr)

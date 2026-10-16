@@ -2097,3 +2097,7 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
 @media (prefers-reduced-motion: reduce) {
   .ihtml-process .p-dot, .ihtml-think .p-dot { animation: none !important; }
 }
+
+/* 完整名单和逐项回执保留换行；长列表可自然滚动，不能静默裁掉未展示目标。 */
+.ihtml-tool .t-primary, .ihtml-tool .t-facts dd { white-space: pre-line; }
+.ihtml-tool .t-head .t-summary { white-space: normal; max-height: 3em; overflow: hidden; }

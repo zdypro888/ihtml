@@ -1173,3 +1173,29 @@ test('completed host cards do not recycle proposal reasons as execution results'
  assert.ok(view.facts.some(f=>f.label==='操作'&&f.value==='更新设置'));
  assert.ok(!view.summary.includes('确认前'));
 });
+
+
+test('composer Enter sends across sizes but never consumes IME confirmation or modified Enter', () => {
+  let time = 1000;
+  const keys = window.__ihtmlLib.chatComposer.create(() => time);
+  const enter = {key: 'Enter'};
+  assert.equal(keys.shouldSend(enter), true);
+  for (const flag of ['shiftKey', 'altKey', 'ctrlKey', 'metaKey', 'repeat', 'defaultPrevented', 'isComposing']) {
+    assert.equal(keys.shouldSend({...enter, [flag]: true}), false, flag);
+  }
+  assert.equal(keys.shouldSend({...enter, keyCode: 229}), false);
+  keys.start(); assert.equal(keys.shouldSend(enter), false);
+  keys.end(); assert.equal(keys.shouldSend(enter), false, 'Safari compositionend before keydown');
+  time += 249; assert.equal(keys.shouldSend(enter), false);
+  time++; assert.equal(keys.shouldSend(enter), true, 'a later independent Enter sends');
+  keys.start(); keys.blur(); assert.equal(keys.shouldSend(enter), false);
+  time += 300; assert.equal(keys.shouldSend(enter), true);
+});
+
+test('confirmation facts retain the entire bounded batch target list and receipt', () => {
+  const names = Array.from({length:100}, (_,i)=>`fixture-${i}@example.test`).join('\n');
+  const view = chatTrace.toolView({name:'api_batch',title:'批量更新',body:{目标数量:100,完整目标名单:names}}, {tool_status:'pending'}, makeT('zh'));
+  assert.equal(view.facts.find(x=>x.label==='完整目标名单').value,names);
+  const result = chatTrace.toolView({title:'批量更新'}, {tool_status:'success',tool_summary:names}, makeT('zh'));
+  assert.equal(result.summary,names);
+});

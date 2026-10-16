@@ -437,3 +437,34 @@ func TestConfirmationValidationLimitsAndPanics(t *testing.T) {
 		t.Fatal("configuration aliased")
 	}
 }
+
+func TestConfirmedPublicReceiptUsesHostProjectionAndRetainsCardIdentity(t *testing.T) {
+	r := newRecorder()
+	cfg := approvalConfig(t, func(context.Context, json.RawMessage) (string, error) { return "PRIVATE_RESULT", nil })
+	cfg.PresentToolResult = func(_ context.Context, _ *ihtml.ChatSessionContext, tool agent.Tool, args json.RawMessage, result string) ToolResultView {
+		if result != "PRIVATE_RESULT" || tool.Name != "destroy" {
+			t.Error("missing host execution evidence")
+		}
+		return ToolResultView{Title: "删除登录身份 · fixture", Summary: "已删除 fixture，本次仅 1 位", Result: json.RawMessage(`{"username":"fixture","deleted":true}`)}
+	}
+	s := openSession(t, cfg, "alice", r)
+	card := proposedCard(t, s, r)
+	confirmCard(s, card)
+	events := r.wait(t, ihtml.ChatStreamAssistantDone, 2)
+	found := false
+	for _, ev := range events {
+		raw, _ := json.Marshal(ev)
+		if strings.Contains(string(raw), "PRIVATE_RESULT") {
+			t.Fatal("private handler result leaked")
+		}
+		if ev.Type == ihtml.ChatStreamToolResult && ev.ToolID == card.ID {
+			found = true
+			if ev.ToolTitle != "删除登录身份 · fixture" || !strings.Contains(ev.ToolSummary, "fixture") || !strings.Contains(string(ev.ToolResult), "deleted") {
+				t.Fatal("public receipt lost", ev)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no correlated receipt")
+	}
+}

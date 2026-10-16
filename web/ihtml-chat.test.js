@@ -651,11 +651,6 @@ for (const mode of ['desktop', 'phone', 'narrow-embed']) {
     const input = page.locator('#a textarea[name="ihtml-composer"]');
     await input.fill('检查当前业务');
     await input.press('Enter');
-    if (phone || mode === 'narrow-embed') {
-      assert.equal(await page.evaluate(() => sockets.length), 0, 'mobile composer Enter keeps a newline');
-      const send = page.locator('#a .ihtml-chat-foot button');
-      if (phone) await send.tap(); else await send.click();
-    }
     await page.waitForFunction(() => sockets.length === 1 && sockets[0].sent.length === 1);
     assert.equal(await page.evaluate(() => a.chat.busy), true);
     await page.evaluate(() => {
@@ -791,4 +786,29 @@ test('explicit trace and reasoning expansion survive streamed answers without be
  assert.equal(await page.locator('#a .ihtml-chat-latest').isVisible(),true);
  const frozen=await page.locator('#a .p-meta').textContent();await page.waitForTimeout(1200);assert.equal(await page.locator('#a .p-meta').textContent(),frozen);
  await page.evaluate(()=>a.destroy());
+});
+
+test('reference-only tool events retain exact target and tool_id deduplicates within its own turn', async (t) => {
+  const page = await fixture(t);
+  await page.evaluate(async () => {
+    window.a = ihtml.mountChat('#a'); await a.ready();
+    await a.chat.send('first');
+    const s = sockets[0];
+    s.emit({type:'turn_start',run_id:'first',seq:1});
+    s.emit({type:'confirmation_required',run_id:'first',seq:2,tool_call:{id:'one',name:'api_test',title:'更新 fixture-one',method:'PUT',path:'/fixture',body:{目标:'fixture-one'},confirmation_nonce:'n1'}});
+    s.emit({type:'tool_start',run_id:'first',seq:3,tool_call:{id:'one',confirmation_nonce:'n1'},tool_name:'api_test'});
+    s.emit({type:'tool_result',run_id:'first',seq:4,tool_id:'one',tool_name:'api_test',tool_status:'success',tool_summary:'fixture-one 已完成'});
+    s.emit({type:'assistant_done',run_id:'first',seq:5,message:'first done'});
+    await a.chat.send('second');
+    s.emit({type:'turn_start',run_id:'second',seq:1});
+    s.emit({type:'tool_start',run_id:'second',seq:2,tool_id:'two',tool_name:'api_test',tool_title:'更新 fixture-two'});
+    s.emit({type:'tool_result',run_id:'second',seq:3,tool_id:'two',tool_name:'api_test',tool_status:'success',tool_summary:'fixture-two 已完成'});
+    s.emit({type:'assistant_done',run_id:'second',seq:4,message:'second done'});
+  });
+  assert.equal(await page.locator('#a .ihtml-tool').count(), 2);
+  assert.equal(await page.locator('#a .t-title').first().textContent(), '更新 fixture-one');
+  const turns = await page.locator('#a .ihtml-process').allTextContents();
+  assert.equal(turns.length, 2);
+  assert.ok(turns.every(text => text.includes('1 条工具记录')));
+  assert.ok(!turns[1].includes('fixture-one'));
 });
