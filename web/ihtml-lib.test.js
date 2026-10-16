@@ -1175,9 +1175,8 @@ test('completed host cards do not recycle proposal reasons as execution results'
 });
 
 
-test('composer Enter sends across sizes but never consumes IME confirmation or modified Enter', () => {
-  let time = 1000;
-  const keys = window.__ihtmlLib.chatComposer.create(() => time);
+test('composer Enter protects IME confirmation without a cooldown on the next key', async () => {
+  const keys = window.__ihtmlLib.chatComposer.create();
   const enter = {key: 'Enter'};
   assert.equal(keys.shouldSend(enter), true);
   for (const flag of ['shiftKey', 'altKey', 'ctrlKey', 'metaKey', 'repeat', 'defaultPrevented', 'isComposing']) {
@@ -1186,10 +1185,12 @@ test('composer Enter sends across sizes but never consumes IME confirmation or m
   assert.equal(keys.shouldSend({...enter, keyCode: 229}), false);
   keys.start(); assert.equal(keys.shouldSend(enter), false);
   keys.end(); assert.equal(keys.shouldSend(enter), false, 'Safari compositionend before keydown');
-  time += 249; assert.equal(keys.shouldSend(enter), false);
-  time++; assert.equal(keys.shouldSend(enter), true, 'a later independent Enter sends');
-  keys.start(); keys.blur(); assert.equal(keys.shouldSend(enter), false);
-  time += 300; assert.equal(keys.shouldSend(enter), true);
+  keys.release(enter);
+  assert.equal(keys.shouldSend(enter), true, 'next Enter sends immediately after key release');
+  keys.end();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(keys.shouldSend(enter), true, 'candidate selection leaves no 250ms cooldown');
+  keys.start(); keys.blur(); assert.equal(keys.shouldSend(enter), true, 'blur clears stale composition');
 });
 
 test('confirmation facts retain the entire bounded batch target list and receipt', () => {

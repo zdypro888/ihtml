@@ -3040,19 +3040,29 @@
     });
   })();
 
-  // 输入法确认键不能发送：兼容 Safari 先 compositionend、后 keydown 的顺序。
+  // 只保护输入法确认所在的按键周期，不能用固定延时吞掉用户下一次独立回车。
   const chatComposer = {
-    create(now = () => Date.now()) {
-      let composing = false, endedAt = -Infinity;
+    create() {
+      let composing = false, committing = false, clearCommit = null;
+      const releaseCommit = () => {
+        committing = false;
+        clearTimeout(clearCommit); clearCommit = null;
+      };
       return {
-        start() { composing = true; },
-        end() { composing = false; endedAt = now(); },
-        blur() { composing = false; endedAt = now(); },
+        start() { releaseCommit(); composing = true; },
+        end() {
+          composing = false; committing = true;
+          // Safari 可能先结束组词再派发确认键；释放按键或本轮事件结束即解除保护。
+          clearTimeout(clearCommit);
+          clearCommit = setTimeout(releaseCommit, 0);
+        },
+        release(ev) { if (ev.key === 'Enter' || ev.keyCode === 229) releaseCommit(); },
+        blur() { composing = false; releaseCommit(); },
         active(ev) { return composing || ev.isComposing || ev.keyCode === 229; },
         shouldSend(ev) {
           return ev.key === 'Enter' && !ev.defaultPrevented && !ev.repeat &&
             !ev.shiftKey && !ev.altKey && !ev.ctrlKey && !ev.metaKey &&
-            !this.active(ev) && now() - endedAt >= 250;
+            !this.active(ev) && !committing;
         },
       };
     },

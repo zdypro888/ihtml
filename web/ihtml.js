@@ -5353,6 +5353,7 @@
         const keyboard = lib.chatComposer.create();
         input.addEventListener('compositionstart', () => keyboard.start());
         input.addEventListener('compositionend', () => keyboard.end());
+        input.addEventListener('keyup', (ev) => keyboard.release(ev));
         input.addEventListener('blur', () => keyboard.blur());
         input.addEventListener('keydown', (ev) => {
           if (ev.key === 'Escape') {
@@ -5361,9 +5362,11 @@
             ev.preventDefault(); ev.stopPropagation(); this.close(); return;
           }
           // 桌面与移动端一致；选词确认交给输入法，Shift+Enter 保留换行。
-          if (!keyboard.shouldSend(ev)) return;
+          if (ev.key !== 'Enter' || ev.defaultPrevented || ev.shiftKey || ev.altKey || ev.ctrlKey || ev.metaKey || keyboard.active(ev)) return;
+          const shouldSend = keyboard.shouldSend(ev);
+          // 确认键的尾部事件和长按都不能掉进 textarea 的默认换行；选词仍交给输入法。
           ev.preventDefault();
-          this.send();
+          if (shouldSend) this.send();
         });
         const sendBtn = el('button', '', T('send'));
         sendBtn.type = 'button';

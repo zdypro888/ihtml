@@ -843,3 +843,33 @@ test('result explanation resets only the draft and preserves the confirmed recei
     !!(node.compareDocumentPosition(node.parentElement.querySelector('.answer')) & Node.DOCUMENT_POSITION_FOLLOWING)), true,
     'confirmation and receipt remain before the streamed final explanation');
 });
+
+for (const order of ['keydown-first', 'compositionend-first']) {
+  test('IME commit does not send or leave an extra newline; next Enter sends: ' + order, async (t) => {
+    const page = await fixture(t);
+    await page.evaluate(async () => {
+      window.a = ihtml.mountChat('#a', { storageKey: 'ime-enter-regression' }); await a.ready();
+    });
+    const input = page.locator('#a textarea[name="ihtml-composer"]');
+    await input.fill('中文消息');
+    const state = await input.evaluate((input, order) => {
+      input.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+      const end = () => input.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: '消息' }));
+      if (order === 'compositionend-first') end();
+      const commit = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true, isComposing: order === 'keydown-first' });
+      input.dispatchEvent(commit);
+      if (order === 'keydown-first') end();
+      input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', bubbles: true }));
+      return { value: input.value, sent: sockets.reduce((n, socket) => n + socket.sent.length, 0), prevented: commit.defaultPrevented };
+    }, order);
+    assert.equal(state.sent, 0, 'candidate confirmation never sends');
+    assert.equal(state.value, '中文消息');
+    assert.equal(state.prevented, order === 'compositionend-first', 'ended composition consumes the trailing Enter instead of inserting a newline');
+    await input.press('Shift+Enter');
+    assert.equal(await input.inputValue(), '中文消息\n');
+    await input.press('Backspace');
+    await input.press('Enter');
+    await page.waitForFunction(() => sockets.length === 1 && sockets[0].sent.length === 1);
+    assert.equal(await input.inputValue(), '');
+  });
+}

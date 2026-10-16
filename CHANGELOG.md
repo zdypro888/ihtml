@@ -7,6 +7,9 @@ the first tagged release, changes are recorded under **Unreleased**.
 
 ### Fixed
 
+- Chinese IME confirmation no longer leaves a 250 ms send cooldown: the next
+  independent Enter sends immediately, and the trailing confirmation key does
+  not insert an accidental newline. Shift+Enter still inserts a newline.
 - Reasoning content replaces the transient working placeholder without duplicate status text.
 - Inline chat fits short host viewports without compressing messages into the composer.
 - Streaming answers and reasoning follow their rendered height, including delayed
