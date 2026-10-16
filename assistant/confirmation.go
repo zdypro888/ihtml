@@ -20,6 +20,8 @@ type ConfirmationConfig struct {
 	Preview         func(context.Context, *ihtml.ChatSessionContext, agent.Tool, json.RawMessage) (ihtml.ProposedToolCall, error)
 	MaxPendingTools int           // default 16; range 1..256
 	ToolTimeout     time.Duration // default 30s; range 1ms..10min
+	// ResultReply 在真实回执后生成一次无工具的解释；不会恢复原操作计划。
+	ResultReply *ResultReplyConfig
 }
 
 // ConfirmedToolResult is host-only execution evidence, not a model turn. Err may
@@ -44,6 +46,8 @@ type pendingTool struct {
 	args            json.RawMessage
 	invocation      context.Context
 	invocationScope string
+	userText        string
+	model           string
 	queued          bool // guarded by pendingMu; one confirm attempt per pending card
 }
 
@@ -108,7 +112,7 @@ func (s *session) prepareTool(ctx context.Context, tool agent.Tool, args json.Ra
 	}
 	s.pendingMu.Lock()
 	s.pendingTools[call.ConfirmationNonce] = &pendingTool{call: call, scope: scope, tool: tool, args: args,
-		invocation: context.WithoutCancel(ctx), invocationScope: req.InvocationScope}
+		invocation: context.WithoutCancel(ctx), invocationScope: req.InvocationScope, userText: req.UserText, model: req.Model}
 	s.pendingReserved--
 	reserved = false
 	s.pendingMu.Unlock()
@@ -306,14 +310,16 @@ func (s *session) cleanupPendingTools() {
 }
 
 func (s *session) runConfirmedTool(ctx context.Context, cancel context.CancelFunc, ev *ihtml.ChatClientEvent, rejected bool) {
+	replyParent := ctx
 	ctx, timeoutCancel := context.WithTimeout(ctx, s.backend.cfg.Confirmation.ToolTimeout)
 	defer timeoutCancel()
-	p := newProjection(s, ctx, cancel)
+	p := newProjection(s, replyParent, cancel)
 	s.mu.Lock()
 	s.activeOutput = p
 	s.mu.Unlock()
 	call := *ev.ToolCall
 	var evidence *ConfirmedToolResult
+	var pending *pendingTool
 	var runErr error
 	started := false
 	defer func() {
@@ -335,7 +341,7 @@ func (s *session) runConfirmedTool(ctx context.Context, cancel context.CancelFun
 		if ctx.Err() != nil {
 			runErr = ctx.Err()
 		}
-		status, summary := ihtml.ChatToolSuccess, "Operation completed."
+		status, summary := ihtml.ChatToolSuccess, "Invocation returned; no public result details were provided. Check the source record to verify the business outcome."
 		view := ToolResultView{}
 		if evidence != nil {
 			view.Title = evidence.Call.Title
@@ -348,6 +354,7 @@ func (s *session) runConfirmedTool(ctx context.Context, cancel context.CancelFun
 			}
 		}
 		if evidence != nil && evidence.Tool.Completion == agent.ToolCompletionAsynchronous {
+			status = ihtml.ChatToolAccepted
 			summary = "Request accepted; completion is not confirmed."
 		}
 		if runErr != nil {
@@ -356,7 +363,7 @@ func (s *session) runConfirmedTool(ctx context.Context, cancel context.CancelFun
 				status, summary = ihtml.ChatToolUnknown, "Execution outcome unknown; check the original record before retrying."
 			}
 		}
-		if runErr == nil && view.Status != "" {
+		if runErr == nil && view.Status != "" && !(status == ihtml.ChatToolAccepted && view.Status == ihtml.ChatToolSuccess) {
 			status = view.Status
 		}
 		if runErr == nil && view.Summary != "" {
@@ -379,7 +386,11 @@ func (s *session) runConfirmedTool(ctx context.Context, cancel context.CancelFun
 		if runErr != nil {
 			p.end(nil, runErr)
 		} else {
-			p.end(&agent.TurnResult{Text: summary, FinishReason: "manual_tool_only"}, nil)
+			reply := &agent.TurnResult{Text: summary, FinishReason: "manual_tool_only"}
+			if s.backend.cfg.Confirmation.ResultReply != nil && evidence != nil && pending != nil {
+				reply = s.explainToolResult(replyParent, p, pending, status, view, summary)
+			}
+			p.end(reply, nil)
 		}
 	}()
 	models, err := s.backend.Models(ctx)
@@ -416,6 +427,7 @@ func (s *session) runConfirmedTool(ctx context.Context, cancel context.CancelFun
 	s.pendingMu.Lock()
 	delete(s.pendingTools, call.ConfirmationNonce)
 	s.pendingMu.Unlock()
+	pending = item
 	evidence = &ConfirmedToolResult{Call: item.call, Tool: item.tool, Args: append(json.RawMessage(nil), item.args...), InvocationScope: item.invocationScope}
 	callCtx, stop := context.WithTimeout(item.invocation, s.backend.cfg.Confirmation.ToolTimeout)
 	defer stop()

@@ -468,3 +468,125 @@ func TestConfirmedPublicReceiptUsesHostProjectionAndRetainsCardIdentity(t *testi
 		t.Fatal("no correlated receipt")
 	}
 }
+
+func TestConfirmedResultExplanationIsToolFreeAndFallsBackWithoutRepeatingAction(t *testing.T) {
+	for _, scenario := range []string{"success", "empty", "generic", "error", "panic", "timeout", "blocked", "unknown", "partial", "persist-error", "unexpected-tools", "accepted"} {
+		t.Run(scenario, func(t *testing.T) {
+			r := newRecorder()
+			var actions, replies, acquired, released atomic.Int32
+			cfg := approvalConfig(t, func(context.Context, json.RawMessage) (string, error) {
+				actions.Add(1)
+				return "PRIVATE_EXECUTION", nil
+			})
+			if scenario == "accepted" {
+				prepare := cfg.PrepareTurn
+				cfg.PrepareTurn = func(ctx context.Context, sc *ihtml.ChatSessionContext, ev *ihtml.ChatClientEvent) (*agent.TurnRequest, error) {
+					req, err := prepare(ctx, sc, ev)
+					req.Tools[0].Completion = agent.ToolCompletionAsynchronous
+					return req, err
+				}
+			}
+			base := cfg.Engine.(*fakeEngine).run
+			cfg.Engine = &fakeEngine{run: func(ctx context.Context, req *agent.TurnRequest) (*agent.TurnResult, error) {
+				if req.Mode != agent.TurnModeOneShot {
+					return base(ctx, req)
+				}
+				replies.Add(1)
+				if len(req.Tools) != 0 || len(req.Skills) != 0 || req.Resume != nil || !req.DisableSession || req.StreamReasoning || req.MaxIterations != 1 {
+					t.Error("explanation can resume or invoke tools")
+				}
+				if strings.Contains(req.UserText, "PRIVATE_EXECUTION") || strings.Contains(req.UserText, "original") && strings.Contains(req.UserText, `secret`) || strings.Contains(req.UserText, "confirmation_token") {
+					t.Error("private execution material leaked")
+				}
+				if !strings.Contains(req.UserText, "fixture-public") {
+					t.Error("public receipt missing")
+				}
+				switch scenario {
+				case "empty":
+					return &agent.TurnResult{}, nil
+				case "generic":
+					return &agent.TurnResult{Text: "Tool completed."}, nil
+				case "error":
+					return nil, errors.New("PRIVATE_PROVIDER")
+				case "unexpected-tools":
+					return &agent.TurnResult{Text: "pretend result", Steps: []agent.Step{{Kind: agent.StepToolCall}}}, nil
+				case "panic":
+					panic("PRIVATE_PANIC")
+				case "timeout":
+					<-ctx.Done()
+					return nil, ctx.Err()
+				}
+				req.OnDelta("已核对 fixture-public 的真实回执。")
+				return &agent.TurnResult{Text: "已核对 fixture-public 的真实回执。", Steps: []agent.Step{{Kind: agent.StepText}}}, nil
+			}}
+			cfg.PresentToolResult = func(context.Context, *ihtml.ChatSessionContext, agent.Tool, json.RawMessage, string) ToolResultView {
+				status := "success"
+				if scenario == "unknown" {
+					status = "unknown"
+				}
+				if scenario == "partial" {
+					status = "error"
+				}
+				return ToolResultView{Title: "修改 fixture-public", Status: status, Summary: "fixture-public：服务端已提供逐项回执", Result: json.RawMessage(`{"target":"fixture-public"}`)}
+			}
+			cfg.Confirmation.ResultReply = &ResultReplyConfig{Timeout: 30 * time.Millisecond, Complete: func(_ context.Context, _ *ihtml.ChatSessionContext, text string) error {
+				if !strings.Contains(text, "fixture-public") {
+					t.Error("wrong persisted explanation")
+				}
+				if scenario == "persist-error" {
+					return errors.New("PRIVATE_STORAGE")
+				}
+				return nil
+			}, Begin: func(context.Context, *ihtml.ChatSessionContext) (func(), error) {
+				if scenario == "blocked" {
+					return nil, errors.New("budget busy")
+				}
+				acquired.Add(1)
+				return func() { released.Add(1) }, nil
+			}}
+			s := openSession(t, cfg, "alice", r)
+			card := proposedCard(t, s, r)
+			confirmCard(s, card)
+			events := r.wait(t, ihtml.ChatStreamAssistantDone, 2)
+			if actions.Load() != 1 || acquired.Load() != released.Load() {
+				t.Fatal("action repeated or model budget leaked")
+			}
+			last := events[len(events)-1]
+			if last.Type != ihtml.ChatStreamAssistantDone || !strings.Contains(last.Message, "fixture-public") || genericToolCompletion(last.Message) {
+				t.Fatal("missing meaningful conclusion", last)
+			}
+			if scenario == "success" && last.FinishReason != "tool_result_explained" {
+				t.Fatal("explanation not used")
+			}
+			if scenario == "blocked" && replies.Load() != 0 {
+				t.Fatal("budget denial bypassed")
+			}
+			raw, _ := json.Marshal(events)
+			if strings.Contains(string(raw), "PRIVATE_") {
+				t.Fatal("private error/result exposed")
+			}
+			status := "success"
+			if scenario == "accepted" {
+				status = "accepted"
+			}
+			if scenario == "unknown" {
+				status = "unknown"
+			}
+			if scenario == "partial" {
+				status = "error"
+			}
+			found := false
+			for _, ev := range events {
+				if ev.Type == ihtml.ChatStreamToolResult && ev.ToolID == card.ID {
+					found = true
+					if ev.ToolStatus != status {
+						t.Fatal("explanation overwrote execution state")
+					}
+				}
+			}
+			if !found {
+				t.Fatal("authoritative receipt lost")
+			}
+		})
+	}
+}

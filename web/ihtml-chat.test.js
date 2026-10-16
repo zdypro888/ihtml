@@ -812,3 +812,31 @@ test('reference-only tool events retain exact target and tool_id deduplicates wi
   assert.ok(turns.every(text => text.includes('1 条工具记录')));
   assert.ok(!turns[1].includes('fixture-one'));
 });
+
+test('result explanation resets only the draft and preserves the confirmed receipt and collapsed history', async (t) => {
+  const page = await fixture(t);
+  await page.evaluate(async () => {
+    window.a = ihtml.mountChat('#a', {locale:'zh-CN'}); await a.ready(); await a.chat.send('update virtual settings');
+    const s=sockets[0];
+    s.emit({type:'turn_start',run_id:'proposal',seq:1});
+    s.emit({type:'confirmation_required',run_id:'proposal',seq:2,tool_call:{id:'update',name:'api_update',title:'更新虚拟设置',method:'PUT',path:'/fixture',body:{目标:'fixture'},confirmation_nonce:'virtual',approval_resume:'manual_tool_only'}});
+    s.emit({type:'assistant_done',run_id:'proposal',seq:3,message:'等待确认，尚未执行。'});
+  });
+  await page.getByRole('button',{name:'确认此操作 · 更新虚拟设置',exact:true}).click();
+  await page.evaluate(() => {
+    const s=sockets[0];
+    s.emit({type:'turn_start',run_id:'receipt',seq:1});
+    s.emit({type:'tool_result',run_id:'receipt',seq:2,tool_id:'update',tool_status:'success',tool_summary:'fixture 已保存'});
+    s.emit({type:'assistant_reset',run_id:'receipt',seq:3});
+    s.emit({type:'assistant_status',run_id:'receipt',seq:4,status:'正在整理执行结果'});
+    s.emit({type:'assistant_delta',run_id:'receipt',seq:5,delta:'已更新 fixture 的虚拟设置。',content_format:'text'});
+    s.emit({type:'assistant_done',run_id:'receipt',seq:6,message:'已更新 fixture 的虚拟设置。没有执行其他操作。',finish_reason:'tool_result_explained'});
+  });
+  assert.equal(await page.locator('#a .ihtml-tool').count(),1);
+  assert.equal(await page.locator('#a .t-title').textContent(),'更新虚拟设置');
+  assert.equal(await page.locator('#a .ihtml-process').evaluate(el=>el.open),false);
+  const text=await page.locator('#a .ihtml-chat-log').innerText();
+  assert.ok(text.includes('已更新 fixture 的虚拟设置。没有执行其他操作。'));
+  assert.ok(text.includes('fixture 已保存'));
+  assert.ok(!text.includes('等待确认，尚未执行。'));
+});

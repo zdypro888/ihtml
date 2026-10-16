@@ -22,7 +22,7 @@ import (
 
 // ToolResultView 是宿主显式脱敏后的显示投影；原始 Handler 返回值默认永不发送到浏览器。
 type ToolResultView struct {
-	Status  string // 仅允许 success/error/unknown，描述已完成接口内的业务结果。
+	Status  string // 仅允许 success/accepted/error/unknown，描述已完成接口内的业务结果。
 	Title   string
 	Summary string
 	Result  json.RawMessage
@@ -105,6 +105,22 @@ func NewChecked(cfg Config) (*Backend, error) {
 		}
 		if c.MaxPendingTools < 1 || c.MaxPendingTools > 256 || c.ToolTimeout < time.Millisecond || c.ToolTimeout > 10*time.Minute {
 			return nil, errors.New("assistant: invalid confirmation limits")
+		}
+		if c.ResultReply != nil {
+			reply := *c.ResultReply
+			if reply.Timeout == 0 {
+				reply.Timeout = 30 * time.Second
+			}
+			if reply.MaxOutputTokens == 0 {
+				reply.MaxOutputTokens = 1600
+			}
+			if reply.MaxOutputTokens < 256 || reply.MaxOutputTokens > 8192 {
+				return nil, errors.New("assistant: invalid result reply output limit")
+			}
+			if reply.Timeout < time.Millisecond || reply.Timeout > 2*time.Minute {
+				return nil, errors.New("assistant: invalid result reply timeout")
+			}
+			c.ResultReply = &reply
 		}
 		cfg.Confirmation = &c
 	}
@@ -684,7 +700,7 @@ func (p *projection) step(step agent.Step, host func(agent.Step)) {
 				return
 			}
 		}
-		status, summary := ihtml.ChatToolSuccess, "Tool completed."
+		status, summary := ihtml.ChatToolSuccess, "Invocation returned; no public result details were provided."
 		switch {
 		case step.Err != "":
 			status, summary = ihtml.ChatToolError, "Tool failed."
@@ -693,14 +709,15 @@ func (p *projection) step(step agent.Step, host func(agent.Step)) {
 		case step.Replayed:
 			status, summary = ihtml.ChatToolCancelled, "Duplicate invocation suppressed."
 		case step.Completion == agent.ToolCompletionAsynchronous:
+			status = ihtml.ChatToolAccepted
 			summary = "Request accepted; completion is not confirmed."
 		}
 		p.toolSeq++
 		event := ihtml.ChatStreamEvent{Type: ihtml.ChatStreamToolResult, ToolID: fmt.Sprintf("%s_tool_%d", p.id, p.toolSeq), ToolName: step.ToolName, ToolStatus: status, ToolSummary: summary}
-		if status == ihtml.ChatToolSuccess {
+		if status == ihtml.ChatToolSuccess || status == ihtml.ChatToolAccepted {
 			view := p.session.publicToolResult(p.ctx, p.tools[step.ToolName], step.Args, step.Result)
 			event.ToolTitle, event.ToolResult = view.Title, view.Result
-			if view.Status != "" {
+			if view.Status != "" && !(status == ihtml.ChatToolAccepted && view.Status == ihtml.ChatToolSuccess) {
 				event.ToolStatus = view.Status
 			}
 			if view.Summary != "" {
@@ -757,7 +774,7 @@ func (s *session) publicToolResult(ctx context.Context, tool agent.Tool, args js
 	if len(view.Title) > 1024 || len(view.Summary) > 32768 {
 		return ToolResultView{}
 	}
-	if view.Status != "" && view.Status != ihtml.ChatToolSuccess && view.Status != ihtml.ChatToolError && view.Status != ihtml.ChatToolUnknown {
+	if view.Status != "" && view.Status != ihtml.ChatToolSuccess && view.Status != ihtml.ChatToolAccepted && view.Status != ihtml.ChatToolError && view.Status != ihtml.ChatToolUnknown {
 		view.Status = ""
 	}
 	raw, err := json.Marshal(view.Result)

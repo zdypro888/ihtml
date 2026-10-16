@@ -327,3 +327,28 @@ checkpoint 按命名空间隔离，默认序列化器保留 typed Eino 消息。
 钩子只返回经过宿主脱敏的标题、摘要与结果 JSON；默认不会向浏览器透传原始 Handler 输出。
 钩子异常不能改变实际执行状态。开始和结果事件可只携带 `tool_id`/确认引用，
 前端会保留原签名卡片的目标、标题和请求，按同一轮次的 ID 更新而非新增一条操作。
+
+
+手动确认后的结果解释可通过 `ConfirmationConfig.ResultReply` 启用：
+
+```go
+ResultReply: &assistant.ResultReplyConfig{
+    Timeout: 30 * time.Second,
+    MaxOutputTokens: 1600,
+    Begin: acquireExistingModelBudget, // 复用宿主权限及额度，返回 release
+    Complete: saveExplanation,         // 可选：把最终解释写入原对话历史
+},
+```
+
+该阶段先发送权威工具回执，再使用 `TurnModeOneShot` 生成一次无工具答复。
+只传原始用户意图和 `PresentToolResult` 的公开标题/摘要/结果，不传原调用参数、
+Handler 私有输出、确认令牌、工具集、技能、检查点或引擎历史。
+这不是恢复操作计划：任何新业务动作仍需新的签名确认。
+部分失败与 unknown 始终保留在工具回执中，模型不能覆盖状态；accepted 不表示业务完成。
+超时、取消、空答复、泛化“Tool completed”、模型异常或历史保存失败都退回已知回执，
+不重试操作。`Begin` 的预算释放在所有退出分支执行。没有公开回执时不调用总结模型。
+未启用该选项的宿主保持原手动确认协议；正常模型轮次及原生 checkpoint 恢复协议不变。
+
+工具事件新增 `tool_status: "accepted"`，表示异步请求已接收，不能视为业务完成。
+它是卡片的终态回执（没有可再次确认的按钮）；业务后续状态仍须查询原任务。
+公开投影可标记部分失败或 unknown，但不能把异步元数据降为同步 success。

@@ -2101,3 +2101,7 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
 /* 完整名单和逐项回执保留换行；长列表可自然滚动，不能静默裁掉未展示目标。 */
 .ihtml-tool .t-primary, .ihtml-tool .t-facts dd { white-space: pre-line; }
 .ihtml-tool .t-head .t-summary { white-space: normal; max-height: 3em; overflow: hidden; }
+
+/* 异步接收用信息色，不能显示成业务完成的绿色。 */
+.ihtml-tool[data-status="accepted"] .t-status { background: var(--ui-primary-soft); color: var(--ui-primary-text); }
+.ihtml-tool[data-status="accepted"] .t-live-result { border-left-color: var(--ui-primary-border); }

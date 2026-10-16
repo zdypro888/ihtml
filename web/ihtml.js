@@ -5021,7 +5021,7 @@
 
     /* ---------- AI 对话抽屉 ---------- */
     const TOOL_STATUS_LABEL = {
-      running: T('tool_running'), pending: T('tool_pending'), success: T('tool_success'),
+      running: T('tool_running'), pending: T('tool_pending'), success: T('tool_success'), accepted: T('tool_accepted'),
       error: T('tool_error'), cancelled: T('tool_cancelled'), unknown: T('tool_unknown'),
     };
     const RISK_LABEL = { low: T('risk_low'), medium: T('risk_medium'), high: T('risk_high'), blocked: T('risk_blocked') };
@@ -6392,7 +6392,8 @@
         t.answer.classList.remove('streaming');
         t.answer.removeAttribute('data-content-format');
         t.answer.style.display = 'none';
-        t.process.open = true;
+        // 确认后的结果总结只重置正文，保留用户选择的过程展开状态和真实回执。
+        if (!t.confirmingTool) t.process.open = true;
         if (t.lastKind === 'answer') t.lastKind = '';
         this.updateProcess(t);
         this.scroll();
@@ -6602,7 +6603,7 @@
           : (resultSummary || view.action)));
         let primary = null;
         if (primaryText && primaryText !== view.title && primaryText !== view.action) {
-          primary = el('div', 't-primary' + (rec.status === 'success' || rec.status === 'error' ? ' t-live-result' : ''), primaryText);
+          primary = el('div', 't-primary' + (rec.status === 'success' || rec.status === 'accepted' || rec.status === 'error' ? ' t-live-result' : ''), primaryText);
           primary.id = rec.domID + '-primary';
           rec.body.appendChild(primary);
         }
@@ -6724,7 +6725,7 @@
           if (primary) rec.body.setAttribute('aria-describedby', primary.id);
         }
         if (rec.status === 'pending' || rec.status === 'error' || rec.status === 'unknown') rec.card.open = true;
-        else if (['success', 'cancelled'].includes(rec.status) && !rec.pinned) rec.card.open = false;
+        else if (['success', 'accepted', 'cancelled'].includes(rec.status) && !rec.pinned) rec.card.open = false;
         this.syncToolSummary(rec);
         if (hadFocus) queueMicrotask(() => {
           const owner = rec.ownerTurn;
@@ -6798,11 +6799,11 @@
           this.finalizeThinking(t, t.activeThinkingID);
         }
         this.setToolStatus(rec, status, t);
-        if (['success', 'error', 'cancelled'].includes(status)) this.releaseAnonymousTool(t, id);
+        if (['success', 'accepted', 'error', 'cancelled'].includes(status)) this.releaseAnonymousTool(t, id);
         this.renderToolRecord(rec, rec.lastEvent, t);
         if (status === 'pending' && previous !== 'pending') {
           this.announce(T('confirmation_announced', { name: rec.title.textContent, risk: RISK_LABEL[rec.call.risk] || rec.call.risk || T('risk_low') }));
-        } else if (previous !== status && ['success', 'error', 'cancelled'].includes(status)) {
+        } else if (previous !== status && ['success', 'accepted', 'error', 'cancelled'].includes(status)) {
           this.announce(T('tool_result_announced', {
             name: rec.title.textContent,
             status: TOOL_STATUS_LABEL[status] || status,

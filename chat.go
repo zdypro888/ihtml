@@ -69,9 +69,11 @@ const (
 	// 回传当前页面的实时渲染状态; 内核以 inspect_result 帧应答同一 inspect_id。
 	ChatStreamInspectRequest = "inspect_request"
 
-	ChatToolPending   = "pending"
-	ChatToolRunning   = "running"
-	ChatToolSuccess   = "success"
+	ChatToolPending = "pending"
+	ChatToolRunning = "running"
+	ChatToolSuccess = "success"
+	// ChatToolAccepted 表示异步请求已接收，尚未确认业务完成。
+	ChatToolAccepted  = "accepted"
 	ChatToolError     = "error"
 	ChatToolCancelled = "cancelled"
 	ChatToolUnknown   = "unknown"
