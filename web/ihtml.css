@@ -2075,3 +2075,6 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
 
 .ihtml-root .t-status.unknown { color: var(--ui-warn); background: color-mix(in srgb, var(--ui-warn) 10%, transparent); }
 .ihtml-root .t-verification { display: flex; flex-wrap: wrap; gap: 12px; margin: 12px 0; }
+
+/* 流程摘要与详情不重复；hidden 不能被布局规则覆盖。 */
+.ihtml-chat .pbody[hidden], .ihtml-chat .ihtml-pline[hidden] { display: none !important; }

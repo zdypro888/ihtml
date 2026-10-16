@@ -6184,6 +6184,11 @@
         t.process.dataset.state = t.cancelled ? 'cancelled' : (t.turnFailed || t.errorCount > 0 ? 'error' : (t.pendingCount > 0 ? 'pending' : (t.done ? 'complete' : 'running')));
         t.process.setAttribute('aria-busy', String(!t.done));
         t.note.textContent = this.processSummaryText(t);
+        // 通用等待提示只在摘要显示一次；不同的状态详情、错误和工具卡仍保留。
+        for (const node of t.pBody.querySelectorAll('.ihtml-pline[data-persistent="false"]')) {
+          node.hidden = node.textContent.trim() === t.note.textContent.trim();
+        }
+        t.pBody.hidden = !Array.from(t.pBody.children).some((node) => !node.hidden);
         if (t.done) {
           this.finalizeThinking(t);
           if (t.agentOverview && !t.agentState.manualPaused && !t.errorCount) t.agentOverview.open = false;

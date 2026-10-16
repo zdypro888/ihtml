@@ -754,3 +754,15 @@ test('reasoning replaces the transient working placeholder instead of displaying
   assert.equal(await page.locator('#a .ihtml-think').count(),1);
   await page.evaluate(()=>a.destroy());
 });
+
+
+test('generic working status appears only in summary and distinct details remain visible', async (t) => {
+ const page=await fixture(t);
+ await page.evaluate(async()=>{window.a=ihtml.mountChat('#a',{locale:'zh-CN'});await a.ready();await a.chat.send('本机状态测试');sockets[0].emit({type:'turn_start',run_id:'status-once',seq:1});});
+ assert.equal(await page.locator('#a .pbody').isVisible(),false);
+ assert.equal(await page.locator('#a .ihtml-pline:visible').count(),0);
+ await page.evaluate(()=>sockets[0].emit({type:'assistant_status',run_id:'status-once',seq:2,status:'正在读取本机模拟数据'}));
+ assert.equal(await page.locator('#a .pbody').isVisible(),true);
+ assert.equal(await page.locator('#a .ihtml-pline:visible').textContent(),'正在读取本机模拟数据');
+ await page.evaluate(()=>a.destroy());
+});
