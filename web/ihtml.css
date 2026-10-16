@@ -1285,11 +1285,11 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
 /* Inline and drawer assistants share the same renderer and controls. */
 .ihtml-root.ihtml-chat-inline {
   min-width: 0; min-height: 0;
-  height: 100%;
+  height: 100%; display: flex; flex-direction: column; overflow: hidden;
 }
 .ihtml-chat-inline > .ihtml-chat {
   position: relative; inset: auto; z-index: auto;
-  width: 100%; height: 100%; min-height: 320px;
+  width: 100%; height: 100%; min-height: 0; flex: 1 1 0%; overflow: hidden;
   max-height: none; border: 0; box-shadow: none;
   animation: none; background: var(--ui-bg);
 }
@@ -1374,12 +1374,18 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
   flex: 1; min-height: 0; overflow-y: auto;
   padding: 20px 22px 28px;
   display: flex; flex-direction: column; gap: 18px;
-  background: transparent;
+  background: transparent; overscroll-behavior: contain; overflow-anchor: none;
 }
+.ihtml-chat-latest {
+  flex-shrink: 0; align-self: center; margin: 4px 12px; min-height: 36px;
+  padding: 6px 14px; border: 1px solid var(--ui-control-border); border-radius: 20px;
+  background: var(--ui-surface); color: var(--ui-primary-text); font: inherit; font-size: 12px; cursor: pointer;
+}
+.ihtml-chat-latest[hidden] { display: none !important; }
 
 /* 消息卡片 */
 .ihtml-msg {
-  display: grid; gap: 6px;
+  display: grid; gap: 6px; flex-shrink: 0;
   min-width: 0;
   animation: ihtml-pop 0.16s ease;
 }

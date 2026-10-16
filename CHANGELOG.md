@@ -5,6 +5,15 @@ the first tagged release, changes are recorded under **Unreleased**.
 
 ## Unreleased
 
+### Fixed
+
+- Inline chat fits short host viewports without compressing messages into the composer.
+- Streaming answers and reasoning follow their rendered height, including delayed
+  Markdown, disclosure changes and host resizing. Upward wheel/touch/keyboard or
+  scrollbar reading pauses following; “Jump to latest” resumes it. Pending frames
+  respect a user pause, and observers are released when an instance is destroyed.
+
+
 ### Added
 
 - `agent` engine-neutral contracts and `agent/eino` reusable native Eino runtime,

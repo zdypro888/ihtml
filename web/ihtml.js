@@ -5143,6 +5143,22 @@
       return id;
     }
 
+    // 仅用户向上阅读才暂停跟随；内容增长、折叠和键盘缩放产生的 scroll 不代表用户意图。
+    function pauseScrollOnUserIntent(node, pause) {
+      let touchY = 0, upward = 0;
+      node.addEventListener('wheel', ev => { if (ev.deltaY < 0 && Math.abs(ev.deltaY) >= Math.abs(ev.deltaX)) pause(); }, { passive: true });
+      node.addEventListener('touchstart', ev => { touchY = ev.touches[0]?.clientY || 0; upward = 0; }, { passive: true });
+      node.addEventListener('touchmove', ev => { const next = ev.touches[0]?.clientY; if (next == null) return; upward = Math.max(0, upward + next - touchY); if (upward > 4) pause(); touchY = next; }, { passive: true });
+      node.addEventListener('keydown', ev => {
+        if (!ev.defaultPrevented && ['ArrowUp', 'PageUp', 'Home'].includes(ev.key) && !ev.target.closest('input, textarea, select, [contenteditable="true"]')) pause();
+      });
+      node.addEventListener('pointerdown', ev => {
+        // 桌面滚动条拖动也属于主动阅读；普通文本选择不改变自动跟随状态。
+        const rect = node.getBoundingClientRect();
+        if (ev.target === node && node.offsetWidth > node.clientWidth && ev.clientX >= rect.left + node.clientWidth) pause();
+      });
+    }
+
     const chat = {
       enabled: false,
       entry: null,
@@ -5312,9 +5328,16 @@
         // 流式正文和推理只负责视觉呈现。读屏播报走下面独立的、简短的
         // status 通道，避免每个 token 与最终全文被重复朗读。
         log.setAttribute('aria-live', 'off');
+        log.tabIndex = 0;
+        let lastLogTop = log.scrollTop;
         log.addEventListener('scroll', () => {
-          this.follow = log.scrollTop + log.clientHeight >= log.scrollHeight - 48;
+          if (log.scrollTop + log.clientHeight >= log.scrollHeight - 48 && (this.follow || log.scrollTop > lastLogTop)) this.setFollowing(true);
+          lastLogTop = log.scrollTop;
         });
+        pauseScrollOnUserIntent(log, () => this.setFollowing(false));
+        const latestBtn = el('button', 'ihtml-chat-latest', T('chat_latest'));
+        latestBtn.type = 'button'; latestBtn.hidden = true;
+        latestBtn.onclick = () => { const focused = doc.activeElement === latestBtn; this.scroll(true); if (focused) log.focus({ preventScroll: true }); };
 
         const foot = el('div', 'ihtml-chat-foot');
         const compose = el('div', 'compose');
@@ -5360,11 +5383,26 @@
         live.setAttribute('aria-atomic', 'true');
 
         if (!chatOnly) panelEl.addEventListener('keydown', (ev) => handleDialogKey(ev, panelEl, () => this.close()));
-        panelEl.append(head, toolbar, modebar, log, foot, live);
+        panelEl.append(head, toolbar, modebar, log, latestBtn, foot, live);
         if (!chatOnly) rootEl.appendChild(mask);
         rootEl.appendChild(panelEl);
-        this.dom = { mask, panel: panelEl, log, foot, input, sendBtn, providerBadge, modelInput, dataList, freshBtn, toolbar, modebar, modeButtons, modeHint, live, readonlyBadge };
+        this.dom = { mask, panel: panelEl, log, latestBtn, foot, input, sendBtn, providerBadge, modelInput, dataList, freshBtn, toolbar, modebar, modeButtons, modeHint, live, readonlyBadge };
         this.log = log;
+        // 观察真正渲染后的消息高度；覆盖延迟 Markdown、图片加载、折叠及宿主视口变化。
+        if (typeof ResizeObserver === 'function') {
+          const resize = new ResizeObserver(() => this.scroll());
+          resize.observe(log);
+          const children = new MutationObserver(records => {
+            for (const record of records) {
+              for (const node of record.removedNodes) if (node.nodeType === 1) resize.unobserve(node);
+              for (const node of record.addedNodes) if (node.nodeType === 1) resize.observe(node);
+            }
+            this.scroll();
+          });
+          children.observe(log, { childList: true });
+          addDisposer(() => { children.disconnect(); resize.disconnect(); });
+        }
+
         on(window, 'resize', () => {
           if (this.composerResizeFrame) return;
           this.composerResizeFrame = requestAnimationFrame(() => {
@@ -5588,12 +5626,17 @@
         try { localStorage.setItem(storageKey('model'), this.model); } catch { /* 忽略 */ }
       },
 
+      setFollowing(value) {
+        this.follow = value;
+        if (this.dom?.latestBtn) this.dom.latestBtn.hidden = value;
+      },
       scroll(force) {
-        if (!this.follow && !force) return;
-        if (this.scrollFrame) return;
+        if (force) this.setFollowing(true);
+        if (!this.follow || this.scrollFrame) return;
         this.scrollFrame = requestAnimationFrame(() => {
           this.scrollFrame = 0;
-          if (this.log) this.log.scrollTop = this.log.scrollHeight;
+          // 用户可能在排队的帧执行前已上滑，不能把人强行拉回底部。
+          if (!destroyed && this.follow && this.log) this.log.scrollTop = this.log.scrollHeight;
         });
       },
 
@@ -5681,6 +5724,7 @@
         chatSessionID(true); // 换会话号 = 服务端上下文重开
         this.clearTurnTimers();
         this.log.replaceChildren();
+        this.setFollowing(true);
         this.availabilityNote = null;
         this.turn = null;
         this.turnsByRun.clear();
@@ -5988,7 +6032,7 @@
           um.appendChild(el('div', 'author', T('author_user')));
           um.appendChild(el('div', 'content', text));
           this.log.appendChild(um);
-          this.follow = true;
+          this.setFollowing(true);
           const request = chatAgentCore.requestSnapshot(this.agentModes, this.agentMode, this.model, !!this.modelInfo?.model_select);
           this.setActive(true);
           pendingTurn = this.beginTurn(request.agentMode);
@@ -6188,6 +6232,7 @@
         const follow = segment.follow || segment.pre.scrollHeight <= segment.pre.clientHeight + 24;
         segment.pre.textContent = segment.text;
         if (follow) segment.pre.scrollTop = segment.pre.scrollHeight;
+        this.scroll();
       },
       finalizeThinking(t, segmentID) {
         if (!t || !t.thinkingSegments) return;
@@ -6233,9 +6278,13 @@
           wrap.append(summary, pre);
           t.pBody.appendChild(wrap);
           segment = { id, wrap, pre, meta, text: '', state: 'running', frame: 0, follow: true, truncated: false };
+          pre.tabIndex = 0;
+          let lastThinkingTop = pre.scrollTop;
           pre.addEventListener('scroll', () => {
-            segment.follow = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 24;
+            if (pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 24 && (segment.follow || pre.scrollTop > lastThinkingTop)) segment.follow = true;
+            lastThinkingTop = pre.scrollTop;
           });
+          pauseScrollOnUserIntent(pre, () => { segment.follow = false; });
           t.thinkingSegments.set(id, segment);
           t.activeThinkingID = id;
         }
@@ -6284,6 +6333,7 @@
             // Render at a bounded cadence and restore user-owned disclosure,
             // scroll and focus state after rebuilding the sanitized fragment.
             replaceAssistantPreservingView(t.answer, renderAssistant(t.text, t.contentFormat, t.answer, t.textTruncated));
+            this.scroll(); // 追加内容落入 DOM 后再跟随，不能只滚到上一批 token 的末尾。
           }, delay);
         }
         t.lastKind = 'answer';

@@ -705,3 +705,38 @@ for (const mode of ['desktop', 'phone', 'narrow-embed']) {
     await page.evaluate(() => a.destroy());
   });
 }
+
+test('stream follows rendered growth, pauses for readers and resumes explicitly across host resize', async (t) => {
+  const page = await fixture(t, { width: 390, height: 740 });
+  await page.evaluate(async () => {
+    document.querySelector('#b').remove();
+    const host = document.querySelector('#a'); host.style.height = '540px';
+    window.a = ihtml.mountChat(host, { locale: 'zh-CN', storageKey: 'scroll-regression' }); await a.ready();
+    await a.chat.send('本机滚动测试');
+    sockets[0].emit({ type: 'turn_start', run_id: 'scroll-run', seq: 1 });
+    sockets[0].emit({ type: 'assistant_delta', run_id: 'scroll-run', seq: 2, content_format: 'markdown', delta: '第一批段落。\n\n'.repeat(50) });
+  });
+  await page.waitForFunction(() => {
+    const log = a.root.querySelector('.ihtml-chat-log');
+    return log.scrollHeight > log.clientHeight + 300 && log.scrollHeight - log.clientHeight - log.scrollTop < 2;
+  });
+  // 最后一批 token 延迟渲染后没有更多事件，仍必须滚到真正的新末尾。
+  await page.evaluate(() => sockets[0].emit({ type: 'assistant_delta', run_id: 'scroll-run', seq: 3, delta: '最后一批段落。\n\n'.repeat(40) }));
+  await page.waitForFunction(() => a.root.textContent.includes('最后一批段落') && (() => { const log=a.root.querySelector('.ihtml-chat-log'); return log.scrollHeight-log.clientHeight-log.scrollTop<2; })());
+  const log = page.locator('#a .ihtml-chat-log');
+  await log.hover(); await page.mouse.wheel(0, -600);
+  await page.locator('#a .ihtml-chat-latest').waitFor({ state: 'visible' });
+  const before = await log.evaluate(node => node.scrollTop);
+  await page.evaluate(() => sockets[0].emit({ type: 'assistant_delta', run_id: 'scroll-run', seq: 4, delta: '阅读期间新增。\n\n'.repeat(20) }));
+  await page.waitForFunction(() => a.root.textContent.includes('阅读期间新增'));
+  assert.ok(Math.abs(await log.evaluate(node => node.scrollTop) - before) < 2, 'upward reading is not pulled to bottom');
+  await page.locator('#a .ihtml-chat-latest').click();
+  await page.waitForFunction(() => { const log=a.root.querySelector('.ihtml-chat-log');return log.scrollHeight-log.clientHeight-log.scrollTop<2; });
+  await page.evaluate(() => { document.querySelector('#a').style.height='220px'; });
+  await page.waitForFunction(() => {
+    const panel=a.root.querySelector('.ihtml-chat').getBoundingClientRect(), foot=a.root.querySelector('.ihtml-chat-foot').getBoundingClientRect();
+    const log=a.root.querySelector('.ihtml-chat-log');return foot.bottom<=panel.bottom+1 && log.scrollHeight-log.clientHeight-log.scrollTop<2;
+  });
+  assert.equal(await page.locator('#a .ihtml-chat-foot textarea').isVisible(), true);
+  await page.evaluate(() => a.destroy());
+});

@@ -7,7 +7,7 @@
   const I18N = {
     zh: {
       chat_entry: 'AI 助手', chat_title: 'AI 助手', send: '发送', stop: '停止',
-      new_session: '新对话', close: '关闭', settings: '页面设置', menu: '菜单', dialog: '对话框', page_actions: '页面操作', conversation: '与 AI 助手的对话',
+      chat_latest: '回到最新', new_session: '新对话', close: '关闭', settings: '页面设置', menu: '菜单', dialog: '对话框', page_actions: '页面操作', conversation: '与 AI 助手的对话',
       refresh_models: '刷新模型', model_placeholder: '选择已加载模型, 或直接输入模型名',
       agent_mode_label: '执行模式', agent_fast: 'Fast', agent_deep: 'Deep',
       agent_fast_hint: '低延迟单代理，适合直接问答和明确修改。',
@@ -127,7 +127,7 @@
     },
     en: {
       chat_entry: 'AI assistant', chat_title: 'AI assistant', send: 'Send', stop: 'Stop',
-      new_session: 'New chat', close: 'Close', settings: 'Page settings', menu: 'Menu', dialog: 'Dialog', page_actions: 'Page actions', conversation: 'Conversation with the AI assistant',
+      chat_latest: 'Jump to latest', new_session: 'New chat', close: 'Close', settings: 'Page settings', menu: 'Menu', dialog: 'Dialog', page_actions: 'Page actions', conversation: 'Conversation with the AI assistant',
       refresh_models: 'Refresh', model_placeholder: 'Pick a loaded model or type a name',
       agent_mode_label: 'Execution mode', agent_fast: 'Fast', agent_deep: 'Deep',
       agent_fast_hint: 'Low-latency single agent for direct questions and well-scoped changes.',
