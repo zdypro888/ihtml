@@ -6098,7 +6098,8 @@
         answer.setAttribute('aria-live', 'off');
         const actions = el('div', 'ihtml-trace-actions');
         actions.hidden = true;
-        card.append(process, answer, actions);
+        // 工具确认和执行回执固定在正文之前；流式总结不得把回执不断推到答复末尾。
+        card.append(process, actions, answer);
         this.log.appendChild(card);
         const turn = {
           card, process, processSummary: summary, processLabel: label, processDot, note, pBody, answer, actions,

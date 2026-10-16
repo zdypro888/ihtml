@@ -839,4 +839,7 @@ test('result explanation resets only the draft and preserves the confirmed recei
   assert.ok(text.includes('已更新 fixture 的虚拟设置。没有执行其他操作。'));
   assert.ok(text.includes('fixture 已保存'));
   assert.ok(!text.includes('等待确认，尚未执行。'));
+  assert.equal(await page.locator('#a .ihtml-trace-actions').evaluate(node =>
+    !!(node.compareDocumentPosition(node.parentElement.querySelector('.answer')) & Node.DOCUMENT_POSITION_FOLLOWING)), true,
+    'confirmation and receipt remain before the streamed final explanation');
 });
