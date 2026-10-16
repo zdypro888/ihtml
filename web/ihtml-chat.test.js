@@ -740,3 +740,17 @@ test('stream follows rendered growth, pauses for readers and resumes explicitly 
   assert.equal(await page.locator('#a .ihtml-chat-foot textarea').isVisible(), true);
   await page.evaluate(() => a.destroy());
 });
+
+
+test('reasoning replaces the transient working placeholder instead of displaying it twice', async (t) => {
+  const page = await fixture(t);
+  await page.evaluate(async () => {
+    window.a=ihtml.mountChat('#a',{locale:'zh-CN'});await a.ready();await a.chat.send('本机分析展示测试');
+    sockets[0].emit({type:'turn_start',run_id:'reason-layout',seq:1});
+    sockets[0].emit({type:'assistant_thinking',run_id:'reason-layout',seq:2,thinking_id:'one',thinking:'正在检查本机模拟状态。'});
+  });
+  await page.waitForFunction(()=>a.root.querySelector('.think-body')?.textContent.includes('本机模拟状态'));
+  assert.equal(await page.locator('#a .pbody .ihtml-pline[data-persistent="false"]').count(),0);
+  assert.equal(await page.locator('#a .ihtml-think').count(),1);
+  await page.evaluate(()=>a.destroy());
+});

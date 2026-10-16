@@ -6254,6 +6254,7 @@
       appendThinking(delta, ev, t = this.turn) {
         if (!t) return;
         ev = ev && typeof ev === 'object' ? ev : {};
+        if (delta) this.clearTransientStatus(t); // 已有真实分析内容后移除重复的临时“正在处理”。
         const rawID = String(ev.thinking_id || '');
         const runID = String(ev.run_id || 'legacy');
         let id = rawID ? runID + ':' + rawID : t.activeThinkingID;

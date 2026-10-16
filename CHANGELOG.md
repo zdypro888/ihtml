@@ -7,6 +7,7 @@ the first tagged release, changes are recorded under **Unreleased**.
 
 ### Fixed
 
+- Reasoning content replaces the transient working placeholder without duplicate status text.
 - Inline chat fits short host viewports without compressing messages into the composer.
 - Streaming answers and reasoning follow their rendered height, including delayed
   Markdown, disclosure changes and host resizing. Upward wheel/touch/keyboard or
