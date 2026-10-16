@@ -1128,6 +1128,11 @@
       const title = safeText(meta ? t(meta[0]) : (ev.tool_title || source.title || name || t('tool_title_unknown')), TITLE_LIMIT);
       const body = asObject(source.body);
       const projected = actionAndFacts(name, body, t);
+      // 宿主已提供可读标题时，通用卡片不用内部工具标识重复充当操作说明。
+      if (!meta && (ev.tool_title || source.title)) {
+        projected.action = title;
+        projected.facts = projected.facts.filter(fact => fact.label !== t('tool_fact_operation'));
+      }
       const pending = ev.type === 'confirmation_required' || ev.tool_status === 'pending';
       const summarySource = pending && source.reason ? source.reason : (ev.tool_summary || source.reason || projected.action);
       const summary = safeText(summarySource, SUMMARY_LIMIT);

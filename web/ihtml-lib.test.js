@@ -1156,3 +1156,12 @@ test('host operation previews distinguish changed fields and redact credentials'
  const bounded=chatTrace.reviewView({before:{},after:Object.fromEntries(Array.from({length:100},(_,i)=>['field'+i,i]))});
  assert.equal(bounded.rows.length,24);assert.equal(bounded.truncated,true);
 });
+
+
+test('host API cards use their readable title while retaining technical request evidence', () => {
+ const view=chatTrace.toolView({name:'api_platform_user_delete',title:'删除平台登录身份',method:'DELETE',path:'/api/v1/admin/users/virtual',body:{'目标用户':'virtual@example.test'}},{type:'confirmation_required'},makeT('zh'));
+ assert.equal(view.action,'删除平台登录身份');
+ assert.ok(view.facts.some(fact=>fact.value.includes('virtual@example.test')));
+ assert.ok(!view.facts.some(fact=>fact.value.includes('api_platform_user_delete')));
+ assert.ok(view.request.includes('/api/v1/admin/users/virtual'));
+});
