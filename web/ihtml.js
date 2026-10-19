@@ -5333,8 +5333,12 @@
         log.addEventListener('scroll', () => {
           if (log.scrollTop + log.clientHeight >= log.scrollHeight - 48 && (this.follow || log.scrollTop > lastLogTop)) this.setFollowing(true);
           lastLogTop = log.scrollTop;
+          this.syncLatest();
         });
-        pauseScrollOnUserIntent(log, () => this.setFollowing(false));
+        pauseScrollOnUserIntent(log, () => {
+          lastLogTop = log.scrollTop;
+          if (log.scrollHeight > log.clientHeight + 1) this.setFollowing(false);
+        });
         const latestBtn = el('button', 'ihtml-chat-latest', T('chat_latest'));
         latestBtn.type = 'button'; latestBtn.hidden = true;
         latestBtn.onclick = () => { const focused = doc.activeElement === latestBtn; this.scroll(true); if (focused) log.focus({ preventScroll: true }); };
@@ -5389,7 +5393,7 @@
         this.log = log;
         // 观察真正渲染后的消息高度；覆盖延迟 Markdown、图片加载、折叠及宿主视口变化。
         if (typeof ResizeObserver === 'function') {
-          const resize = new ResizeObserver(() => this.scroll());
+          const resize = new ResizeObserver(() => { this.syncLatest(); this.scroll(); });
           resize.observe(log);
           const children = new MutationObserver(records => {
             for (const record of records) {
@@ -5627,7 +5631,15 @@
 
       setFollowing(value) {
         this.follow = value;
-        if (this.dom?.latestBtn) this.dom.latestBtn.hidden = value;
+        this.syncLatest();
+      },
+      syncLatest() {
+        if (!this.log || !this.dom?.latestBtn) return;
+        const remaining = Math.max(0, this.log.scrollHeight - this.log.clientHeight - this.log.scrollTop);
+        // Intent pauses streaming immediately, but only a real distance from
+        // the end warrants a button. Hysteresis avoids flicker near the edge.
+        const button = this.dom.latestBtn;
+        button.hidden = this.follow || remaining <= (button.hidden ? 96 : 48);
       },
       scroll(force) {
         if (force) this.setFollowing(true);
@@ -5635,7 +5647,7 @@
         this.scrollFrame = requestAnimationFrame(() => {
           this.scrollFrame = 0;
           // 用户可能在排队的帧执行前已上滑，不能把人强行拉回底部。
-          if (!destroyed && this.follow && this.log) this.log.scrollTop = this.log.scrollHeight;
+          if (!destroyed && this.follow && this.log) { this.log.scrollTop = this.log.scrollHeight; this.syncLatest(); }
         });
       },
 

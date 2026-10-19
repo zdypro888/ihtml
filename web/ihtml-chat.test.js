@@ -701,6 +701,33 @@ for (const mode of ['desktop', 'phone', 'narrow-embed']) {
   });
 }
 
+test('latest button ignores short conversations and tiny scrolling, then clears on return', async (t) => {
+  const page = await fixture(t);
+  await page.evaluate(async () => {
+    window.a = ihtml.mountChat('#a', { locale: 'zh-CN' }); await a.ready();
+    const log = a.root.querySelector('.ihtml-chat-log');
+    log.dispatchEvent(new WheelEvent('wheel', { deltaY: -20 }));
+  });
+  const latest = page.locator('#a .ihtml-chat-latest');
+  assert.equal(await latest.isVisible(), false);
+  await page.evaluate(async () => {
+    await a.chat.send('scroll test');
+    sockets[0].emit({ type: 'turn_start', run_id: 'latest', seq: 1 });
+    sockets[0].emit({ type: 'assistant_delta', run_id: 'latest', seq: 2, delta: 'Long conversation.\n\n'.repeat(100) });
+  });
+  await page.waitForFunction(() => { const log=a.root.querySelector('.ihtml-chat-log'); return log.scrollHeight>log.clientHeight+400 && log.scrollHeight-log.clientHeight-log.scrollTop<2; });
+  const log = page.locator('#a .ihtml-chat-log');
+  await log.evaluate(node => { node.dispatchEvent(new WheelEvent('wheel', { deltaY: -20 })); node.scrollTop -= 20; node.dispatchEvent(new Event('scroll')); });
+  assert.equal(await latest.isVisible(), false);
+  await log.evaluate(node => { node.scrollTop -= 200; node.dispatchEvent(new Event('scroll')); });
+  await latest.waitFor({ state: 'visible' });
+  await log.evaluate(node => { node.scrollTop = node.scrollHeight - node.clientHeight - 70; node.dispatchEvent(new Event('scroll')); });
+  assert.equal(await latest.isVisible(), true, 'hysteresis avoids threshold flicker');
+  await log.evaluate(node => { node.scrollTop = node.scrollHeight; node.dispatchEvent(new Event('scroll')); });
+  await latest.waitFor({ state: 'hidden' });
+  await page.evaluate(() => a.destroy());
+});
+
 test('stream follows rendered growth, pauses for readers and resumes explicitly across host resize', async (t) => {
   const page = await fixture(t, { width: 390, height: 740 });
   await page.evaluate(async () => {
@@ -719,12 +746,20 @@ test('stream follows rendered growth, pauses for readers and resumes explicitly 
   await page.evaluate(() => sockets[0].emit({ type: 'assistant_delta', run_id: 'scroll-run', seq: 3, delta: '最后一批段落。\n\n'.repeat(40) }));
   await page.waitForFunction(() => a.root.textContent.includes('最后一批段落') && (() => { const log=a.root.querySelector('.ihtml-chat-log'); return log.scrollHeight-log.clientHeight-log.scrollTop<2; })());
   const log = page.locator('#a .ihtml-chat-log');
+  await log.evaluate(node => node.dispatchEvent(new WheelEvent('wheel', { deltaY: -1 })));
+  assert.equal(await page.locator('#a .ihtml-chat-latest').isVisible(), false, 'intent at the bottom is not unread distance');
+  await log.evaluate(node => { node.scrollTop -= 20; node.dispatchEvent(new Event('scroll')); });
+  assert.equal(await page.locator('#a .ihtml-chat-latest').isVisible(), false, 'tiny scroll stays quiet');
   await log.hover(); await page.mouse.wheel(0, -600);
   await page.locator('#a .ihtml-chat-latest').waitFor({ state: 'visible' });
   const before = await log.evaluate(node => node.scrollTop);
   await page.evaluate(() => sockets[0].emit({ type: 'assistant_delta', run_id: 'scroll-run', seq: 4, delta: '阅读期间新增。\n\n'.repeat(20) }));
   await page.waitForFunction(() => a.root.textContent.includes('阅读期间新增'));
   assert.ok(Math.abs(await log.evaluate(node => node.scrollTop) - before) < 2, 'upward reading is not pulled to bottom');
+  await log.evaluate(node => { node.scrollTop = node.scrollHeight; node.dispatchEvent(new Event('scroll')); });
+  await page.locator('#a .ihtml-chat-latest').waitFor({ state: 'hidden' });
+  await log.hover(); await page.mouse.wheel(0, -600);
+  await page.locator('#a .ihtml-chat-latest').waitFor({ state: 'visible' });
   await page.locator('#a .ihtml-chat-latest').click();
   await page.waitForFunction(() => { const log=a.root.querySelector('.ihtml-chat-log');return log.scrollHeight-log.clientHeight-log.scrollTop<2; });
   await page.evaluate(() => { document.querySelector('#a').style.height='220px'; });
@@ -783,7 +818,7 @@ test('explicit trace and reasoning expansion survive streamed answers without be
  assert.notEqual(await page.locator('#a .ihtml-process').getAttribute('open'),null);
  assert.notEqual(await page.locator('#a .ihtml-think').getAttribute('open'),null);
  assert.equal(await page.locator('#a .think-body').isVisible(),true);
- assert.equal(await page.locator('#a .ihtml-chat-latest').isVisible(),true);
+ assert.equal(await page.locator('#a .ihtml-chat-latest').isVisible(),false,'expanded short trace does not imply hidden messages');
  const frozen=await page.locator('#a .p-meta').textContent();await page.waitForTimeout(1200);assert.equal(await page.locator('#a .p-meta').textContent(),frozen);
  await page.evaluate(()=>a.destroy());
 });
