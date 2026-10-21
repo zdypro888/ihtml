@@ -1057,7 +1057,7 @@ test('compact embedded header omits a duplicate title but keeps new-chat and acc
 
 test('composer has readable single-line proportions and grows for multiline text',async(t)=>{
  const page=await fixture(t);
- await page.evaluate(async()=>{window.a=ihtml.mountChat('#a',{chatHeader:'compact'});await a.ready();});
+ await page.evaluate(async()=>{window.a=ihtml.mountChat('#a',{chatHeader:'compact',strings:{composer_placeholder:'A very long placeholder that wraps across several lines in a small chat window'}});a.root.style.width='320px';await a.ready();});
  const input=page.locator('#a textarea');
  const initial=await input.evaluate(n=>({height:n.getBoundingClientRect().height,font:parseFloat(getComputedStyle(n).fontSize)}));
  assert.ok(initial.height>=44 && initial.height<=48);assert.ok(initial.font>=16);

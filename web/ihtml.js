@@ -5557,7 +5557,8 @@
         const minHeight = Number.parseFloat(style.minHeight) || 44;
         const maxHeight = Number.parseFloat(style.maxHeight) || 140;
         const border = (Number.parseFloat(style.borderTopWidth) || 0) + (Number.parseFloat(style.borderBottomWidth) || 0);
-        const scrollHeight = input.scrollHeight + (style.boxSizing === 'border-box' ? border : 0);
+        // A wrapping placeholder is a hint, not user content. Empty inputs stay one line.
+        const scrollHeight = input.value ? input.scrollHeight + (style.boxSizing === 'border-box' ? border : 0) : minHeight;
         input.style.height = Math.max(minHeight, Math.min(scrollHeight, maxHeight)) + 'px';
         input.style.overflowY = scrollHeight > maxHeight + 1 ? 'auto' : 'hidden';
         if (this.follow) this.scroll();
