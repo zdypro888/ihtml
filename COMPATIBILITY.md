@@ -327,3 +327,10 @@ host already supplies one. The chat region retains its localized accessible
 name, read-only indicator and reachable New Chat button; clear/cancellation and
 confirmation behavior are unchanged. The default and ordinary mount headers
 remain unchanged. This is presentation only, never an authorization option.
+
+`mountChat({onNewChat() { ... }})` receives a display-only notification after
+explicit New Chat/chat.clear resets; mount, identity refresh and destroy do not
+invoke it. Hosts may clear a selected persisted conversation. SDK display
+snapshots never become trusted model history; hosts re-authorize resumed server
+continuations. Auto-follow settles for two bounded animation frames and uses an
+instant scroll, preserving user-upward intent through terminal rendering.

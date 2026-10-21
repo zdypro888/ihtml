@@ -1065,3 +1065,24 @@ test('composer has readable single-line proportions and grows for multiline text
  const expanded=await input.boundingBox();assert.ok(expanded.height>initial.height);
  await input.fill('one');assert.ok((await input.boundingBox()).height<=48);
 });
+
+test('terminal markdown and trace compaction keep the last line visible without overriding a reader',async(t)=>{
+ const page=await fixture(t);
+ await page.evaluate(async()=>{window.a=ihtml.mountChat('#a',{chatHeader:'compact'});await a.ready();await a.chat.send('Finish test');
+  a.root.querySelector('.ihtml-chat-log').style.scrollBehavior='smooth';
+  sockets[0].emit({type:'assistant_delta',delta:'Long paragraph.\n\n'.repeat(90),content_format:'markdown'});
+ });
+ await page.waitForFunction(()=>{const n=a.root.querySelector('.ihtml-chat-log');return n.scrollHeight-n.clientHeight-n.scrollTop<2;});
+ await page.evaluate(()=>sockets[0].emit({type:'assistant_done',message:'Finished paragraph.\n\n'.repeat(70)+'FINAL VISIBLE LINE',content_format:'markdown'}));
+ await page.waitForFunction(()=>{const n=a.root.querySelector('.ihtml-chat-log'),last=[...a.root.querySelectorAll('.answer')].at(-1)?.querySelector('p:last-child');return last?.textContent==='FINAL VISIBLE LINE'&&n.scrollHeight-n.clientHeight-n.scrollTop<2&&last.getBoundingClientRect().bottom<=n.getBoundingClientRect().bottom+1;});
+ await page.evaluate(async()=>{await a.chat.send('Reader test');sockets[0].emit({type:'assistant_delta',delta:'Second answer.\n\n'.repeat(100),content_format:'markdown'});});
+ await page.waitForFunction(()=>{const n=a.root.querySelector('.ihtml-chat-log');return n.scrollHeight-n.clientHeight-n.scrollTop<2;});
+ const before=await page.evaluate(()=>{const n=a.root.querySelector('.ihtml-chat-log');n.style.scrollBehavior='auto';n.dispatchEvent(new WheelEvent('wheel',{deltaY:-300}));n.scrollTop-=300;return n.scrollTop;});
+ await page.evaluate(()=>sockets[0].emit({type:'assistant_done',message:'Second answer.\n\n'.repeat(100)+'Finished',content_format:'markdown'}));
+ await page.waitForTimeout(100);
+ assert.ok(Math.abs((await page.locator('#a .ihtml-chat-log').evaluate(n=>n.scrollTop))-before)<2);
+});
+
+test('new-chat host notification is explicit and never fires on mount or destroy',async(t)=>{
+ const page=await fixture(t);const result=await page.evaluate(async()=>{window.resetEvents=0;window.a=ihtml.mountChat('#a',{onNewChat:()=>resetEvents++});await a.ready();const initial=resetEvents;a.chat.clear();const cleared=resetEvents;a.destroy();return {initial,cleared,destroyed:resetEvents};});assert.deepEqual(result,{initial:0,cleared:1,destroyed:1});
+});

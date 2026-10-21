@@ -5657,6 +5657,7 @@
 
       setFollowing(value) {
         this.follow = value;
+        if (this.log) this.log.style.overflowAnchor = value ? 'none' : 'auto';
         this.syncLatest();
       },
       syncLatest() {
@@ -5670,11 +5671,17 @@
       scroll(force) {
         if (force) this.setFollowing(true);
         if (!this.follow || this.scrollFrame) return;
-        this.scrollFrame = requestAnimationFrame(() => {
+        const settle = (remaining) => {
           this.scrollFrame = 0;
-          // 用户可能在排队的帧执行前已上滑，不能把人强行拉回底部。
-          if (!destroyed && this.follow && this.log) { this.log.scrollTop = this.log.scrollHeight; this.syncLatest(); }
-        });
+          if (destroyed || !this.follow || !this.log) return;
+          // Auto-follow must not inherit a host's smooth scrolling or compete
+          // with browser anchoring after terminal Markdown/trace compaction.
+          this.log.style.overflowAnchor = 'none';
+          this.log.scrollTo({top: this.log.scrollHeight, behavior: 'instant'});
+          this.syncLatest();
+          if (remaining) this.scrollFrame = requestAnimationFrame(() => settle(remaining - 1));
+        };
+        this.scrollFrame = requestAnimationFrame(() => settle(1));
       },
 
       ensureWS() {
@@ -5771,6 +5778,7 @@
         if (this.modelInfo && (this.modelInfo.preview_only === true || this.modelInfo.model_ready === false)) {
           this.setAvailabilityNote(true, this.modelInfo.preview_only === true);
         }
+        if (typeof opts.onNewChat === 'function') { try { opts.onNewChat(); } catch { /* display-only host hook */ } }
       },
       clearTurnTimers() {
         if (this.scrollFrame) cancelAnimationFrame(this.scrollFrame);

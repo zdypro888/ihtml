@@ -264,3 +264,7 @@ the first tagged release, changes are recorded under **Unreleased**.
 
 - Use readable 16px composer text, compact single-line border-box sizing and
   border-aware auto growth so input padding cannot inflate a short message.
+
+- Settle auto-follow after final Markdown/trace compaction without smooth-scroll
+  or scroll-anchor interference; preserve readers who scrolled upward.
+- Add explicit New Chat notification for hosts with saved-conversation selection.
