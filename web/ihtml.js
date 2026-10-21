@@ -5657,7 +5657,7 @@
 
       setFollowing(value) {
         this.follow = value;
-        if (this.log) this.log.style.overflowAnchor = value ? 'none' : 'auto';
+        if (this.log) this.log.style.overflowAnchor = 'none';
         this.syncLatest();
       },
       syncLatest() {
