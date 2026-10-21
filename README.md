@@ -60,6 +60,7 @@ asynchronous cancellation lanes while sharing the execution-context primitive.
 | `ihtml/agent` | 与引擎无关的 Tool、TurnRequest、流式 Step、Usage 与 Engine 契约 |
 | `ihtml/agent/eino` | 通用 Eino 执行循环、原生 Responses/Chat Completions/Claude 模型适配、动态工具与持久会话接口 |
 | `ihtml/assistant` | 将宿主的 `agent.Engine` 接到对话协议，宿主通过 PrepareTurn/CompleteTurn/ToolExecutionGuard 保留业务治理 |
+| `ihtml/uitools` | 受信 ScopedService 上的通用界面工具元数据、只读执行、写入准备与执行；宿主保留授权、确认、代码政策与审计 |
 | `ihtml/confirmation` | 可复用确认卡签名与一次性核销；绑定用户、会话和能力边界，确认与撤销共用原子边界，不代替业务授权 |
 | `ihtml/chat/config` | 严格、版本化、可嵌入宿主配置的 AI JSON loader；SecretResolver 显式注入 |
 | `ihtml/sqlstore` | `database/sql` 持久化实现；驱动与 `*sql.DB` 生命周期由宿主拥有 |
@@ -86,10 +87,22 @@ const assistant = ihtml.mountChat(document.querySelector('#assistant'), {
 await assistant.ready();
 await assistant.chat.send('查看本周订单');
 const messages = assistant.chat.getMessages(); // 有界显示快照，可用于路由重挂载
+assistant.theme.set({mode: 'dark', primary: '#059669'}, {persist: false});
+const offTheme = assistant.theme.onChange(theme => observeTheme(theme));
 // 页面离开时 assistant.destroy()；换用户时 await assistant.refreshAuth()。
 ```
 
+`mountChat` 与工作区公开相同的 `theme.get/set/onChange`；主题更新保留当前对话、连接和待确认卡，各实例独立处理系统明暗。`set(patch,{persist:false})` 禁止将改动写回远端主题；挂载时提供宿主 `theme` 配置的实例由宿主管理，不写本地或远端主题。订阅返回取消函数，销毁后不再通知。设置面板手动选择深浅模式时，会清除固定背景／正文配色以恢复自适应调色板，保留主色、字体和圆角；直接调用 `theme.set` 仍保留未指定字段。
+
+宿主签发确认卡时，可设置 `ProposedToolCall.Presentation`（JSON `presentation`）：`confirm_text`、`cancel_text`、`reason_label`。字段只控制纯文本显示，空值或无效类型使用原本地化文案，最长显示80字符；不授予执行权限，也不改变 `beforeConfirm` 或确认协议。确认与取消文案应明确描述操作；签名器覆盖完整 presentation，宿主必须先设置文案再签名。未设置 presentation 的旧卡保持原签名。
+
 挂载点由宿主设置高度；上下文是非可信浏览器输入，不能用于授权。显示快照也不是可信模型历史。扩展接口、原生 Responses 模型、宿主 Agent 接入、历史与工具权限边界，以及 nbco 实践总结见 [AI 接入指南](docs/ai-integration.md)。可运行的独立助手示例：`go run ./example/assistant`，默认只在本机运行确定性预览，不调用付费 API。
+
+### 通用界面工具
+
+已有业务 Agent 的宿主可使用 `uitools.ReadTools()`／`WriteTools()`，将 `Name/Label/Description/Parameters/Write` 转成自身工具注册；`Read(ctx,runtime,args)` 查询，`Prepare` 返回不修改数据的 `Draft`，`Apply` 执行已批准的参数。`Runtime.Service` 必须来自受信用户绑定的 `ScopedService`；`CheckItems` 是卡片写入和恢复历史版本的必填代码政策，准备和实际写入均检查；整页发布要求 `ScopedPagePublicationService` 原子能力，缺失时拒绝，不以多步写入代替。`FormatTime`／`ChangedBy` 可由宿主配置。
+
+工具不实现业务身份、实时授权、额度、确认签名或审计；这些由宿主在调用 `Apply` 前核验并保留。公司模板审批和经营数据政策也留在宿主。内置聊天工具保留原生确认及浏览器实时自检，和该包共享可兼容的解析及页面归属校验。
 
 ## 嵌入宿主应用（SDK 形态）
 

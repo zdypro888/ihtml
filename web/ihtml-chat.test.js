@@ -826,7 +826,7 @@ test('explicit trace and reasoning expansion survive streamed answers without be
 test('reference-only tool events retain exact target and tool_id deduplicates within its own turn', async (t) => {
   const page = await fixture(t);
   await page.evaluate(async () => {
-    window.a = ihtml.mountChat('#a'); await a.ready();
+    window.a = ihtml.mountChat('#a', {locale:'zh-CN'}); await a.ready();
     await a.chat.send('first');
     const s = sockets[0];
     s.emit({type:'turn_start',run_id:'first',seq:1});
@@ -953,4 +953,88 @@ test('failed host request cannot fall back to default network transport', async(
   return {requests:calls.length,sockets:sockets.length,sent};
  });
  assert.deepEqual(result,{requests:0,sockets:0,sent:false});
+});
+
+test('signed card presentation is bounded plain text, falls back safely and preserves confirmation frames', async (t) => {
+  const page = await fixture(t);
+  await page.evaluate(async () => {
+    window.a = ihtml.mountChat('#a'); await a.ready(); await a.chat.send('Prepare');
+    window.presentedCall = {id:'presented',name:'write',title:'Business action',method:'POST',path:'/write',body:{amount:100},reason:'Reviewed outcome',confirmation_nonce:'nonce',confirmation_token:'SIGNED',presentation:{confirm_text:'Confirm reviewed action',cancel_text:'<img src=x onerror=alert(1)>',reason_label:'Expected outcome:'}};
+    sockets[0].emit({type:'turn_start',run_id:'presentation',seq:1});
+    sockets[0].emit({type:'confirmation_required',run_id:'presentation',seq:2,tool_call:presentedCall});
+    sockets[0].emit({type:'assistant_done',run_id:'presentation',seq:3,message:'Ready'});
+  });
+  assert.equal(await page.locator('#a .t-actions .ok').textContent(), 'Confirm reviewed action');
+  assert.equal(await page.locator('#a .t-actions button:not(.ok)').textContent(), '<img src=x onerror=alert(1)>');
+  assert.equal(await page.locator('#a .t-reason strong').textContent(), 'Expected outcome:');
+  assert.equal(await page.locator('#a .t-actions img').count(), 0);
+  assert.equal(await page.locator('#a .t-actions .ok').getAttribute('aria-label'), 'Confirm reviewed action · Business action');
+  await page.locator('#a .t-actions .ok').click();
+  await page.waitForFunction(() => sockets[0].sent.length === 2);
+  assert.deepEqual(await page.evaluate(() => sockets[0].sent[1].tool_call), await page.evaluate(() => presentedCall));
+
+  await page.evaluate(() => {
+    sockets[0].emit({type:'tool_result',run_id:'presentation',seq:4,tool_call:presentedCall,tool_status:'success'});
+    sockets[0].emit({type:'confirmation_required',run_id:'presentation',seq:5,tool_call:{...presentedCall,id:'fallback',confirmation_nonce:'other',presentation:{confirm_text:'\u0001 ',cancel_text:{unsafe:true},reason_label:'x'.repeat(1000)}}});
+  });
+  const second = page.locator('#a .ihtml-tool').last();
+  assert.notEqual(await second.locator('.t-actions .ok').textContent(), '');
+  assert.notEqual(await second.locator('.t-actions button:not(.ok)').textContent(), '[object Object]');
+  assert.ok((await second.locator('.t-reason strong').textContent()).length <= 81);
+});
+
+test('mountChat exposes isolated public theme get/set/onChange without remounting or restarting confirmation', async (t) => {
+  const page = await fixture(t);
+  await page.evaluate(async () => {
+    window.a = ihtml.mountChat('#a', {theme:{mode:'light',primary:'#0f6b52'}});
+    window.b = ihtml.mountChat('#b', {theme:{mode:'light',primary:'#123456'}});
+    await Promise.all([a.ready(),b.ready()]);
+    window.changes=[]; window.offTheme=a.theme.onChange(value => changes.push(value));
+    await a.chat.send('Keep pending');
+    sockets[0].emit({type:'turn_start',run_id:'theme',seq:1});
+    sockets[0].emit({type:'confirmation_required',run_id:'theme',seq:2,tool_call:{id:'pending',name:'write',confirmation_nonce:'n',confirmation_token:'SIGNED'}});
+    sockets[0].emit({type:'assistant_done',run_id:'theme',seq:3,message:'Ready'});
+    window.originalChatRoot=a.root;
+    a.theme.set({mode:'dark',primary:'#b91c1c',radius:18},{persist:false});
+  });
+  const state = await page.evaluate(() => ({same:a.root===originalChatRoot, a:a.theme.get(), b:b.theme.get(), events:changes.length, color:getComputedStyle(a.root).getPropertyValue('--ui-primary').trim(), radius:a.root.style.getPropertyValue('--ui-radius'), frames:sockets[0].sent.length}));
+  assert.equal(state.same,true); assert.equal(state.a.dark,true);assert.equal(state.a.primary,'#b91c1c');
+  assert.equal(state.b.primary,'#123456');assert.equal(state.b.dark,false);assert.equal(state.events,1);
+  assert.equal(state.color,'#b91c1c');assert.equal(state.radius,'18px');assert.equal(state.frames,1);
+  assert.equal(await page.locator('#a .t-actions button').count(),2);
+  await page.evaluate(() => { offTheme();a.theme.set({mode:'auto'},{persist:false}); });
+  await page.emulateMedia({colorScheme:'dark'});
+  await page.waitForFunction(() => a.theme.get().dark);
+  await page.emulateMedia({colorScheme:'light'});
+  await page.waitForFunction(() => !a.theme.get().dark);
+  assert.equal(await page.evaluate(() => changes.length),1);
+  assert.equal(await page.evaluate(() => a.root===originalChatRoot),true);
+  await page.evaluate(() => { a.destroy(); a.theme.set({primary:'#ffffff'}); });
+  assert.equal(await page.evaluate(() => changes.length),1);
+});
+
+test('panel mode selection releases a fixed host palette while public theme.set preserves explicit overrides', async (t) => {
+  const page = await fixture(t);
+  await page.evaluate(async () => {
+    const initial = {mode:'light',primary:'#0f6b52',radius:18,font:'sans-serif',bg:'#ffffff',surface:'#fefefe',text:'#111111',muted:'#444444',border:'#dddddd'};
+    window.a = ihtml.mount('#a', {safe:true,chatEntry:false,theme:initial});
+    window.b = ihtml.mountChat('#b', {theme:initial});
+    await Promise.all([a.ready(),b.ready()]);
+    a.theme.onChange(value => b.theme.set(value,{persist:false}));
+    window.hostRoots=[a.root,b.root];
+    // Programmatic calls must retain the host's deliberately fixed palette.
+    a.theme.set({mode:'dark'},{persist:false});
+    window.programmatic=a.theme.get();
+    a.panel.open();
+  });
+  assert.equal(await page.evaluate(() => programmatic.bg),'#ffffff');
+  await page.locator('#a [data-theme-control="mode"][data-theme-value="dark"]').click();
+  const dark = await page.evaluate(() => ({theme:a.theme.get(), roots:hostRoots.map(root => ({dark:root.classList.contains('ihtml-dark'),bg:getComputedStyle(root).getPropertyValue('--ui-bg').trim(),text:getComputedStyle(root).getPropertyValue('--ui-text').trim()})),same:a.root===hostRoots[0]&&b.root===hostRoots[1]}));
+  assert.equal(dark.same,true);assert.equal(dark.theme.primary,'#0f6b52');assert.equal(dark.theme.radius,18);assert.equal(dark.theme.font,'sans-serif');
+  for (const key of ['bg','surface','text','muted','border']) assert.equal(dark.theme[key],'');
+  assert.deepEqual(dark.roots[0],dark.roots[1]);assert.equal(dark.roots[0].dark,true);
+  assert.notEqual(dark.roots[0].bg,'#ffffff');assert.notEqual(dark.roots[0].text,'#111111');
+  await page.locator('#a [data-theme-control="mode"][data-theme-value="light"]').click();
+  const light = await page.evaluate(() => hostRoots.map(root => ({dark:root.classList.contains('ihtml-dark'),bg:getComputedStyle(root).getPropertyValue('--ui-bg').trim(),text:getComputedStyle(root).getPropertyValue('--ui-text').trim()})));
+  assert.deepEqual(light[0],light[1]);assert.equal(light[0].dark,false);assert.notEqual(light[0].bg,dark.roots[0].bg);assert.notEqual(light[0].text,dark.roots[0].text);
 });

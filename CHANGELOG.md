@@ -7,6 +7,15 @@ the first tagged release, changes are recorded under **Unreleased**.
 
 ### Added
 
+- `uitools` exposes scoped workspace read/write definitions and host-governed
+  preparation/execution, with mandatory card code policy and atomic publication.
+- Compact chat layout keeps controls visible in short embedded panels.
+
+- Public per-card confirmation presentation text is safely rendered and covered by
+  confirmation signatures; absent presentation preserves legacy signatures.
+- `mountChat.theme.get/set/onChange` shares the workspace theme API without
+  resetting conversation state, with instance-local events and teardown.
+
 - `assistant.SessionRunner` exposes bounded host-owned session scheduling without
   requiring the default event projection: deep-cloned frames, per-event parent
   cancellation, explicit stop causes, queue and byte ceilings, tracked inline

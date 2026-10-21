@@ -33,6 +33,10 @@
  * API: ready(), refreshAuth(), refreshConfig(), destroy(), root/user/config,
  * chat.send(text?) -> Promise<boolean>; chat.draft(text) sets input without
  * sending; chat.open()/close()/cancel()/clear(),
+ * theme.get()/set(patch, {persist?})/onChange(callback) shares the workspace
+ * theme contract; host theme options keep updates local to the instance.
+ * Signed tool_call.presentation may supply confirm_text/cancel_text/reason_label;
+ * labels are bounded, redacted plain text with localized defaults.
  * chat.getMessages() -> [{role, content, contentFormat}] (detached, bounded
  * display-only snapshot, not canonical history or model input),
  * chat.enabled/busy/readOnly. clear() rotates csid; initialMessages are display
@@ -4514,7 +4518,13 @@
           b.dataset.themeControl = 'mode';
           b.dataset.themeValue = mode;
           b.setAttribute('aria-pressed', String(cur.mode === mode));
-          b.onclick = () => { theme.set({ mode }); this.renderThemeAgain(body); };
+          b.onclick = () => {
+            // A fixed host palette may describe only the initial appearance.
+            // An explicit panel mode choice restores the SDK's adaptive palette;
+            // programmatic theme.set still preserves any supplied overrides.
+            theme.set({ mode, bg: '', surface: '', text: '', muted: '', border: '' });
+            this.renderThemeAgain(body);
+          };
           row1.appendChild(b);
         }
         body.appendChild(row1);
@@ -5398,8 +5408,14 @@
         this.log = log;
         // 观察真正渲染后的消息高度；覆盖延迟 Markdown、图片加载、折叠及宿主视口变化。
         if (typeof ResizeObserver === 'function') {
-          const resize = new ResizeObserver(() => { this.syncLatest(); this.scroll(); });
+          const resize = new ResizeObserver(() => {
+            // An inline host can shrink independently of the browser viewport.
+            // Keep the composer reachable by compacting explanatory chrome.
+            if (chatOnly) rootEl.classList.toggle('ihtml-chat-compact', panelEl.clientHeight < 320);
+            this.syncLatest(); this.scroll();
+          });
           resize.observe(log);
+          if (chatOnly) resize.observe(panelEl);
           const children = new MutationObserver(records => {
             for (const record of records) {
               for (const node of record.removedNodes) if (node.nodeType === 1) resize.unobserve(node);
@@ -6537,6 +6553,7 @@
             .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, '');
           return clip(redacted, limit);
         };
+        const presentationText = (value, fallback) => typeof value === 'string' ? (safeVisible(value.trim(), 80).trim() || fallback) : fallback;
         const fallbackFacts = [];
         if (Array.isArray(body.items)) fallbackFacts.push({ label: 'Items', value: body.items.map((item) => item && item.id).filter(Boolean).join(', ') });
         else if (Array.isArray(body.ids)) fallbackFacts.push({ label: 'Items', value: body.ids.join(', ') });
@@ -6546,6 +6563,11 @@
           action: safeVisible(source.action || '', 320),
           summary: safeVisible(source.summary || (!view && ev.tool_summary) || '', 32768),
           reason: safeVisible(source.reason || (!view && call.reason) || '', 500),
+          // Display-only metadata is never interpreted as HTML or execution
+          // policy. Invalid/blank values keep the localized SDK wording.
+          confirmText: presentationText(call.presentation?.confirm_text, T('confirm_this_action')),
+          cancelText: presentationText(call.presentation?.cancel_text, T('dismiss_tool')),
+          reasonLabel: presentationText(call.presentation?.reason_label, T('tool_reason')),
           facts: (Array.isArray(source.facts) ? source.facts : fallbackFacts).slice(0, 8).map((fact) => ({
             label: safeVisible(fact && fact.label || '', 80), value: safeVisible(fact && fact.value || '', 32768),
           })).filter((fact) => fact.label && fact.value),
@@ -6630,7 +6652,7 @@
         }
         if (rec.status === 'pending' && view.reason) {
           const reason = el('div', 't-reason');
-          reason.append(el('strong', '', T('tool_reason')), doc.createTextNode(view.reason));
+          reason.append(el('strong', '', view.reasonLabel), doc.createTextNode(view.reason));
           rec.body.appendChild(reason);
         }
         if (rec.interactionError) {
@@ -6730,10 +6752,10 @@
         }
         if (rec.status === 'pending') {
           const bar = el('div', 't-actions');
-          const okBtn = el('button', 'ok', T('confirm_this_action'));
-          const noBtn = el('button', '', T('dismiss_tool'));
-          okBtn.setAttribute('aria-label', T('confirm_this_action') + ' · ' + view.title);
-          noBtn.setAttribute('aria-label', T('dismiss_tool') + ' · ' + view.title);
+          const okBtn = el('button', 'ok', view.confirmText);
+          const noBtn = el('button', '', view.cancelText);
+          okBtn.setAttribute('aria-label', view.confirmText + ' · ' + view.title);
+          noBtn.setAttribute('aria-label', view.cancelText + ' · ' + view.title);
           const interactionBusy = !!this.confirmationBusy || this.active || this.sending || !!rec.cancelPending || !!rec.confirmPending;
           okBtn.disabled = interactionBusy || !!review?.blockingReason;
           noBtn.disabled = interactionBusy;
@@ -7613,7 +7635,7 @@
       version: api.version, root: rootEl,
       ready: api.ready, refreshAuth: api.refreshAuth,
       refreshConfig: api.refreshAuth,
-      chat: api.chat, destroy: api.destroy,
+      chat: api.chat, theme: api.theme, destroy: api.destroy,
       get user() { return api.user; },
       get config() { return api.config; },
     } : api;

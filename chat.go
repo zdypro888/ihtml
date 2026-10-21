@@ -307,23 +307,33 @@ type OperationReview struct {
 	BlockingReason string `json:"blocking_reason,omitempty"`
 }
 
+// ToolCallPresentation customizes a host-issued confirmation card using plain
+// text only. Empty fields use the localized SDK defaults. Presentation never
+// grants authority; include it in the signed call and revalidate live access.
+type ToolCallPresentation struct {
+	ConfirmText string `json:"confirm_text,omitempty"`
+	CancelText  string `json:"cancel_text,omitempty"`
+	ReasonLabel string `json:"reason_label,omitempty"`
+}
+
 type ProposedToolCall struct {
-	Review               *OperationReview `json:"review,omitempty"`
-	ID                   string           `json:"id,omitempty"`
-	Name                 string           `json:"name,omitempty"`
-	Title                string           `json:"title,omitempty"`
-	Method               string           `json:"method"`
-	Path                 string           `json:"path"`
-	Query                map[string]any   `json:"query,omitempty"`
-	Body                 any              `json:"body,omitempty"`
-	Risk                 string           `json:"risk"` // low / medium / high / blocked
-	RequiresConfirmation bool             `json:"requires_confirmation"`
-	Reason               string           `json:"reason"`
-	AgentMode            string           `json:"agent_mode,omitempty"`
-	ApprovalResume       string           `json:"approval_resume,omitempty"`
-	ConfirmationToken    string           `json:"confirmation_token,omitempty"`
-	ConfirmationNonce    string           `json:"confirmation_nonce,omitempty"`
-	ConfirmationExpires  int64            `json:"confirmation_expires,omitempty"`
+	Presentation         *ToolCallPresentation `json:"presentation,omitempty"`
+	Review               *OperationReview      `json:"review,omitempty"`
+	ID                   string                `json:"id,omitempty"`
+	Name                 string                `json:"name,omitempty"`
+	Title                string                `json:"title,omitempty"`
+	Method               string                `json:"method"`
+	Path                 string                `json:"path"`
+	Query                map[string]any        `json:"query,omitempty"`
+	Body                 any                   `json:"body,omitempty"`
+	Risk                 string                `json:"risk"` // low / medium / high / blocked
+	RequiresConfirmation bool                  `json:"requires_confirmation"`
+	Reason               string                `json:"reason"`
+	AgentMode            string                `json:"agent_mode,omitempty"`
+	ApprovalResume       string                `json:"approval_resume,omitempty"`
+	ConfirmationToken    string                `json:"confirmation_token,omitempty"`
+	ConfirmationNonce    string                `json:"confirmation_nonce,omitempty"`
+	ConfirmationExpires  int64                 `json:"confirmation_expires,omitempty"`
 }
 
 // ChatModels 是 GET /api/chat/models 的响应。
@@ -1044,6 +1054,13 @@ func preflightChatStreamEvent(event ChatStreamEvent, maxBytes uint64, limits cha
 }
 
 func preflightProposedToolCall(budget *chatWSJSONBudget, walker *chatWSJSONWalker, call ProposedToolCall) error {
+	if call.Presentation != nil {
+		for _, value := range []string{call.Presentation.ConfirmText, call.Presentation.CancelText, call.Presentation.ReasonLabel} {
+			if err := budget.addString(value); err != nil {
+				return err
+			}
+		}
+	}
 	if err := budget.add(512); err != nil {
 		return err
 	}

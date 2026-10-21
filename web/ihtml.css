@@ -1300,6 +1300,14 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
 .ihtml-chat-inline .ihtml-chat-log { min-width: 0; min-height: 0; }
 .ihtml-chat-inline > .ihtml-chat > :not(.ihtml-chat-log) { flex-shrink: 0; }
 
+/* Small embedded heights keep all controls; only secondary hints compact. */
+.ihtml-chat-inline.ihtml-chat-compact .ihtml-chat-head { min-height: 44px; padding: 6px 12px; }
+.ihtml-chat-inline.ihtml-chat-compact .ihtml-agent-modebar { padding: 6px 12px 0; }
+.ihtml-chat-inline.ihtml-chat-compact .ihtml-agent-modebar > .hint,
+.ihtml-chat-inline.ihtml-chat-compact .ihtml-chat-foot .hint { display: none; }
+.ihtml-chat-inline.ihtml-chat-compact .ihtml-chat-log { padding: 8px 12px; }
+.ihtml-chat-inline.ihtml-chat-compact .ihtml-chat-foot { padding: 8px 12px; }
+
 .ihtml-chat-head {
   display: flex; align-items: center; gap: 10px;
   min-height: 62px; padding: 11px 18px;

@@ -306,3 +306,39 @@ func TestMemoryNonceCleanupIsThrottled(t *testing.T) {
 		t.Fatal("scheduled cleanup did not remove expired nonce")
 	}
 }
+
+func TestPresentationSignedAndSnapshotOwned(t *testing.T) {
+	s := testSigner(t, nil)
+	ctx := context.Background()
+	scope := NewScope("session", "capability")
+	view := &ihtml.ToolCallPresentation{ConfirmText: "Approve", CancelText: "Leave", ReasonLabel: "Effect"}
+	card, err := s.Prepare(ctx, "alice", scope, ihtml.ProposedToolCall{Presentation: view})
+	if err != nil {
+		t.Fatal(err)
+	}
+	view.ConfirmText = "mutated"
+	if card.Presentation.ConfirmText != "Approve" {
+		t.Fatal("presentation aliases input")
+	}
+	for _, mutate := range []func(*ihtml.ToolCallPresentation){
+		func(p *ihtml.ToolCallPresentation) { p.ConfirmText = "other" },
+		func(p *ihtml.ToolCallPresentation) { p.CancelText = "other" },
+		func(p *ihtml.ToolCallPresentation) { p.ReasonLabel = "other" },
+	} {
+		changed := card
+		copied := *card.Presentation
+		changed.Presentation = &copied
+		mutate(changed.Presentation)
+		if ok, err := s.Consume(ctx, "alice", scope, changed); ok || err != nil {
+			t.Fatal("changed presentation accepted", err)
+		}
+	}
+	changed := card
+	changed.Presentation = nil
+	if ok, err := s.Consume(ctx, "alice", scope, changed); ok || err != nil {
+		t.Fatal("removed presentation accepted", err)
+	}
+	if ok, err := s.Consume(ctx, "alice", scope, card); !ok || err != nil {
+		t.Fatal("valid presentation rejected", err)
+	}
+}
