@@ -5,6 +5,15 @@ the first tagged release, changes are recorded under **Unreleased**.
 
 ## Unreleased
 
+### Added
+
+- `assistant.SessionRunner` exposes bounded host-owned session scheduling without
+  requiring the default event projection: deep-cloned frames, per-event parent
+  cancellation, explicit stop causes, queue and byte ceilings, tracked inline
+  control callbacks, fail-closed panic handling, and Close that waits for real
+  host unwind. Ordinary assistant backends share the runner; confirmation-specific
+  scheduling remains intact.
+
 ### Fixed
 
 - Chinese IME confirmation no longer leaves a 250 ms send cooldown: the next

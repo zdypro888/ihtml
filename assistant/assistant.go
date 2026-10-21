@@ -54,6 +54,7 @@ type Config struct {
 	PresentToolResult func(context.Context, *ihtml.ChatSessionContext, agent.Tool, json.RawMessage, string) ToolResultView
 	// CompleteTool persists manual execution evidence; it does not resume the model trajectory.
 	CompleteTool    func(context.Context, *ihtml.ChatSessionContext, *ConfirmedToolResult) error
+	MaxEventBytes   int    // ordinary runner frame limit; default 2 MiB; maximum 16 MiB
 	MaxPendingTurns int    // default 16; per connection, excluding the active turn
 	ContentFormat   string // default text; HTML remains untrusted model output
 }
@@ -73,6 +74,12 @@ func NewChecked(cfg Config) (*Backend, error) {
 	}
 	if (cfg.Models == nil) == (cfg.ModelsProvider == nil) {
 		return nil, errors.New("assistant: specify exactly one of Models or ModelsProvider")
+	}
+	if cfg.MaxEventBytes < 0 || cfg.MaxEventBytes > 16<<20 {
+		return nil, errors.New("assistant: MaxEventBytes must be between 0 and 16 MiB")
+	}
+	if cfg.MaxEventBytes == 0 {
+		cfg.MaxEventBytes = 2 << 20
 	}
 	if cfg.MaxPendingTurns == 0 {
 		cfg.MaxPendingTurns = 16
@@ -199,6 +206,32 @@ func (b *Backend) NewSession(ctx context.Context, sctx *ihtml.ChatSessionContext
 	ctx, cancel := context.WithCancel(ctx)
 	s := &session{backend: b, sctx: copyContext, ctx: ctx, cancel: cancel,
 		wake: make(chan struct{}, 1), done: make(chan struct{}), pendingTools: make(map[string]*pendingTool)}
+	// The ordinary host bridge uses the same public lifecycle runner as
+	// custom product backends. Confirmation schedulers retain their extra
+	// rejection and asynchronous cancellation lanes below.
+	if b.cfg.Confirmation == nil && b.cfg.NativeConfirmation == nil {
+		runner, err := NewSessionRunner(ctx, SessionRunnerConfig{
+			MaxPending: b.cfg.MaxPendingTurns, MaxEventBytes: b.cfg.MaxEventBytes,
+			Run: func(ctx context.Context, event *ihtml.ChatClientEvent) {
+				ctx, cancel := context.WithCancel(ctx)
+				defer cancel()
+				defer func() { s.mu.Lock(); s.activeOutput = nil; s.mu.Unlock() }()
+				copied := cleanClonedEvent(*event)
+				s.run(ctx, cancel, &copied)
+			},
+			OnQueueFull: func(context.Context) { s.queueFull() },
+			OnPanic: func(context.Context, any) {
+				_ = s.emit(ihtml.ChatStreamEvent{Type: ihtml.ChatStreamTurnError, Error: "Assistant session failed."})
+				s.cancel()
+			},
+		})
+		if err != nil {
+			cancel()
+			return nil, err
+		}
+		s.runner = runner
+		return s, nil
+	}
 	if b.cfg.Confirmation != nil {
 		s.cancelTools = make(chan pendingTurn, b.cfg.Confirmation.MaxPendingTools)
 		s.cancelDone = make(chan struct{})
@@ -219,6 +252,7 @@ type session struct {
 	sctx            ihtml.ChatSessionContext
 	ctx             context.Context
 	cancel          context.CancelFunc
+	runner          *SessionRunner
 	wake            chan struct{}
 	done            chan struct{}
 	mu              sync.Mutex
@@ -239,6 +273,11 @@ type session struct {
 // Close cancels active and queued work and waits for all host work to unwind.
 // It must not be called reentrantly from Engine callbacks, host hooks or Emit.
 func (s *session) Close() {
+	if s.runner != nil {
+		s.cancel()
+		s.runner.Close()
+		return
+	}
 	s.mu.Lock()
 	s.closed = true
 	s.queue = nil
@@ -252,6 +291,28 @@ func (s *session) Close() {
 
 func (s *session) HandleEvent(ctx context.Context, ev *ihtml.ChatClientEvent) {
 	if ev == nil || ctx == nil || ctx.Err() != nil {
+		return
+	}
+	if s.runner != nil {
+		if ev.Type == ihtml.ChatClientCancel {
+			s.runner.Stop()
+			s.mu.Lock()
+			s.queueRejected = false
+			s.mu.Unlock()
+		} else if ev.Type == ihtml.ChatClientUserMessage {
+			err := s.runner.Submit(ctx, ev)
+			switch {
+			case err == nil, errors.Is(err, ErrSessionQueueFull), errors.Is(err, ErrSessionRunnerClosed), errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+			case errors.Is(err, ErrSessionEventTooLarge):
+				_ = s.runner.RunInline(ctx, func(context.Context) {
+					_ = s.emit(ihtml.ChatStreamEvent{Type: ihtml.ChatStreamTurnError, Error: "Message is too large. Please send a shorter message."})
+				})
+			default:
+				_ = s.runner.RunInline(ctx, func(context.Context) {
+					_ = s.emit(ihtml.ChatStreamEvent{Type: ihtml.ChatStreamTurnError, Error: "Message could not be read. Please resend it."})
+				})
+			}
+		}
 		return
 	}
 	if ev.Type == ihtml.ChatClientCancel {
@@ -312,25 +373,37 @@ func (s *session) HandleEvent(ctx context.Context, ev *ihtml.ChatClientEvent) {
 }
 
 func cleanEvent(ev *ihtml.ChatClientEvent) (ihtml.ChatClientEvent, error) {
-	// JSON cloning also detaches maps and pointers held by the websocket caller.
-	data, err := json.Marshal(ev)
+	out, err := cloneSessionEvent(ev, 0)
 	if err != nil {
-		return ihtml.ChatClientEvent{}, err
-	}
-	var out ihtml.ChatClientEvent
-	if err = json.Unmarshal(data, &out); err != nil {
 		return out, err
 	}
+	return cleanClonedEvent(out), nil
+}
+
+func cleanClonedEvent(out ihtml.ChatClientEvent) ihtml.ChatClientEvent {
+	messages := out.Messages
 	out.Messages = nil
-	for i := len(ev.Messages) - 1; i >= 0; i-- {
-		if ev.Messages[i].Role == "user" {
-			out.Messages = []ihtml.ChatMessage{ev.Messages[i]}
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" {
+			out.Messages = []ihtml.ChatMessage{messages[i]}
 			break
 		}
 	}
 	out.ToolCall, out.Inspect = nil, nil
 	out.InspectID = ""
-	return out, nil
+	return out
+}
+
+func (s *session) queueFull() {
+	s.mu.Lock()
+	output := s.activeOutput
+	if output == nil {
+		s.queueRejected = true
+	}
+	s.mu.Unlock()
+	if output != nil {
+		output.queueFull()
+	}
 }
 
 func (s *session) loop() {
@@ -358,13 +431,10 @@ func (s *session) loop() {
 		} else {
 			next, s.queue = s.queue[0], s.queue[1:]
 		}
-		ctx, cancel := context.WithCancel(s.ctx)
-		s.active = cancel
+		ctx, cancelCause, finish := sessionExecution(s.ctx, next.parent)
+		cancel := func() { cancelCause(context.Canceled) }
+		s.active = func() { cancelCause(ErrTurnStopped) }
 		s.mu.Unlock()
-		stop := context.AfterFunc(next.parent, cancel)
-		if next.parent.Err() != nil {
-			cancel()
-		}
 		if s.backend.cfg.NativeConfirmation != nil {
 			s.run(ctx, cancel, &next.event)
 		} else if next.event.Type == ihtml.ChatClientCancelTool {
@@ -374,8 +444,7 @@ func (s *session) loop() {
 		} else {
 			s.run(ctx, cancel, &next.event)
 		}
-		stop()
-		cancel()
+		finish()
 		s.mu.Lock()
 		s.active = nil
 		s.activeOutput = nil
@@ -391,6 +460,9 @@ func (s *session) emit(ev ihtml.ChatStreamEvent) (err error) {
 			err = errors.New("assistant: Emit panicked")
 		}
 		if err != nil {
+			if s.runner != nil {
+				s.runner.Abort(err)
+			}
 			s.cancel()
 		}
 	}()

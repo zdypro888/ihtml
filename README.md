@@ -20,6 +20,37 @@
 - **安全网**：默认拒绝未接入鉴权的请求；每次变更自动快照可回滚；`?safe=1` 安全模式救砖；Item 报错自动收集
 - **AI 对话**：eino ADK 多轮会话，默认低延迟 Fast、可显式开放 DeepAgent 多 Agent 编排；语义工具 + 源码写入/高危操作 HMAC 确认卡 + 有界历史与独立写限流
 
+Hosts that already own trusted output and business confirmations can reuse
+`assistant.SessionRunner` without adopting the default projection:
+
+```go
+runner, err := assistant.NewSessionRunner(ctx, assistant.SessionRunnerConfig{
+    MaxPending: 16,          // default 16; maximum 1024 waiting frames
+    MaxEventBytes: 2 << 20,  // default 2 MiB; maximum 16 MiB of encoded JSON
+    Run: handleTrustedTurn, // func(context.Context, *ihtml.ChatClientEvent)
+    OnQueueFull: reportQueueFull,
+    OnPanic: reportFatalPanic,
+})
+```
+
+`Submit(parent, event)` JSON-clones the complete frame and never waits for the
+active turn. Handle `ErrSessionQueueFull` and `ErrSessionEventTooLarge` explicitly;
+neither means accepted work. `Stop()` atomically drops pending frames and cancels
+the active turn with `ErrTurnStopped` as `context.Cause`, while keeping the
+connection usable. Parent cancellations retain their own causes.
+`RunInline(parent, callback)` immediately runs a tracked control callback outside
+the FIFO, for cancellation acknowledgements or rejection replies. `Abort(err)`
+is safe from hooks and cancels the entire connection. `Close()` is idempotent and
+waits for actual host unwind, including accepted control work continued with
+`context.WithoutCancel`. Never call Close reentrantly from Run or hooks; use
+Abort instead. Hooks run outside scheduler locks. A hook panic aborts the
+connection, clears queued work and reports `ErrSessionRunnerPanic`; even a second
+panic in the reporter cannot strand Close. The ordinary `assistant.Backend`
+shares this runner. Its `assistant.Config.MaxEventBytes` setting applies only to
+that ordinary projection bridge. Confirmation-enabled backends retain their
+existing WebSocket input and confirmation-card limits, approval/rejection and
+asynchronous cancellation lanes while sharing the execution-context primitive.
+
 ### SDK 包边界
 
 | 包 | 第三方用途 |
