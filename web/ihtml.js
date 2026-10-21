@@ -148,6 +148,11 @@
     const instanceKey = newInstanceKey(instanceID);
     const standalone = !!opts.standalone;
     const chatOnly = opts[chatOnlyOption] === true;
+    if (opts.hostTransport != null && (!chatOnly ||
+        typeof opts.hostTransport.request !== 'function' || typeof opts.hostTransport.open !== 'function')) {
+      throw new TypeError('ihtml: hostTransport requires mountChat and request/open functions');
+    }
+    const hostTransport = opts.hostTransport || null;
     const T = lib.makeT(opts.locale || navigator.language, opts.strings);
     const templateCore = lib.template;
     const itemLayoutCore = lib.itemLayout;
@@ -563,7 +568,7 @@
           init.headers['Content-Type'] = 'application/json';
           init.body = typeof reqOpts.body === 'string' ? reqOpts.body : JSON.stringify(reqOpts.body);
         }
-        const res = await fetch(apiURL(path), init);
+        const res = await (hostTransport ? hostTransport.request(path, init) : fetch(apiURL(path), init));
         const text = await res.text();
         if (epoch !== requestEpoch || destroyed) throw staleRequestError();
         let data = null;
@@ -5666,7 +5671,7 @@
           const wsURL = apiURL('api/chat/ws', true, ticket);
           wsURL.searchParams.set('csid', chatSessionID());
           wsURL.protocol = wsURL.protocol === 'https:' ? 'wss:' : 'ws:';
-          const ws = new WebSocket(wsURL);
+          const ws = hostTransport ? hostTransport.open() : new WebSocket(wsURL);
           this.ws = ws;
           let settled = false;
           return new Promise((resolve, reject) => {

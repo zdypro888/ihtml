@@ -295,3 +295,29 @@ contract it needs, and the optional `ihtml/chat` package currently inherits
 Eino/Sonic's lack of Plan 9 support. Hosts targeting an uncommon platform should
 cross-build the exact package set they ship instead of assuming every optional
 adapter is portable there.
+
+### Host-owned chat transports and bounded provider streams
+
+`mountChat(host, {hostTransport: {request(path, init), open()}})` may use a
+host-owned REST adapter and WebSocket-compatible object. `request` returns a
+Response-like object and receives the SDK's abort signal; `open` returns a
+synchronous socket with readyState, send/close and onopen/onclose/onerror/onmessage.
+Both hooks are required. This capability is chat-only; ordinary mount rejects it.
+There is no network fallback when a hook fails. Existing identity epochs,
+refreshAuth, cancellation, new-chat disconnect and destroy apply to host sockets.
+The host must cancel its own work when its socket closes. SDK paths and displayed
+messages are not authority: hosts must use closed native dispatch, reauthorize
+server-side, and require native human confirmation for mutations. Never interpret
+model-supplied HTTP paths or display tool events as execution instructions.
+
+`agent/providerstream.Decode` is an optional, framework-free bounded SSE decoder
+for hosts with their own reviewed provider HTTP transport and tool runner. It
+accepts Responses, Chat Completions and Anthropic Messages event streams, emits
+cumulative answer text, and requires a terminal event before returning native JSON
+for final semantic validation. It joins multiline SSE data and accepts CRLF.
+Validation/display callback errors stop decoding; reasoning and tool arguments
+never appear in the text hook. See package documentation for hard bounds. It does
+not fetch URLs, invoke tools, retain history, choose credentials or confer
+permissions. Hosts already using agent/eino should keep its existing SDK/model
+streaming instead of stacking this decoder over it. HTTP cancellation, secret
+filtering, current authorization and closing the reader remain host duties.

@@ -908,3 +908,49 @@ for (const order of ['keydown-first', 'compositionend-first']) {
     assert.equal(await input.inputValue(), '');
   });
 }
+
+test('mountChat host transport owns requests/socket without fetch or native WebSocket fallback', async (t) => {
+  const page = await fixture(t);
+  const out = await page.evaluate(async () => {
+    const request = window.fetch, NativeFake = window.WebSocket;
+    window.fetch = () => { throw new Error('native fetch forbidden'); };
+    window.WebSocket = class { static OPEN = 1; constructor() { throw new Error('native WS forbidden'); } };
+    const paths = [];
+    window.a = ihtml.mountChat('#a', { storageKey: 'native-host', hostTransport: {
+      request(path, init) { paths.push(path); return request(new URL(path, 'https://host.test/'), init); },
+      open() { return new NativeFake('host-owned'); },
+    } });
+    await a.ready(); await a.chat.send('one');
+    sockets[0].emit({ type: 'assistant_delta', text: 'partial' });
+    sockets[0].emit({ type: 'assistant', text: 'final', format: 'text' });
+    sockets[0].emit({ type: 'done' });
+    const first = sockets[0];
+    a.chat.clear();
+    await a.chat.send('two');
+    const result = { paths, firstClosed: first.readyState === 3, sockets: sockets.length, text: sockets[1].sent[0].text };
+    a.destroy(); result.closed = sockets.every(s => s.readyState === 3);
+    return result;
+  });
+  assert.ok(out.paths.includes('api/config') && out.paths.includes('api/chat/models'));
+  assert.equal(out.firstClosed, true); assert.equal(out.sockets, 2); assert.equal(out.closed, true);
+});
+test('host transport is complete and chat-only; invalid hooks never fall back to network', async (t) => {
+ const page=await fixture(t);
+ const out=await page.evaluate(()=>{
+  let rejected=0;
+  for(const run of [()=>ihtml.mountChat('#a',{hostTransport:{request(){}}}),()=>ihtml.mount('#a',{hostTransport:{request(){},open(){}}})]) {
+   try{run()}catch(e){if(e instanceof TypeError)rejected++;}
+  }
+  return {rejected,requests:calls.length,sockets:sockets.length};
+ });
+ assert.deepEqual(out,{rejected:2,requests:0,sockets:0});
+});
+test('failed host request cannot fall back to default network transport', async(t)=>{
+ const page=await fixture(t);
+ const result=await page.evaluate(async()=>{
+  window.a=ihtml.mountChat('#a',{hostTransport:{request(){throw new Error('host unavailable')},open(){throw new Error('unexpected open')}}});
+  await a.ready();const sent=await a.chat.send('blocked');a.destroy();
+  return {requests:calls.length,sockets:sockets.length,sent};
+ });
+ assert.deepEqual(result,{requests:0,sockets:0,sent:false});
+});

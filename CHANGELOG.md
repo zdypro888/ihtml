@@ -239,3 +239,13 @@ the first tagged release, changes are recorded under **Unreleased**.
   `ANTHROPIC_*` credentials for a configured endpoint.
 - Secret resolution errors are typed and redacted, and disabled AI sections do
   not invoke a resolver.
+
+## 2026-10-21: reusable host chat transport and bounded provider SSE
+
+- Add a supported chat-only `hostTransport.request/open` capability with no
+  fallback, preserving identity epochs and socket/new-chat/destroy lifecycle.
+- Add `agent/providerstream` for existing host tool runners: bounded decoding of
+  all three provider SSE formats, multiline/CRLF events, text-only progress,
+  error-propagating validation hooks and explicit terminal-envelope completion.
+  Business grants, secrets, HTTP safety, history selection and native confirmation
+  stay in the host; existing agent/eino streaming remains unchanged.
