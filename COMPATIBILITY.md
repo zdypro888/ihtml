@@ -321,3 +321,9 @@ not fetch URLs, invoke tools, retain history, choose credentials or confer
 permissions. Hosts already using agent/eino should keep its existing SDK/model
 streaming instead of stacking this decoder over it. HTTP cancellation, secret
 filtering, current authorization and closing the reader remain host duties.
+
+`mountChat({chatHeader: 'compact'})` omits the SDK's visible heading when a
+host already supplies one. The chat region retains its localized accessible
+name, read-only indicator and reachable New Chat button; clear/cancellation and
+confirmation behavior are unchanged. The default and ordinary mount headers
+remain unchanged. This is presentation only, never an authorization option.

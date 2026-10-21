@@ -1038,3 +1038,30 @@ test('panel mode selection releases a fixed host palette while public theme.set 
   const light = await page.evaluate(() => hostRoots.map(root => ({dark:root.classList.contains('ihtml-dark'),bg:getComputedStyle(root).getPropertyValue('--ui-bg').trim(),text:getComputedStyle(root).getPropertyValue('--ui-text').trim()})));
   assert.deepEqual(light[0],light[1]);assert.equal(light[0].dark,false);assert.notEqual(light[0].bg,dark.roots[0].bg);assert.notEqual(light[0].text,dark.roots[0].text);
 });
+
+test('compact embedded header omits a duplicate title but keeps new-chat and accessible region',async(t)=>{
+ const page=await fixture(t);
+ await page.evaluate(async()=>{
+  window.a=ihtml.mountChat('#a',{chatHeader:'compact',strings:{chat_title:'Host assistant'}});await a.ready();await a.chat.send('First');
+  sockets[0].emit({type:'assistant_done',message:'Done'});
+ });
+ assert.equal(await page.locator('#a .ihtml-chat-head .title').count(),0);
+ assert.equal(await page.locator('#a [role="region"]').getAttribute('aria-label'),'Host assistant');
+ assert.equal(await page.locator('#a .ihtml-chat-head button').count(),1);
+ const rect=await page.locator('#a .ihtml-chat-head').boundingBox();assert.ok(rect.height<=46);
+ await page.evaluate(()=>a.chat.clear());
+ assert.equal(await page.evaluate(()=>sockets[0].readyState),3);
+ await page.evaluate(async()=>{await a.chat.send('Second');});
+ assert.equal(await page.evaluate(()=>sockets.length),2);
+});
+
+test('composer has readable single-line proportions and grows for multiline text',async(t)=>{
+ const page=await fixture(t);
+ await page.evaluate(async()=>{window.a=ihtml.mountChat('#a',{chatHeader:'compact'});await a.ready();});
+ const input=page.locator('#a textarea');
+ const initial=await input.evaluate(n=>({height:n.getBoundingClientRect().height,font:parseFloat(getComputedStyle(n).fontSize)}));
+ assert.ok(initial.height>=44 && initial.height<=48);assert.ok(initial.font>=16);
+ await input.fill('one\ntwo\nthree');
+ const expanded=await input.boundingBox();assert.ok(expanded.height>initial.height);
+ await input.fill('one');assert.ok((await input.boundingBox()).height<=48);
+});

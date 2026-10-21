@@ -1964,7 +1964,7 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
 .ihtml-chat-foot textarea {
   grid-column: 1; grid-row: 1; min-width: 0;
   width: 100%; resize: none; max-height: 140px; min-height: 44px; overflow-y: auto; overscroll-behavior: contain;
-  padding: 10px 12px; font: inherit; font-size: 14px; line-height: 1.45;
+  box-sizing: border-box; padding: 8px 12px; font: inherit; font-size: 16px; line-height: 1.5;
   border: 1px solid var(--ui-control-border); border-radius: 10px;
   background: var(--ui-bg); color: var(--ui-text);
 }
@@ -2113,3 +2113,11 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
 /* 异步接收用信息色，不能显示成业务完成的绿色。 */
 .ihtml-tool[data-status="accepted"] .t-status { background: var(--ui-primary-soft); color: var(--ui-primary-text); }
 .ihtml-tool[data-status="accepted"] .t-live-result { border-left-color: var(--ui-primary-border); }
+
+/* A host-owned title can opt into one compact action row in inline chat. */
+.ihtml-chat-inline .ihtml-chat-head.ihtml-chat-head-compact {
+  min-height: 44px; padding: 0 10px; gap: 8px; justify-content: flex-end;
+  background: var(--ui-bg); border-bottom: 1px solid var(--ui-border);
+}
+.ihtml-chat-head-compact .ihtml-readonly-badge { margin-right: auto; }
+.ihtml-chat-head-compact button { min-height: 44px; padding: 0 8px; border-color: transparent; background: transparent; font-size: 12px; }

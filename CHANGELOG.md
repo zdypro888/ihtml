@@ -258,3 +258,9 @@ the first tagged release, changes are recorded under **Unreleased**.
   error-propagating validation hooks and explicit terminal-envelope completion.
   Business grants, secrets, HTTP safety, history selection and native confirmation
   stay in the host; existing agent/eino streaming remains unchanged.
+
+- Add opt-in compact embedded chat header for hosts with their own title,
+  preserving accessible chat naming, read-only state and New Chat lifecycle.
+
+- Use readable 16px composer text, compact single-line border-box sizing and
+  border-aware auto growth so input padding cannot inflate a short message.

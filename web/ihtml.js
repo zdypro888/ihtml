@@ -152,6 +152,7 @@
     const instanceKey = newInstanceKey(instanceID);
     const standalone = !!opts.standalone;
     const chatOnly = opts[chatOnlyOption] === true;
+    const compactChatHeader = chatOnly && opts.chatHeader === 'compact';
     if (opts.hostTransport != null && (!chatOnly ||
         typeof opts.hostTransport.request !== 'function' || typeof opts.hostTransport.open !== 'function')) {
       throw new TypeError('ihtml: hostTransport requires mountChat and request/open functions');
@@ -5270,9 +5271,11 @@
         const panelEl = el('div', 'ihtml-chat');
         panelEl.setAttribute('role', chatOnly ? 'region' : 'dialog');
         if (!chatOnly) panelEl.setAttribute('aria-modal', 'true');
-        panelEl.setAttribute('aria-labelledby', chatID + '-title');
+        if (compactChatHeader) panelEl.setAttribute('aria-label', T('chat_title'));
+        else panelEl.setAttribute('aria-labelledby', chatID + '-title');
 
         const head = el('div', 'ihtml-chat-head');
+        if (compactChatHeader) head.classList.add('ihtml-chat-head-compact');
         const title = el('h2', 'title', T('chat_title'));
         title.id = chatID + '-title';
         const readonlyBadge = el('span', 'ihtml-readonly-badge', T('readonly_note'));
@@ -5284,7 +5287,8 @@
         const closeBtn = el('button', 'close', T('close'));
         closeBtn.type = 'button';
         closeBtn.onclick = () => this.close();
-        head.append(title, readonlyBadge, newBtn);
+        if (!compactChatHeader) head.appendChild(title);
+        head.append(readonlyBadge, newBtn);
         if (!chatOnly) head.appendChild(closeBtn);
 
         const toolbar = el('div', 'ihtml-chat-toolbar');
@@ -5552,7 +5556,8 @@
         const style = getComputedStyle(input);
         const minHeight = Number.parseFloat(style.minHeight) || 44;
         const maxHeight = Number.parseFloat(style.maxHeight) || 140;
-        const scrollHeight = input.scrollHeight;
+        const border = (Number.parseFloat(style.borderTopWidth) || 0) + (Number.parseFloat(style.borderBottomWidth) || 0);
+        const scrollHeight = input.scrollHeight + (style.boxSizing === 'border-box' ? border : 0);
         input.style.height = Math.max(minHeight, Math.min(scrollHeight, maxHeight)) + 'px';
         input.style.overflowY = scrollHeight > maxHeight + 1 ? 'auto' : 'hidden';
         if (this.follow) this.scroll();
