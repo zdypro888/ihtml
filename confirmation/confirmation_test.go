@@ -342,3 +342,35 @@ func TestPresentationSignedAndSnapshotOwned(t *testing.T) {
 		t.Fatal("valid presentation rejected", err)
 	}
 }
+
+func TestBusinessDeadlineCapsSignatureAndNonce(t *testing.T) {
+	s := testSigner(t, nil)
+	scope := NewScope("session", "capability")
+	for _, delta := range []time.Duration{time.Minute, time.Hour, -time.Minute} {
+		deadline := time.Now().Add(delta)
+		card, err := s.PrepareUntil(context.Background(), "alice", scope, ihtml.ProposedToolCall{ID: "deadline", Name: "write", Method: "POST", Path: "/record", RequiresConfirmation: true}, deadline)
+		if delta < 0 {
+			if err == nil || card.ConfirmationToken != "" {
+				t.Fatal("expired deadline signed")
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if card.ConfirmationExpires > deadline.Unix() || card.ConfirmationExpires > time.Now().Add(TTL).Unix() {
+			t.Fatal("business/default deadline extended", card)
+		}
+		if delta == time.Minute && card.ConfirmationExpires != deadline.Unix() {
+			t.Fatal("business deadline discarded")
+		}
+		tampered := card
+		tampered.ConfirmationExpires++
+		if ok, _ := s.Consume(context.Background(), "alice", scope, tampered); ok {
+			t.Fatal("deadline extension accepted")
+		}
+		if ok, err := s.Consume(context.Background(), "alice", scope, card); !ok || err != nil {
+			t.Fatal(ok, err)
+		}
+	}
+}

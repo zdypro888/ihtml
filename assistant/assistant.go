@@ -812,19 +812,25 @@ func (p *projection) step(step agent.Step, host func(agent.Step)) {
 			p.pendingSteps[key]--
 			return
 		}
+		previewRefresh := false
 		if p.approvalTools[step.ToolName] && step.Err == "" {
 			var receipt struct {
 				Status string `json:"status"`
 				ID     string `json:"id"`
 			}
-			if json.Unmarshal([]byte(step.Result), &receipt) == nil && receipt.Status == "pending" && receipt.ID != "" {
-				return
+			if json.Unmarshal([]byte(step.Result), &receipt) == nil {
+				if receipt.Status == "pending" && receipt.ID != "" {
+					return
+				}
+				previewRefresh = receipt.Status == "preview_refresh_required"
 			}
 		}
 		status, summary := ihtml.ChatToolSuccess, "Invocation returned; no public result details were provided."
 		switch {
 		case step.Err != "":
 			status, summary = ihtml.ChatToolError, "Tool failed."
+		case previewRefresh:
+			status, summary = ihtml.ChatToolCancelled, "Preview needs refreshing; nothing executed."
 		case step.ApprovalRejected:
 			status, summary = ihtml.ChatToolCancelled, "Tool rejected; not executed."
 		case step.Replayed:
@@ -835,7 +841,7 @@ func (p *projection) step(step agent.Step, host func(agent.Step)) {
 		}
 		p.toolSeq++
 		event := ihtml.ChatStreamEvent{Type: ihtml.ChatStreamToolResult, ToolID: fmt.Sprintf("%s_tool_%d", p.id, p.toolSeq), ToolName: step.ToolName, ToolStatus: status, ToolSummary: summary}
-		if status == ihtml.ChatToolSuccess || status == ihtml.ChatToolAccepted {
+		if status == ihtml.ChatToolSuccess || status == ihtml.ChatToolAccepted || previewRefresh {
 			view := p.session.publicToolResult(p.ctx, p.tools[step.ToolName], step.Args, step.Result)
 			event.ToolTitle, event.ToolResult = view.Title, view.Result
 			if view.Status != "" && !(status == ihtml.ChatToolAccepted && view.Status == ihtml.ChatToolSuccess) {

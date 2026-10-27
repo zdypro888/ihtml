@@ -14,6 +14,10 @@ import (
 // ConfirmationConfig enables process-local manual approvals, never checkpoint
 // resume. Scope and Preview receive trusted server bindings and must cooperate
 // with cancellation. Preview is the host's explicit public/redacted card view.
+// ErrPreviewRefreshRequired 表示宿主已确认预览不足以签发新卡；没有执行动作，模型应刷新原范围。
+// 桥接层仅公开固定结构，不透传普通错误正文，也不把此结果当成用户批准。
+var ErrPreviewRefreshRequired = errors.New("assistant: refresh the original preview before confirmation")
+
 type ConfirmationConfig struct {
 	Signer          *confirmation.Signer
 	Scope           func(context.Context, *ihtml.ChatSessionContext, *agent.TurnRequest) (confirmation.Scope, error)
@@ -66,6 +70,9 @@ func (s *session) prepareTool(ctx context.Context, tool agent.Tool, args json.Ra
 	}
 	host = s.sctx
 	call, err := cfg.Preview(ctx, &host, tool, append(json.RawMessage(nil), args...))
+	if errors.Is(err, ErrPreviewRefreshRequired) {
+		return `{"status":"preview_refresh_required","execution":"not_started","next_action":"refresh_preview"}`, nil
+	}
 	if err != nil {
 		return "", errors.New("assistant: confirmation preview unavailable")
 	}
@@ -81,6 +88,11 @@ func (s *session) prepareTool(ctx context.Context, tool agent.Tool, args json.Ra
 	}
 	if len(call.Name) > 256 || len(call.Title) > 1024 || len(call.Method) > 32 || len(call.Path) > 4096 || len(call.Reason) > 4096 {
 		return "", errors.New("assistant: oversized confirmation metadata")
+	}
+	// Preview 是可信宿主回调；其业务期限只作上限，签名和 nonce 始终由桥接层重新生成。
+	var deadline time.Time
+	if call.ConfirmationExpires != 0 {
+		deadline = time.Unix(call.ConfirmationExpires, 0)
 	}
 	call.ConfirmationToken, call.ConfirmationNonce, call.ConfirmationExpires = "", "", 0
 	raw, err := json.Marshal(call)
@@ -106,7 +118,7 @@ func (s *session) prepareTool(ctx context.Context, tool agent.Tool, args json.Ra
 	if ctx.Err() != nil || s.ctx.Err() != nil {
 		return "", context.Canceled
 	}
-	call, err = cfg.Signer.Prepare(ctx, s.sctx.User, scope, call)
+	call, err = cfg.Signer.PrepareUntil(ctx, s.sctx.User, scope, call, deadline)
 	if err != nil {
 		return "", errors.New("assistant: confirmation issuance failed")
 	}
@@ -388,7 +400,7 @@ func (s *session) runConfirmedTool(ctx context.Context, cancel context.CancelFun
 		} else {
 			// 后续步骤必须重新进入普通轮次；原回执已落地，续跑失败不能改变业务结果或重放动作。
 			var next *ihtml.ChatClientEvent
-			if fn := s.backend.cfg.ContinueAfterTool; fn != nil && evidence != nil && started && status != ihtml.ChatToolError && status != ihtml.ChatToolUnknown {
+			if fn := s.backend.cfg.ContinueAfterTool; fn != nil && evidence != nil && started && runErr == nil && evidence.Err == nil && status != ihtml.ChatToolUnknown {
 				func() {
 					defer func() { _ = recover() }()
 					host := s.sctx

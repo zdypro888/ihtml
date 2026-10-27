@@ -165,7 +165,13 @@ func (s *Signer) check(ctx context.Context, user string, scope Scope) error {
 
 // Prepare returns an independently owned JSON snapshot. Callers must not mutate
 // the input while this synchronous method reads it. No card is returned if Put fails.
-func (s *Signer) Prepare(ctx context.Context, user string, scope Scope, call ihtml.ProposedToolCall) (out ihtml.ProposedToolCall, err error) {
+func (s *Signer) Prepare(ctx context.Context, user string, scope Scope, call ihtml.ProposedToolCall) (ihtml.ProposedToolCall, error) {
+	return s.PrepareUntil(ctx, user, scope, call, time.Time{})
+}
+
+// PrepareUntil 使用宿主的绝对业务期限签发卡片；只缩短默认 TTL，不延长业务预览或旧授权。
+// deadline 必须来自可信状态，不能取自浏览器或模型参数。过期时不登记 nonce。
+func (s *Signer) PrepareUntil(ctx context.Context, user string, scope Scope, call ihtml.ProposedToolCall, deadline time.Time) (out ihtml.ProposedToolCall, err error) {
 	defer func() {
 		if recover() != nil {
 			out = ihtml.ProposedToolCall{}
@@ -203,7 +209,14 @@ func (s *Signer) Prepare(ctx context.Context, user string, scope Scope, call iht
 		return ihtml.ProposedToolCall{}, err
 	}
 	out.ConfirmationNonce = hex.EncodeToString(nonce)
-	out.ConfirmationExpires = time.Now().Add(TTL).Unix()
+	now := time.Now()
+	out.ConfirmationExpires = now.Add(TTL).Unix()
+	if !deadline.IsZero() && deadline.Unix() < out.ConfirmationExpires {
+		out.ConfirmationExpires = deadline.Unix()
+	}
+	if out.ConfirmationExpires <= now.Unix() {
+		return ihtml.ProposedToolCall{}, errors.New("confirmation deadline has expired")
+	}
 	out.ConfirmationToken = s.Sign(user, scope, out)
 	if err = ctx.Err(); err != nil {
 		return ihtml.ProposedToolCall{}, err

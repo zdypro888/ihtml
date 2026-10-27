@@ -333,7 +333,8 @@ type ProposedToolCall struct {
 	ApprovalResume       string                `json:"approval_resume,omitempty"`
 	ConfirmationToken    string                `json:"confirmation_token,omitempty"`
 	ConfirmationNonce    string                `json:"confirmation_nonce,omitempty"`
-	ConfirmationExpires  int64                 `json:"confirmation_expires,omitempty"`
+	// ConfirmationExpires 在可信宿主 Preview 中可指定业务期限上限；签发后是实际签名到期时间（Unix秒）。
+	ConfirmationExpires int64 `json:"confirmation_expires,omitempty"`
 }
 
 // ChatModels 是 GET /api/chat/models 的响应。

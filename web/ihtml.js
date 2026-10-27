@@ -5718,6 +5718,10 @@
             const owner = message._turn;
             if (!owner) continue;
             for (const rec of owner.tools.values()) {
+              if (rec.expired && rec.status === 'cancelled') {
+                const refresh = rec.body.querySelector('.t-refresh');
+                if (refresh) refresh.disabled = unavailable || readOnly || confirmationBusy;
+              }
               if (rec.status !== 'pending') continue;
               const disabled = unavailable || readOnly || confirmationBusy || !!rec.cancelPending || !!rec.confirmPending;
               rec.card.classList.toggle('confirmation-busy', disabled);
@@ -6869,22 +6873,33 @@
             if (left <= 0) {
               if (rec.countdown) clearInterval(rec.countdown);
               rec.countdown = 0;
+              rec.expired = true;
+              if (rec.confirmAbort) rec.confirmAbort.abort();
+              rec.confirmAbort = null;
+              if (this.confirmationBusy === rec) this.confirmationBusy = null;
+              rec.confirmPending = false;
               this.setToolStatus(rec, 'cancelled', t);
               this.releaseAnonymousTool(t, rec.id);
               rec.lastEvent = Object.assign({}, rec.lastEvent, { tool_summary: T('confirm_expired') });
               this.renderToolRecord(rec, rec.lastEvent, t);
               this.announce(T('confirmation_expired_announced', { name: rec.title.textContent }));
               this.updateProcess(t);
+              this.syncChatControls();
               if (t.done && t.pendingCount === 0) this.releaseTurnRuns(t);
               return;
             }
-            const minutes = Math.max(1, Math.ceil(left / 60000));
-            let relative = minutes + ' min';
-            try { relative = new Intl.RelativeTimeFormat(opts.locale || navigator.language, { numeric: 'always' }).format(minutes, 'minute'); } catch { /* 兼容旧浏览器 */ }
-            countdown.textContent = T('expires_in') + ' ' + relative;
+            const seconds = Math.max(0, Math.ceil(left / 1000));
+            countdown.textContent = T('expires_in') + ' ' + Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0');
+            countdown.classList.toggle('is-expiring', seconds <= 120);
           };
-          rec.countdown = setInterval(tick, 15000);
+          const deadline = el('time', 't-deadline');
+          const expiry = new Date(rec.call.confirmation_expires * 1000);
+          deadline.dateTime = expiry.toISOString();
+          deadline.textContent = T('expires_at') + ' ' + expiry.toLocaleString(opts.locale || navigator.language);
+          meta.appendChild(deadline);
+          rec.countdown = setInterval(tick, 1000);
           tick();
+          if (rec.status !== 'pending') return;
         }
         if (meta.childNodes.length) rec.body.appendChild(meta);
         // 业务影响说明不能替代续办能力；受管续办另显示一行共享提示，普通单卡避免重复说明。
@@ -6922,7 +6937,14 @@
           rec.body.setAttribute('aria-labelledby', rec.title.id);
           if (primary) rec.body.setAttribute('aria-describedby', primary.id);
         }
-        if (rec.status === 'pending' || rec.status === 'error' || rec.status === 'unknown') rec.card.open = true;
+        if (rec.expired && rec.status === 'cancelled') {
+          const bar = el('div', 't-actions');
+          const refresh = el('button', 't-refresh', T('refresh_confirmation'));
+          refresh.disabled = !!this.confirmationBusy || this.active || this.sending;
+          refresh.onclick = (event) => {event.preventDefault(); this.send(T('refresh_confirmation_request'));};
+          bar.appendChild(refresh); rec.body.appendChild(bar);
+        }
+        if (rec.status === 'pending' || rec.status === 'error' || rec.status === 'unknown' || rec.expired) rec.card.open = true;
         else if (['success', 'accepted', 'cancelled'].includes(rec.status) && !rec.pinned) rec.card.open = false;
         this.syncToolSummary(rec);
         if (hadFocus) queueMicrotask(() => {
@@ -7015,6 +7037,9 @@
       async confirmTool(rec) {
         if (destroyed || !this.enabled || authRefreshing || readOnly) return;
         if (!rec || rec.status !== 'pending') return;
+        if (rec.call.confirmation_expires && rec.call.confirmation_expires * 1000 <= Date.now()) {
+          this.renderToolRecord(rec, rec.lastEvent, rec.ownerTurn); return;
+        }
         if (rec.call.review?.blocking_reason) return;
         if (this.active || this.sending || this.confirmationBusy) {
           this.syncChatControls();
@@ -7053,6 +7078,9 @@
           ws = await this.ensureWS();
           if (this.confirmationBusy !== rec || rec.status !== 'pending') return;
           if (destroyed || authRefreshing || readOnly) throw staleRequestError();
+          if (rec.call.confirmation_expires && rec.call.confirmation_expires * 1000 <= Date.now()) {
+            this.renderToolRecord(rec, rec.lastEvent, rec.ownerTurn); return;
+          }
           ws.send(JSON.stringify({ type: 'confirm_tool', tool_call: rec.call }));
           rec.confirmSent = true;
         } catch {

@@ -548,3 +548,13 @@ GPT-6.1 Terra 的工具调用必须使用 `OpenAIAPI:"responses"`；SDK 在发�
 实现依据：[Eino Runner](https://www.cloudwego.io/docs/eino/core_modules/eino_adk/agent_extension/)、[Eino 中断恢复](https://www.cloudwego.io/docs/eino/quick_start/chapter_07_interrupt_resume/)、[Codex harness](https://developers.openai.com/blog/codex-as-a-platform)、[Claude tool runner](https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-runner)、[Terra 模型](https://developers.openai.com/api/docs/models/gpt-6.1-terra)。
 
 工具等待进度：宿主工具可调用 `agent.ReportStatus(ctx, "正在等待原任务…")`，桥接器将其投影为当前受管轮次的 `assistant_status`；不新增模型调用或工具记录，不依赖 `PrepareTurn` 返回指针（请求会被复制）。原确认工具继承可信执行上下文，但进度重新绑定本次确认轮次。自行接入引擎的宿主可用 `agent.WithStatusReporter` 绑定已有状态通道。报告有长度与取消校验，只是展示进度，不是成功回执或新增批准。后台任务等待／归属仍由宿主业务 API 处理。
+
+### 业务预览与确认卡共用期限
+
+宿主 `Confirmation.Preview` 可将可信业务预览的 Unix 秒期限写入返回卡的 `ConfirmationExpires`。桥接层用 `Signer.PrepareUntil` 取业务期限与默认15分钟的较早值；不能延长原预览，签名和 nonce 仍由 SDK 生成。直接使用签名器的宿主也应调用 `PrepareUntil`，不要用模型或浏览器输入当期限。
+
+宿主判定预览已过期或留给操作者的时间不足时，返回 `assistant.ErrPreviewRefreshRequired`。共享桥接层返回固定的 `preview_refresh_required / not_started` 工具回执，不签发旧卡、不执行操作，模型可在当前轮次按原范围刷新预览。业务扫描、名单和刷新窗口由宿主原接口负责，SDK 不创建另一套业务执行器。
+
+共享聊天界面显示实际签名期限、分秒倒计时和临期提示；到期撤下确认按钮，提供“刷新预览”。该按钮只发送新的普通对话请求，不重放旧卡或继承批准。点击确认后等待宿主检查或重连期间跨过期限，也不会发送确认帧。服务器仍是最终执行准入依据。
+
+已获得且保存的明确业务拒绝回执（Handler 无执行异常）可由宿主 `ContinueAfterTool` 接回普通轮次，重新核查并生成新卡；执行异常、未知结果或取消不会自动续办。后续写动作仍须重新确认。

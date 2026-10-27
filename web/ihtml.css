@@ -1851,6 +1851,8 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
   white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
 }
 .ihtml-tool .t-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ihtml-tool .t-deadline { color: var(--ui-text-muted); font-size: 11.5px; overflow-wrap: anywhere; }
+.ihtml-tool .t-countdown.is-expiring { color: var(--ui-warning, #d98b2b); font-weight: 650; }
 .ihtml-tool .t-countdown { color: var(--ui-text-muted); font-size: 11.5px; overflow-wrap: anywhere; }
 .ihtml-tool .t-endpoint {
   min-width: 0; color: var(--ui-text-muted); font-family: var(--ui-font-mono); font-size: 11.5px;

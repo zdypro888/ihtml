@@ -120,3 +120,27 @@ func TestModelsDescribeManagedContinuation(t *testing.T) {
 		}
 	}
 }
+
+// 确定的业务拒绝回执可交回宿主续办；执行异常仍由 TestUnknownConfirmedToolDoesNotContinue 阻止。
+func TestKnownRejectedReceiptCanContinueAfterErrorStatus(t *testing.T) {
+	cfg := approvalConfig(t, func(context.Context, json.RawMessage) (string, error) {
+		return `{"state":"rejected","execution":"not_started"}`, nil
+	})
+	cfg.PresentToolResult = func(context.Context, *ihtml.ChatSessionContext, agent.Tool, json.RawMessage, string) ToolResultView {
+		return ToolResultView{Status: ihtml.ChatToolError, Summary: "业务已明确拒绝，未执行"}
+	}
+	cfg.ContinueAfterTool = func(ctx context.Context, _ *ihtml.ChatSessionContext, evidence *ConfirmedToolResult) (*ihtml.ChatClientEvent, error) {
+		return NewToolContinuation(ctx, evidence), nil
+	}
+	r := newRecorder()
+	s := openSession(t, cfg, "u", r)
+	defer s.Close()
+	card := proposedCard(t, s, r)
+	confirmCard(s, card)
+	events := r.wait(t, ihtml.ChatStreamAssistantDone, 3)
+	for _, ev := range events {
+		if ev.Type == ihtml.ChatStreamTurnError {
+			t.Fatal("known rejection ended continuation", ev)
+		}
+	}
+}

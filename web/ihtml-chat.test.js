@@ -454,7 +454,7 @@ test('manual_tool_only cancellation matches id and nonce, waits for ACK, fails c
     sockets[0].emit({ type: 'assistant_done', run_id: 'proposal', seq: 6, message: 'Approve or dismiss' });
   });
   assert.equal(await page.locator('#a .ihtml-tool[data-status="cancelled"]').count(), 1);
-  await page.locator('#a .t-actions button:not(.ok)').first().click();
+  await page.locator('#a .t-actions button:not(.ok):not(.t-refresh)').first().click();
   await page.waitForFunction(() => sockets[0].sent.length === 2);
   assert.equal(await page.evaluate(() => sockets[0].sent[1].type), 'cancel_tool');
   assert.equal(await page.evaluate(() => a.chat.busy), true);
@@ -463,7 +463,7 @@ test('manual_tool_only cancellation matches id and nonce, waits for ACK, fails c
   await page.evaluate(() => sockets[0].emit({ type: 'cancel_tool_result', tool_id: 'c1', confirmation_nonce: 'n1', tool_status: 'cancelled', tool_summary: 'Not executed' }));
   assert.equal(await page.evaluate(() => a.chat.busy), false);
   assert.equal(await page.locator('#a .ihtml-tool[data-status="cancelled"]').count(), 2);
-  await page.locator('#a .t-actions button:not(.ok)').first().click();
+  await page.locator('#a .t-actions button:not(.ok):not(.t-refresh)').first().click();
   await page.waitForFunction(() => sockets[0].sent.length === 3);
   await page.evaluate(() => sockets[0].emit({ type: 'cancel_tool_result', tool_id: 'c2', confirmation_nonce: 'n2', tool_status: 'error', error: 'Authorization: Bearer PRIVATE_SECRET' }));
   assert.equal(await page.evaluate(() => a.chat.busy), false);
@@ -472,10 +472,10 @@ test('manual_tool_only cancellation matches id and nonce, waits for ACK, fails c
     const original = window.setTimeout;
     window.setTimeout = (fn, delay, ...args) => original(fn, delay === 12000 ? 50 : delay, ...args);
   });
-  await page.locator('#a .t-actions button:not(.ok)').click();
+  await page.locator('#a .t-actions button:not(.ok):not(.t-refresh)').click();
   await page.waitForFunction(() => !a.chat.busy);
   assert.equal(await page.locator('#a .ihtml-tool[data-status="error"]').count(), 2);
-  assert.equal(await page.locator('#a .t-actions').count(), 0);
+  assert.equal(await page.locator('#a .t-actions:not(:has(.t-refresh))').count(), 0);
 });
 
 test('connectionAuth in flight is revoked; clear renews session and destroy permits remount', async (t) => {
@@ -1201,3 +1201,43 @@ for (const locale of ['zh-CN', 'en']) {
     assert.equal(frames.at(-1).tool_call.approval_resume, 'manual_tool_only');
   });
 }
+
+test('confirmation shows exact shared deadline, expires without confirming and offers normal preview refresh', async (t) => {
+ const page=await fixture(t,{width:390,height:844});
+ await page.clock.install({time:new Date('2026-10-28T06:00:00Z')});
+ await page.evaluate(async()=>{
+  window.a=ihtml.mountChat('#a',{locale:'zh-CN'});await a.ready();await a.chat.send('clean fixture');
+  sockets[0].emit({type:'turn_start',run_id:'deadline',seq:1});
+  sockets[0].emit({type:'confirmation_required',run_id:'deadline',seq:2,tool_call:{id:'expires',name:'write',title:'清理预览',risk:'high',approval_resume:'manual_tool_only',confirmation_nonce:'n',confirmation_token:'SIGNED',confirmation_expires:Math.floor(Date.now()/1000)+3}});
+  sockets[0].emit({type:'assistant_done',run_id:'deadline',seq:3,message:'等待确认'});
+ });
+ assert.match(await page.locator('#a .t-countdown').textContent(),/0:03/);
+ assert.equal(await page.locator('#a .t-deadline').getAttribute('datetime'),'2026-10-28T06:00:03.000Z');
+ assert.equal(await page.locator('#a .t-countdown').evaluate(n=>n.classList.contains('is-expiring')),true);
+ await page.clock.runFor(350);
+ await page.screenshot({path:'/tmp/ihtml-confirmation-deadline-mobile.png',animations:'disabled'});
+ await page.clock.fastForward(4000);
+ assert.equal(await page.locator('#a .ihtml-tool[data-status="cancelled"]').count(),1);
+ assert.equal(await page.locator('#a .t-actions .ok').count(),0);
+ assert.equal(await page.locator('#a .t-refresh').isVisible(),true);
+ await page.locator('#a .t-refresh').click();
+ await page.waitForFunction(()=>sockets.some(s=>s.sent.some(m=>m.type==='user_message'&&m.messages?.some(x=>x.content.includes('刷新过期预览')))));
+ assert.equal(await page.evaluate(()=>sockets.flatMap(s=>s.sent).some(m=>m.type==='confirm_tool')),false);
+});
+
+test('confirmation does not submit after a delayed user hook crosses its deadline', async(t)=>{
+ const page=await fixture(t);
+ await page.clock.install({time:new Date('2026-10-28T06:00:00Z')});
+ await page.evaluate(async()=>{
+  window.a=ihtml.mountChat('#a',{beforeConfirm:()=>new Promise(resolve=>{window.finishReview=resolve;})});await a.ready();await a.chat.send('fixture');
+  sockets[0].emit({type:'turn_start',run_id:'deadline-hook',seq:1});
+  sockets[0].emit({type:'confirmation_required',run_id:'deadline-hook',seq:2,tool_call:{id:'hook',name:'write',approval_resume:'manual_tool_only',confirmation_nonce:'n',confirmation_token:'SIGNED',confirmation_expires:Math.floor(Date.now()/1000)+3}});
+  sockets[0].emit({type:'assistant_done',run_id:'deadline-hook',seq:3,message:'Review'});
+ });
+ await page.locator('#a .t-actions .ok').click();
+ await page.clock.fastForward(4000);
+ await page.evaluate(()=>finishReview(true));
+ assert.equal(await page.evaluate(()=>sockets.flatMap(s=>s.sent).some(m=>m.type==='confirm_tool')),false);
+ assert.equal(await page.evaluate(()=>a.chat.busy),false);
+ assert.equal(await page.locator('#a .t-refresh').isVisible(),true);
+});
