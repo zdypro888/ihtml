@@ -53,7 +53,12 @@ type Config struct {
 	// PresentToolResult 仅在接口执行成功时提供公开回执；可标记部分失败或未知，不扩大批准范围。
 	PresentToolResult func(context.Context, *ihtml.ChatSessionContext, agent.Tool, json.RawMessage, string) ToolResultView
 	// CompleteTool persists manual execution evidence; it does not resume the model trajectory.
-	CompleteTool    func(context.Context, *ihtml.ChatSessionContext, *ConfirmedToolResult) error
+	CompleteTool func(context.Context, *ihtml.ChatSessionContext, *ConfirmedToolResult) error
+	// ContinueAfterTool 可选地提交一个新的受管轮次；只在确认执行及回执保存成功后调用。
+	// 新轮次仍走 PrepareTurn、权限和签名确认，不继承上一张卡的写权限。
+	ContinueAfterTool func(context.Context, *ihtml.ChatSessionContext, *ConfirmedToolResult) (*ihtml.ChatClientEvent, error)
+	// PublicTurnError 只返回宿主固定的公开错误文案，绝不能透传模型服务或凭据错误原文。
+	PublicTurnError func(error) string
 	MaxEventBytes   int    // ordinary runner frame limit; default 2 MiB; maximum 16 MiB
 	MaxPendingTurns int    // default 16; per connection, excluding the active turn
 	ContentFormat   string // default text; HTML remains untrusted model output
@@ -813,6 +818,14 @@ func (p *projection) end(result *agent.TurnResult, err error) {
 		message := "Assistant turn failed."
 		if errors.Is(err, context.Canceled) {
 			message = "Assistant turn cancelled."
+		}
+		if format := p.session.backend.cfg.PublicTurnError; format != nil {
+			func() {
+				defer func() { _ = recover() }()
+				if text := format(err); strings.TrimSpace(text) != "" && len(text) <= 4096 {
+					message = text
+				}
+			}()
 		}
 		p.send(ihtml.ChatStreamEvent{Type: ihtml.ChatStreamTurnError, Error: message})
 		return

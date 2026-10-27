@@ -521,3 +521,9 @@ type ScopedPagePublicationService interface { … } // 对 ScopedService 做类�
 `VersionedUserStateStore` 的版本 0 只表示“从未写入”。每个成功写操作（含删除不存在的 KV）都必须推进版本；`EraseUser` 也必须留下更新后的空状态墓碑，不能重置或复用版本。公共 KV 遇到 `ReservedKVPrefix` 会返回可用 `errors.Is(err, ErrReservedKVKey)` 判断的错误。第三方 Store 应运行 `storetest.Run`，它会同时验证并发 CAS、RawMessage 字节保真、输入/输出所有权和删除后的版本语义。`FileStore` 用可响应 `context` 取消的进程级 gate 与系统文件锁支持同目录多句柄/协作进程 CAS，新数据文件为 `0600`，v2 文件同时写精确 `kv_bytes` 和旧版可读的语义 `kv`；它适合小规模单版本部署，升级/回滚应停写切换，不能让不识别锁协议的旧二进制与新版并行写。生产数据库仍优先使用 `sqlstore`。
 
 编辑器或多标签页应使用 `KVGetWithRevision` + `KVCompareAndSet`，不要自行实现“先 GET、再无条件 PUT”。版本令牌是服务端基于 RawMessage 完整字节生成的不透明 SHA-256 表示；首次创建使用 `MissingKVRevision`。冲突返回 `KVConflictError`（同时匹配 `ErrKVConflict` / `ErrConflict`），其中包含最新版本和值。HTTP `GET /api/kv/{key}` 会增量返回 `revision`，`PUT` 可选传 `expected_revision`；字段缺失仍保持旧版无条件写语义。内置 Versioned Store 可跨 Handler/副本原子比较并写入；第三方 legacy Store 仅保证单 Handler 锁内语义。`DeleteItems` 会在同一用户状态事务中清理所有 `item-layout.*` 引用。
+
+### 确认后继续多步业务（可选）
+
+`assistant.Config.ContinueAfterTool` 可在已确认动作执行并经 `CompleteTool` 保存后，返回一个新的 `ChatClientUserMessage` 事件。框架将其送回普通轮次队列，重新调用宿主 `PrepareTurn`、实时鉴权和工具治理；新的写动作仍生成新确认卡，不继承上一张卡的权限。错误、unknown、公开回执标为 error 时不续跑。未配置时保持原有无工具结果总结；配置并返回事件时跳过重复总结。返回 nil 可结束原计划。宿主应从服务端对话和原任务回执决定剩余范围，不能扩展原名单或重放未知动作；后台作业仍由宿主持久化。
+
+`PublicTurnError` 可把内部错误映射为固定公开文案，切勿返回供应商错误原文、令牌或调用参数。历史、错误分类和后台进度仍由宿主存储。

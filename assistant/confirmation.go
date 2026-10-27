@@ -386,11 +386,26 @@ func (s *session) runConfirmedTool(ctx context.Context, cancel context.CancelFun
 		if runErr != nil {
 			p.end(nil, runErr)
 		} else {
+			// 后续步骤必须重新进入普通轮次；原回执已落地，续跑失败不能改变业务结果或重放动作。
+			var next *ihtml.ChatClientEvent
+			if fn := s.backend.cfg.ContinueAfterTool; fn != nil && evidence != nil && started && status != ihtml.ChatToolError && status != ihtml.ChatToolUnknown {
+				func() {
+					defer func() { _ = recover() }()
+					host := s.sctx
+					candidate, err := fn(replyParent, &host, evidence)
+					if err == nil && candidate != nil && candidate.Type == ihtml.ChatClientUserMessage {
+						next = candidate
+					}
+				}()
+			}
 			reply := &agent.TurnResult{Text: summary, FinishReason: "manual_tool_only"}
-			if s.backend.cfg.Confirmation.ResultReply != nil && evidence != nil && pending != nil {
+			if next == nil && s.backend.cfg.Confirmation.ResultReply != nil && evidence != nil && pending != nil {
 				reply = s.explainToolResult(replyParent, p, pending, status, view, summary)
 			}
 			p.end(reply, nil)
+			if next != nil && replyParent.Err() == nil {
+				s.enqueueContinuation(replyParent, next)
+			}
 		}
 	}()
 	models, err := s.backend.Models(ctx)
@@ -457,6 +472,30 @@ func (s *session) runConfirmedTool(ctx context.Context, cancel context.CancelFun
 	evidence.Result, runErr = item.tool.Handler(callCtx, append(json.RawMessage(nil), item.args...))
 	if callCtx.Err() != nil {
 		runErr = callCtx.Err()
+	}
+}
+
+// 排队与用户停止共用同一把锁；不能借用即将收尾的上一轮 context，也不能在停止后重新排队。
+func (s *session) enqueueContinuation(parent context.Context, event *ihtml.ChatClientEvent) {
+	cleaned, err := cleanEvent(event)
+	if err != nil {
+		return
+	}
+	s.mu.Lock()
+	if s.closed || parent.Err() != nil || s.ctx.Err() != nil {
+		s.mu.Unlock()
+		return
+	}
+	if len(s.queue) >= s.backend.cfg.MaxPendingTurns {
+		s.queueRejected = true
+		s.mu.Unlock()
+		return
+	}
+	s.queue = append(s.queue, pendingTurn{parent: s.ctx, event: cleaned})
+	s.mu.Unlock()
+	select {
+	case s.wake <- struct{}{}:
+	default:
 	}
 }
 
