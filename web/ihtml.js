@@ -5195,7 +5195,9 @@
       const list = el('div', 'ihtml-chat-history-list');
       const retry = el('button', 'ihtml-chat-history-retry', T('history_retry')); retry.type = 'button'; retry.hidden = true;
       const more = el('button', 'ihtml-chat-history-more', T('history_more')); more.type = 'button'; more.hidden = true;
-      pane.append(heading, status, list, retry, more); log.before(pane);
+      pane.appendChild(heading);
+      if (source.description) pane.appendChild(el('p', 'ihtml-chat-history-description', source.description));
+      pane.append(status, list, retry, more); log.before(pane);
       let opened = false, generation = 0, pending = null, mutating = false, cursor = '', items = [];
       const uncertain = new Set();
       const busy = () => chat.active || chat.sending || !!chat.confirmationBusy || authRefreshing || destroyed;
@@ -5212,7 +5214,7 @@
         for (const item of items) {
           const row = el('div', 'ihtml-chat-history-row');
           const open = el('button', 'ihtml-chat-history-select'); open.type = 'button';
-          open.appendChild(el('strong', '', item.title));
+          open.title = item.title; open.appendChild(el('strong', '', item.title));
           if (item.subtitle) open.appendChild(el('small', '', item.subtitle));
           if (item.selected) open.setAttribute('aria-current', 'true');
           open.onclick = () => { void act('select', item); }; row.appendChild(open);
@@ -7868,7 +7870,7 @@
           if (opts[name] != null && typeof opts[name] !== 'function') throw new TypeError('ihtml: ' + name + ' must be a function');
         }
         if (opts.history != null && opts.history !== false) {
-          if (!opts[chatOnlyOption] || typeof opts.history !== 'object' || typeof opts.history.list !== 'function' || typeof opts.history.select !== 'function' || (opts.history.remove != null && typeof opts.history.remove !== 'function') || (opts.history.onOpenChange != null && typeof opts.history.onOpenChange !== 'function')) throw new TypeError('ihtml: history requires mountChat and list/select callbacks');
+          if (!opts[chatOnlyOption] || typeof opts.history !== 'object' || typeof opts.history.list !== 'function' || typeof opts.history.select !== 'function' || (opts.history.remove != null && typeof opts.history.remove !== 'function') || (opts.history.onOpenChange != null && typeof opts.history.onOpenChange !== 'function') || (opts.history.description != null && (typeof opts.history.description !== 'string' || opts.history.description.length > 2048))) throw new TypeError('ihtml: history requires mountChat and list/select callbacks');
           opts.history = {...opts.history};
         }
         if (opts.initialMessages != null) {

@@ -361,6 +361,7 @@ Handler 私有输出、确认令牌、工具集、技能、检查点或引擎历
 ```js
 const view = ihtml.mountChat(host, {
   history: {
+    description: '这里由宿主说明保存期限或查询范围。',
     list: async ({cursor, signal}) => {
       const page = await hostAPI.listConversations({cursor, signal});
       return {
