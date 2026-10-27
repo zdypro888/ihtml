@@ -77,6 +77,18 @@ asynchronous cancellation lanes while sharing the execution-context primitive.
 
 只需要对话页面时使用 `ihtml.mountChat`，无需挂载工作台或加载 Items。它和工作台抽屉共用消息渲染、流式事件、取消、模型选择和身份隔离：
 
+
+先选择接入方式，避免无意中再建一套 Agent 或历史系统：
+
+| 现有项目 | 推荐入口 | 宿主仍然负责 |
+|---|---|---|
+| 需要完整动态工作台 | `ihtml.mount` / Go `NewHandler` | 身份解析、Store 与业务权限 |
+| 已有页面，只需要聊天组件 | `ihtml.mountChat` | 面板高度、入口与页面生命周期 |
+| 已有 Agent 和原生业务接口 | `mountChat` + `hostTransport`，或 Go `WithChatBackend` | 模型执行、会话、配额、审计与原生授权 |
+| 没有自己的 AI 后端 | `ihtml/chat.NewChecked` | 模型配置与密钥注入；不要与已有 Agent 叠加 |
+
+> `mountChat` 不会自动得到项目的历史列表、删除接口或业务权限。下面的可选能力需要显式接入。浏览器显示消息不等于服务端模型上下文。
+
 ```js
 const assistant = ihtml.mountChat(document.querySelector('#assistant'), {
   base: '/ui/', theme: 'inherit', storageKey: 'project-assistant',
@@ -93,6 +105,62 @@ const offTheme = assistant.theme.onChange(theme => observeTheme(theme));
 ```
 
 `mountChat` 与工作区公开相同的 `theme.get/set/onChange`；主题更新保留当前对话、连接和待确认卡，各实例独立处理系统明暗。`set(patch,{persist:false})` 禁止将改动写回远端主题；挂载时提供宿主 `theme` 配置的实例由宿主管理，不写本地或远端主题。订阅返回取消函数，销毁后不再通知。设置面板手动选择深浅模式时，会清除固定背景／正文配色以恢复自适应调色板，保留主色、字体和圆角；直接调用 `theme.set` 仍保留未指定字段。
+
+#### 可选能力：接入时逐项核对
+
+| 选项 / 公共接口 | 用途与默认行为 |
+|---|---|
+| `history: {list, select, remove?}` | 历史列表、分页、恢复及可选删除；默认关闭，不产生历史请求。没有 `remove` 就没有删除按钮 |
+| `history.entry: false` | 宿主已有历史图标时隐藏 SDK 重复入口，调用 `chat.history.open/close/refresh()`；`onOpenChange` 同步显示状态 |
+| `history.description` | 历史保留期限、可见范围等纯文本说明，由宿主按实际存储规则提供 |
+| `chatHeader: 'compact'` | 隐藏重复标题，保留紧凑操作行 |
+| `chatHeader: 'none'` | 宿主接管整个标题栏；必须自行提供“新对话”等入口，调用原有公共方法 |
+| `starters: string[]` | 最多四个空对话示例；在消息区滚动，首条消息提交后隐藏，恢复已有消息时不显示 |
+| `initialMessages` / `chat.getMessages()` | 最多 100 条、总计 512 KiB 的显示快照；不是可信历史，不含可继续执行的旧授权 |
+| `chat.sessionId` | 当前 SDK 的稳定 `csid`，非认证凭据；连续追问和重连沿用，显式新对话换号 |
+| `chat.clear()` / `onNewChat` | 开始新对话并通知宿主解除原生继续绑定；不删除历史、不撤销业务操作 |
+| `beforeConfirm` | 接入宿主的原生确认/身份核验；不能替代服务端执行时再次鉴权 |
+| `auth` / `connectionAuth` | HTTP 鉴权与连接短票据分离；长期凭据不要放进 URL |
+| `contextProvider` / `onChatEvent` | 页面上下文与脱敏事件观察；都不构成服务端授权 |
+| `theme` / `theme.set` / `refreshAuth` / `destroy` | 宿主换肤、身份变化及卸载时的标准生命周期；不应为了换肤重挂载 |
+
+#### 历史对话如何接入
+
+SDK 统一渲染列表和交互，宿主提供自己的 API 适配器。数据契约是：
+
+```js
+history: {
+  // cursor 是宿主的不透明分页游标；只有明确还有下一页时才返回新 cursor。
+  list: async ({cursor, signal}) => ({
+    items: [{id: 'server-conversation-id', title: '整段对话标题',
+             subtitle: '更新时间', selected: false, removable: true}],
+    cursor: '',
+  }),
+  // 读取本人原生记录，重挂载时提供 initialMessages，并绑定服务端认可的继续凭据。
+  // 必须等待读取完成；signal 取消或身份变化后，不得恢复迟到的旧对话。
+  select: async ({id, signal}) => openNativeConversation(id, signal),
+  // 可选：在宿主确认后删除整段对话。只有服务器明确确认删除成功才返回 true。
+  // 取消返回 false；失败抛出错误，不能只从浏览器列表移除。
+  remove: async ({id, signal}) => deleteNativeConversationAfterConfirmation(id, signal),
+}
+```
+
+`openNativeConversation`、`deleteNativeConversationAfterConfirmation` 是宿主实现的适配函数，不是 SDK 自带接口。`list` 每页最多 100 条；`select` 负责原生继续绑定，`initialMessages` 只负责显示。读取/选择有 30 秒超时，删除含确认阶段为 120 秒，均提供取消信号；删除失败或结果未知时不会自动重试。权限、归属、并发与幂等必须由宿主 API 校验，不能信任行里的 `selected` 或 `removable`。
+
+**一轮提问（turn）、对话（conversation）与传输/执行 session 要分开。** 历史 ID 应标识整段对话；连续追问追加原记录，重连不能变成新历史。原生后端可把 `csid` 映射到自己的对话 ID，不能把它当访问凭据。点击新对话时，宿主必须在 `onNewChat` 中解除旧的 `params.conversation` 或原生继续令牌并重新绑定，不能只清屏后仍把新问题写回旧对话。
+
+删除当前对话成功后，宿主应通过 `chat.clear()` 并解除继续绑定；删除其他对话不应清空当前对话或草稿。服务端应阻止旧连接/迟到写入复活已删除记录。删除对话消息不等于撤销已经执行的业务操作，相关回执、计费、必要审计及保留策略仍由宿主管理；SDK 不会代为承诺或清除这些数据。
+
+#### 上线前验收
+
+- 连续追问与断线重连仍落到同一条原生历史；新对话独立保存，恢复后继续原对话。
+- 历史列表、分页、详情与删除均校验当前用户和租户；切换账号后旧响应不能恢复界面。
+- 删除必须有明确确认和服务端成功回执；取消、超时或结果未知不伪报成功，不自动重试写入。
+- 恢复文本不会恢复旧确认卡或业务授权；所有执行仍由服务端重新鉴权。
+- 手机有足够的消息滚动区域，输入框可见；宿主标题/示例不要与 SDK 重复常驻。
+- 卸载调用 `destroy()`，权限/用户变化按实际作用域 `refreshAuth()` 或重建；换肤用 `theme.set()`。
+
+完整选项、原生传输及确认契约见 [AI 接入指南](docs/ai-integration.md)。不要复制某个项目的持久化策略作为 SDK 默认能力。
 
 宿主签发确认卡时，可设置 `ProposedToolCall.Presentation`（JSON `presentation`）：`confirm_text`、`cancel_text`、`reason_label`。字段只控制纯文本显示，空值或无效类型使用原本地化文案，最长显示80字符；不授予执行权限，也不改变 `beforeConfirm` 或确认协议。确认与取消文案应明确描述操作；签名器覆盖完整 presentation，宿主必须先设置文案再签名。未设置 presentation 的旧卡保持原签名。
 
