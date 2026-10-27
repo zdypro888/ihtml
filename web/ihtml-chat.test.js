@@ -1185,10 +1185,11 @@ for (const locale of ['zh-CN', 'en']) {
       window.agentModes = ['deep']; window.approvalResume = 'managed_turn';
       window.a = ihtml.mountChat('#a', { locale }); await a.ready(); await a.chat.send('fixture request');
       sockets[0].emit({ type: 'turn_start', run_id: 'proposal', seq: 1 });
-      sockets[0].emit({ type: 'confirmation_required', run_id: 'proposal', seq: 2, tool_call: { id: 'fixture-confirm', name: 'fixture_write', title: 'Fixture write', approval_resume: 'manual_tool_only', confirmation_nonce: 'nonce', confirmation_token: 'SIGNED', confirmation_expires: Math.floor(Date.now()/1000)+600, body: { count: 1 } } });
+      sockets[0].emit({ type: 'confirmation_required', run_id: 'proposal', seq: 2, tool_call: { id: 'fixture-confirm', name: 'fixture_write', title: 'Fixture write', reason: 'Fixture business impact', approval_resume: 'manual_tool_only', confirmation_nonce: 'nonce', confirmation_token: 'SIGNED', confirmation_expires: Math.floor(Date.now()/1000)+600, body: { count: 1 } } });
       sockets[0].emit({ type: 'assistant_done', run_id: 'proposal', seq: 3, message: 'Confirm fixture', content_format: 'text' });
     }, locale);
     assert.equal(await page.locator('#a .ihtml-agent-modebar').isVisible(), false);
+    assert.match(await page.locator('#a .ihtml-tool').innerText(), /Fixture business impact/);
     const notice = await page.locator('#a .ihtml-tool .ihtml-agent-manual').innerText();
     assert.match(notice, locale === 'zh-CN' ? /继续处理原请求.*再次请求确认/ : /continues your request.*asks again/);
     assert.doesNotMatch(await page.locator('#a').innerText(), /不会自动继续|计划不会自动继续|do not resume automatically/);

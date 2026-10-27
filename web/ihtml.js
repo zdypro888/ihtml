@@ -6887,8 +6887,8 @@
           tick();
         }
         if (meta.childNodes.length) rec.body.appendChild(meta);
-        // 宿主已有确认说明时不再叠加一段通用提示，保留空间展示完整名单。
-        if (rec.status === 'pending' && rec.call.approval_resume === 'manual_tool_only' && !view.reason) {
+        // 业务影响说明不能替代续办能力；受管续办另显示一行共享提示，普通单卡避免重复说明。
+        if (rec.status === 'pending' && rec.call.approval_resume === 'manual_tool_only' && (!view.reason || this.deepApprovalResume === 'managed_turn')) {
           const manual = el('div', 'ihtml-agent-manual', T(this.deepApprovalResume === 'managed_turn' ? 'agent_managed_confirm' : 'agent_manual_confirm'));
           manual.setAttribute('role', 'note');
           rec.body.appendChild(manual);
