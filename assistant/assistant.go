@@ -760,6 +760,12 @@ func (p *projection) step(step agent.Step, host func(agent.Step)) {
 		if host != nil {
 			host(step)
 		}
+		if step.Kind == agent.StepStatus {
+			if text := strings.TrimSpace(step.Result); text != "" && len(text) <= 1024 {
+				p.send(ihtml.ChatStreamEvent{Type: ihtml.ChatStreamAssistantStatus, Status: text})
+			}
+			return
+		}
 		if step.Kind != agent.StepToolCall || step.ApprovalPending {
 			return
 		}

@@ -152,6 +152,7 @@ type StepKind string
 const (
 	StepToolCall StepKind = "tool_call"
 	StepText     StepKind = "text"
+	StepStatus   StepKind = "status" // 框架公开阶段提示，不能携带摘要内容、推理或原始上下文。
 )
 
 // Step 一次引擎轮次内的执行轨迹条目，用于审计与回放。
@@ -184,11 +185,12 @@ type Usage struct {
 // applied deferred-tool selection. It intentionally differs from the full
 // authorized catalog supplied in TurnRequest.Tools.
 type ToolExposure struct {
-	AgentIterations int
-	ModelCalls      int
-	PeakToolCount   int
-	PeakSchemaChars int
-	PeakTools       []string
+	AgentIterations    int
+	ModelCalls         int
+	ContextCompactions int // Eino 原生摘要实际执行次数，不把普通模型请求计为压缩。
+	PeakToolCount      int
+	PeakSchemaChars    int
+	PeakTools          []string
 }
 
 // TurnMode defines the orchestration contract for a model call. It is selected

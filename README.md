@@ -527,3 +527,17 @@ type ScopedPagePublicationService interface { … } // 对 ScopedService 做类�
 `assistant.Config.ContinueAfterTool` 可在已确认动作执行并经 `CompleteTool` 保存后，返回一个新的 `ChatClientUserMessage` 事件。框架将其送回普通轮次队列，重新调用宿主 `PrepareTurn`、实时鉴权和工具治理；新的写动作仍生成新确认卡，不继承上一张卡的权限。错误、unknown、公开回执标为 error 时不续跑。未配置时保持原有无工具结果总结；配置并返回事件时跳过重复总结。返回 nil 可结束原计划。宿主应从服务端对话和原任务回执决定剩余范围，不能扩展原名单或重放未知动作；后台作业仍由宿主持久化。
 
 `PublicTurnError` 可把内部错误映射为固定公开文案，切勿返回供应商错误原文、令牌或调用参数。历史、错误分类和后台进度仍由宿主存储。
+
+### Agent 宿主接入核对
+
+`agent/eino` 使用 Eino `deep.New` 与 `adk.Runner` 执行多轮工具调用，不在宿主重新实现推理循环。工具目录较大时，只把常用入口标为 `ToolLoadImmediate`，其余保留 `ToolLoadDeferred`，交给原生 `tool_search`；延迟加载不会赋予新权限。工具作用域在压缩前记录真实检索结果，避免已加载工具被摘要隐藏。摘要使用原生 summarization middleware 的任务摘要配置，禁止摘要请求调用工具，Responses 摘要降低推理开销；Finalize 保留最近两组完整工具往返（合计不超过64 KiB，不截断 JSON 或加密元数据），准确保留任务编号及预览指纹。公开进度只发送压缩阶段名称，`TurnResult.ToolExposure.ContextCompactions` 记录实际压缩次数。
+
+需要保留工具轨迹时，通过 `einoengine.WithRuntimeStore` 注入宿主存储，并保存 `EngineSession`；`DisableSession:true` 明确关闭此能力。产品历史与引擎工作记忆分开，不能把原始 checkpoint 或推理轨迹当作历史对话返回。`agent/eino/sqlstore` 提供 PostgreSQL 适配器；数据库迁移、租户隔离、执行锁及保留策略仍由宿主负责。
+
+需要原生确认中断时，使用 `assistant.Config.NativeConfirmation` 的 Pause/PrepareResume/Pending 与 `RequireApproval`、`ResumeRequest`，让 Eino checkpoint 继续原轨迹；它与手动 Confirmation 互斥。已有业务确认宿主可以选择 `ContinueAfterTool`，确认后进入新的受管轮次，不应把这种方式宣传为跨进程恢复原模型轨迹。独立业务作业的恢复以宿主原任务回执为准。工具未知结果不重放，人工取消不能被后台续跑重新排队覆盖。
+
+GPT-6.1 Terra 的工具调用必须使用 `OpenAIAPI:"responses"`；SDK 在发送错误协议请求前拒绝，普通无工具文本请求不受该规则影响。模型可用性以实际账户的模型列表和代表性流程验收为准。
+
+显式真实模型验收：`IHTML_LIVE_AGENT_TEST=1 GOWORK=off go test ./agent/eino -run TestLiveResponsesAgentWorkflow -v`。只读取统一 `~/.config/credentials` 内 `iclouder_ai` 凭据；Sol/Terra 对同一组十个合成身份执行只读工具、本机计数回执、原生压缩、checkpoint 暂停/恢复、重复恢复拒绝和后续会话核对。默认测试跳过网络调用；测试不清空真实云盘、不转移真实身份。测试 Store 为内存存储，只证明重建 Engine 后使用同一 Store 恢复，不能据此声称某个宿主已经接好持久数据库。
+
+实现依据：[Eino Runner](https://www.cloudwego.io/docs/eino/core_modules/eino_adk/agent_extension/)、[Eino 中断恢复](https://www.cloudwego.io/docs/eino/quick_start/chapter_07_interrupt_resume/)、[Codex harness](https://developers.openai.com/blog/codex-as-a-platform)、[Claude tool runner](https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-runner)、[Terra 模型](https://developers.openai.com/api/docs/models/gpt-6.1-terra)。
