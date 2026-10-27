@@ -546,3 +546,5 @@ GPT-6.1 Terra 的工具调用必须使用 `OpenAIAPI:"responses"`；SDK 在发�
 显式真实模型验收：`IHTML_LIVE_AGENT_TEST=1 GOWORK=off go test ./agent/eino -run TestLiveResponsesAgentWorkflow -v`。只读取统一 `~/.config/credentials` 内 `iclouder_ai` 凭据；Sol/Terra 对同一组十个合成身份执行只读工具、本机计数回执、原生压缩、checkpoint 暂停/恢复、重复恢复拒绝和后续会话核对。默认测试跳过网络调用；测试不清空真实云盘、不转移真实身份。测试 Store 为内存存储，只证明重建 Engine 后使用同一 Store 恢复，不能据此声称某个宿主已经接好持久数据库。
 
 实现依据：[Eino Runner](https://www.cloudwego.io/docs/eino/core_modules/eino_adk/agent_extension/)、[Eino 中断恢复](https://www.cloudwego.io/docs/eino/quick_start/chapter_07_interrupt_resume/)、[Codex harness](https://developers.openai.com/blog/codex-as-a-platform)、[Claude tool runner](https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-runner)、[Terra 模型](https://developers.openai.com/api/docs/models/gpt-6.1-terra)。
+
+工具等待进度：宿主工具可调用 `agent.ReportStatus(ctx, "正在等待原任务…")`，桥接器将其投影为当前受管轮次的 `assistant_status`；不新增模型调用或工具记录，不依赖 `PrepareTurn` 返回指针（请求会被复制）。原确认工具继承可信执行上下文，但进度重新绑定本次确认轮次。自行接入引擎的宿主可用 `agent.WithStatusReporter` 绑定已有状态通道。报告有长度与取消校验，只是展示进度，不是成功回执或新增批准。后台任务等待／归属仍由宿主业务 API 处理。

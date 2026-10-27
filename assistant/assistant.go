@@ -684,6 +684,12 @@ func (s *session) governTools(tools []agent.Tool, ev *ihtml.ChatClientEvent, p *
 					return "", ihtml.ErrAccessDenied
 				}
 			}
+			// 工具通过上下文报告等待进度，复用当前投影，不能依赖宿主 PrepareTurn 返回指针。
+			ctx = agent.WithStatusReporter(ctx, func(text string) {
+				if req.OnEvent != nil {
+					req.OnEvent(agent.Step{Kind: agent.StepStatus, Result: text})
+				}
+			})
 			return handler(ctx, args)
 		}
 		out = append(out, tool)

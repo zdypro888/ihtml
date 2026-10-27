@@ -445,6 +445,8 @@ func (s *session) runConfirmedTool(ctx context.Context, cancel context.CancelFun
 	pending = item
 	evidence = &ConfirmedToolResult{Call: item.call, Tool: item.tool, Args: append(json.RawMessage(nil), item.args...), InvocationScope: item.invocationScope}
 	callCtx, stop := context.WithTimeout(item.invocation, s.backend.cfg.Confirmation.ToolTimeout)
+	// 调用继承原提案的可信执行上下文，但进度必须绑定本次确认轮次，不能写回已结束的提案。
+	callCtx = agent.WithStatusReporter(callCtx, func(text string) { p.step(agent.Step{Kind: agent.StepStatus, Result: text}, nil) })
 	defer stop()
 	stopParent := context.AfterFunc(ctx, stop)
 	defer stopParent()
