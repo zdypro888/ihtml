@@ -7737,6 +7737,8 @@
         },
         cancel: () => { if (!destroyed) chat.cancel(); },
         history: {open: () => { if (!destroyed && !authRefreshing) chat.history?.open(); }, close: () => chat.history?.close(), refresh: () => chat.history?.refresh(), get opened() { return !!chat.history?.opened; }},
+        // 仅连接会话标识，不是授权凭据；宿主可据此标记当前历史记录。
+        get sessionId() { return destroyed || authRefreshing ? '' : chatSessionID(); },
         getMessages: () => chat.getMessages(),
         clear: () => {
           if (destroyed || authRefreshing) return;

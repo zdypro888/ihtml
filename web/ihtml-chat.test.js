@@ -1160,3 +1160,13 @@ test('host-owned header and empty-chat starters reclaim space without replaying 
  assert.equal(await page.locator('#a .ihtml-chat-starters').count(),0);
  assert.equal(await page.locator('#a .ihtml-chat').getAttribute('aria-label'),'AI assistant');
 });
+
+
+test('sessionId spans turns and reconnects, and only explicit new chat renews it',async(t)=>{
+ const page=await fixture(t);await page.evaluate(async()=>{window.a=ihtml.mountChat('#a');await a.ready();window.firstSession=a.chat.sessionId;await a.chat.send('First');});
+ assert.equal(await page.evaluate(()=>new URL(sockets[0].url).searchParams.get('csid')),await page.evaluate(()=>firstSession));
+ await page.evaluate(()=>{a.chat.clear();window.nextSession=a.chat.sessionId;});
+ assert.notEqual(await page.evaluate(()=>nextSession),await page.evaluate(()=>firstSession));
+ await page.evaluate(async()=>{a.destroy();window.a=ihtml.mountChat('#a');await a.ready();});
+ assert.equal(await page.evaluate(()=>a.chat.sessionId),await page.evaluate(()=>nextSession));
+});
