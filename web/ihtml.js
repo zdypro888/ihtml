@@ -19,6 +19,10 @@
  * 实例 API 额外提供: destroy(), ready(Promise), fmt/util/chart/poll/listen/panel。 */
 /* mountChat(el, options) uses the same chat renderer without workspace boot.
  * Options: base/params/theme/locale/strings/storageKey/auth/connectionAuth,
+ * Optional history: {list({cursor,signal})->{items,cursor?}, select({id,signal}),
+ * remove?({id,signal})->boolean, entry?:false, onOpenChange?(opened)}.
+ * Host owns storage, resume binding, authorization and native deletion confirmation.
+ * chat.history.open/close/refresh and .opened control the same optional renderer.
  * onReady/onAuthError, initialMessages: [{role, content, contentFormat?}],
  * contextProvider({context, user, signal}) -> partial ChatClientContext | Promise,
  * onChatEvent(event) -> void (detached snapshot, confirmation secrets omitted).
@@ -5175,6 +5179,114 @@
       });
     }
 
+    // 可选历史 UI 只消费宿主回调；持久化、身份/权限及删除确认始终由宿主拥有。
+    function createChatHistory(head, log, foot) {
+      if (!opts.history) return null;
+      const source = opts.history;
+      const entry = el('button', 'ihtml-chat-history-entry', T('history_title'));
+      entry.type = 'button'; entry.setAttribute('aria-expanded', 'false'); entry.hidden = source.entry === false;
+      head.appendChild(entry);
+      const pane = el('section', 'ihtml-chat-history'); pane.hidden = true; pane.setAttribute('aria-label', T('history_title'));
+      pane.tabIndex = -1;
+      const heading = el('div', 'ihtml-chat-history-head');
+      const title = el('strong', '', T('history_title'));
+      const back = el('button', '', T('history_back')); back.type = 'button'; heading.append(title, back);
+      const status = el('div', 'ihtml-chat-history-status'); status.setAttribute('role', 'status');
+      const list = el('div', 'ihtml-chat-history-list');
+      const retry = el('button', 'ihtml-chat-history-retry', T('history_retry')); retry.type = 'button'; retry.hidden = true;
+      const more = el('button', 'ihtml-chat-history-more', T('history_more')); more.type = 'button'; more.hidden = true;
+      pane.append(heading, status, list, retry, more); log.before(pane);
+      let opened = false, generation = 0, pending = null, mutating = false, cursor = '', items = [];
+      const uncertain = new Set();
+      const busy = () => chat.active || chat.sending || !!chat.confirmationBusy || authRefreshing || destroyed;
+      const notify = () => { if (typeof source.onOpenChange === 'function') { try { source.onOpenChange(opened); } catch { /* presentation only */ } } };
+      const invalidate = () => { generation++; if (pending) pending.abort(); pending = null; mutating = false; };
+      const sync = () => {
+        entry.disabled = destroyed || authRefreshing;
+        back.disabled = mutating;
+        for (const button of list.querySelectorAll('button')) button.disabled = !!pending || busy() || (button.dataset.removeId && uncertain.has(button.dataset.removeId));
+        more.disabled = !!pending; retry.disabled = !!pending;
+      };
+      const render = () => {
+        list.replaceChildren();
+        for (const item of items) {
+          const row = el('div', 'ihtml-chat-history-row');
+          const open = el('button', 'ihtml-chat-history-select'); open.type = 'button';
+          open.appendChild(el('strong', '', item.title));
+          if (item.subtitle) open.appendChild(el('small', '', item.subtitle));
+          if (item.selected) open.setAttribute('aria-current', 'true');
+          open.onclick = () => { void act('select', item); }; row.appendChild(open);
+          if (source.remove && item.removable !== false) {
+            const remove = el('button', 'ihtml-chat-history-remove', T('history_delete')); remove.type = 'button';
+            remove.dataset.removeId = item.id; remove.setAttribute('aria-label', T('history_delete') + ' · ' + item.title);
+            remove.onclick = () => { void act('remove', item); }; row.appendChild(remove);
+          }
+          if (uncertain.has(item.id)) row.appendChild(el('small', 'ihtml-chat-history-unknown', T('history_unknown')));
+          list.appendChild(row);
+        }
+        more.hidden = !cursor; sync();
+      };
+      const alive = (id, abort) => !destroyed && opened && id === generation && !abort.signal.aborted && !authRefreshing;
+      const failure = (error, id, abort) => {
+        if (!alive(id, abort)) return;
+        // 不输出回调异常原文，避免 HTTP/认证错误携带宿主敏感信息。
+        status.textContent = T('history_error'); retry.hidden = false;
+      };
+      async function load(append = false) {
+        if (!opened || pending || destroyed || authRefreshing) return;
+        const abort = new AbortController(), id = ++generation, before = append ? cursor : '';
+        pending = abort; status.textContent = T('history_loading'); retry.hidden = true; sync();
+        try {
+          const page = await boundedChatHook(() => source.list({cursor: before, signal: abort.signal}), abort.signal, 30000);
+          if (!alive(id, abort)) return;
+          if (!page || !Array.isArray(page.items) || page.items.length > 100 || (page.cursor != null && (typeof page.cursor !== 'string' || page.cursor.length > 2048)) || (page.cursor && page.cursor === before)) throw new TypeError('invalid history page');
+          const rows = page.items.map(item => {
+            if (!item || typeof item.id !== 'string' || !item.id || item.id.length > 512 || typeof item.title !== 'string' || !item.title || item.title.length > 1024 || (item.subtitle != null && (typeof item.subtitle !== 'string' || item.subtitle.length > 1024))) throw new TypeError('invalid history item');
+            return {id: item.id, title: item.title, subtitle: item.subtitle || '', selected: item.selected === true, removable: item.removable !== false};
+          });
+          const seen = new Set(); items = (append ? items : []).concat(rows).filter(item => { if (seen.has(item.id)) return false; seen.add(item.id); return true; });
+          cursor = page.cursor || ''; status.textContent = items.length ? '' : T('history_empty'); render();
+        } catch (error) { failure(error, id, abort); }
+        finally { if (id === generation) { pending = null; abort.abort(); sync(); } }
+      }
+      async function act(kind, item) {
+        if (pending || busy() || !opened || (kind === 'remove' && uncertain.has(item.id))) return;
+        const abort = new AbortController(), id = ++generation;
+        pending = abort; mutating = true; status.textContent = T('history_loading'); retry.hidden = true; sync(); chat.syncChatControls();
+        try {
+          // 删除 hook 必须完成宿主原生确认并返回 true；取消返回 false，绝不默认删除。
+          const result = await boundedChatHook(() => source[kind]({id: item.id, signal: abort.signal}), abort.signal, kind === 'remove' ? 120000 : 30000);
+          if (!alive(id, abort)) return;
+          if (kind === 'remove') {
+            if (result !== true && result !== false) throw new TypeError('history removal requires explicit receipt');
+            if (result) { items = items.filter(row => row.id !== item.id); render(); }
+            status.textContent = items.length ? '' : T('history_empty');
+          } else { mutating = false; close(false); }
+        } catch (error) {
+          if (kind === 'remove' && alive(id, abort)) { uncertain.add(item.id); render(); }
+          failure(error, id, abort);
+        } finally { if (id === generation) { pending = null; mutating = false; abort.abort(); sync(); chat.syncChatControls(); } }
+      }
+      function close(focus = true) {
+        if (!opened || mutating) return;
+        invalidate(); opened = false; pane.hidden = true; log.hidden = false;
+        entry.setAttribute('aria-expanded', 'false'); notify(); chat.syncLatest(); chat.syncChatControls();
+        if (focus && entry.isConnected && !entry.hidden) entry.focus({preventScroll: true});
+      }
+      function reset() { invalidate(); opened = false; items = []; cursor = ''; uncertain.clear(); list.replaceChildren(); pane.hidden = true; log.hidden = false; entry.setAttribute('aria-expanded', 'false'); notify(); }
+      entry.onclick = () => opened ? close() : open();
+      back.onclick = () => close(); more.onclick = () => { void load(true); }; retry.onclick = () => { void load(); };
+      pane.addEventListener('keydown', event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(); } });
+      function open() {
+        if (destroyed || authRefreshing) return;
+        if (opened) return;
+        opened = true; pane.hidden = false; log.hidden = true; chat.dom.latestBtn.hidden = true;
+        entry.setAttribute('aria-expanded', 'true'); notify(); pane.focus({preventScroll: true}); void load();
+      }
+      addDisposer(reset);
+      return {open, close, reset, sync, refresh: () => load(), get opened() { return opened; }, get mutating() { return mutating; }};
+    }
+
     const chat = {
       enabled: false,
       entry: null,
@@ -5408,8 +5520,9 @@
         panelEl.append(head, toolbar, modebar, log, latestBtn, foot, live);
         if (!chatOnly) rootEl.appendChild(mask);
         rootEl.appendChild(panelEl);
-        this.dom = { mask, panel: panelEl, log, latestBtn, foot, input, sendBtn, providerBadge, modelInput, dataList, freshBtn, toolbar, modebar, modeButtons, modeHint, live, readonlyBadge };
+        this.dom = { mask, panel: panelEl, log, latestBtn, foot, input, sendBtn, providerBadge, modelInput, dataList, freshBtn, newBtn, toolbar, modebar, modeButtons, modeHint, live, readonlyBadge };
         this.log = log;
+        this.history = createChatHistory(head, log, foot);
         // 观察真正渲染后的消息高度；覆盖延迟 Markdown、图片加载、折叠及宿主视口变化。
         if (typeof ResizeObserver === 'function') {
           const resize = new ResizeObserver(() => {
@@ -5566,13 +5679,15 @@
       syncChatControls() {
         if (!this.dom) return;
         const busy = this.active || this.sending;
+        this.history?.sync();
         const unavailable = destroyed || !this.enabled || authRefreshing;
-        this.dom.input.readOnly = this.sending || unavailable;
+        this.dom.input.readOnly = this.sending || unavailable || !!this.history?.mutating;
         this.dom.input.setAttribute('aria-readonly', String(this.dom.input.readOnly));
         this.dom.foot.setAttribute('aria-busy', String(busy));
         this.dom.sendBtn.textContent = busy ? T('stop') : T('send');
         this.dom.sendBtn.classList.toggle('stop', busy);
-        this.dom.sendBtn.disabled = unavailable || (!busy && !this.dom.input.value.trim());
+        this.dom.sendBtn.disabled = unavailable || !!this.history?.mutating || (!busy && !this.dom.input.value.trim());
+        this.dom.newBtn.disabled = authRefreshing || !!this.history?.mutating;
         this.dom.modelInput.disabled = busy;
         this.dom.freshBtn.disabled = busy || !!this.modelPromise;
         for (const [mode, button] of Object.entries(this.dom.modeButtons || {})) {
@@ -5760,6 +5875,8 @@
         if (ws) { try { ws.close(); } catch { /* 忽略 */ } }
       },
       reset() {
+        if (this.history?.mutating) return;
+        this.history?.reset();
         this.sendGeneration++;
         this.sending = false;
         if (this.contextAbort) this.contextAbort.abort();
@@ -5831,6 +5948,7 @@
         this.syncChatControls();
       },
       resetForAuth() {
+        this.history?.reset();
         this.sendGeneration++;
         this.modelLoadSeq++;
         this.sending = false;
@@ -6045,7 +6163,8 @@
       },
 
       async send(value) {
-        if (destroyed || !this.enabled || authRefreshing || !this.dom || this.active || this.sending || this.confirmationBusy) return false;
+        if (destroyed || !this.enabled || authRefreshing || !this.dom || this.active || this.sending || this.confirmationBusy || this.history?.mutating) return false;
+        this.history?.close(false);
         if (value !== undefined) {
           if (typeof value !== 'string') throw new TypeError('ihtml.chat.send: text must be a string');
           this.dom.input.value = value;
@@ -7596,6 +7715,7 @@
           return !!(await chat.send(text));
         },
         cancel: () => { if (!destroyed) chat.cancel(); },
+        history: {open: () => { if (!destroyed && !authRefreshing) chat.history?.open(); }, close: () => chat.history?.close(), refresh: () => chat.history?.refresh(), get opened() { return !!chat.history?.opened; }},
         getMessages: () => chat.getMessages(),
         clear: () => {
           if (destroyed || authRefreshing) return;
@@ -7746,6 +7866,10 @@
         }
         for (const name of ['onChatEvent', 'contextProvider', 'beforeConfirm', 'reviewFieldLabel', 'verificationLinks']) {
           if (opts[name] != null && typeof opts[name] !== 'function') throw new TypeError('ihtml: ' + name + ' must be a function');
+        }
+        if (opts.history != null && opts.history !== false) {
+          if (!opts[chatOnlyOption] || typeof opts.history !== 'object' || typeof opts.history.list !== 'function' || typeof opts.history.select !== 'function' || (opts.history.remove != null && typeof opts.history.remove !== 'function') || (opts.history.onOpenChange != null && typeof opts.history.onOpenChange !== 'function')) throw new TypeError('ihtml: history requires mountChat and list/select callbacks');
+          opts.history = {...opts.history};
         }
         if (opts.initialMessages != null) {
           if (!Array.isArray(opts.initialMessages) || opts.initialMessages.length > 100) throw new TypeError('ihtml: initialMessages must be an array of at most 100 messages');

@@ -7,6 +7,14 @@ the first tagged release, changes are recorded under **Unreleased**.
 
 ### Added
 
+- Add opt-in `mountChat({history})` rendering, paginated host callbacks, explicit
+  selection and optional native-confirmed deletion; no default storage or requests.
+- Keep the composer visible, fence stale work on identity changes, and lock
+  unconfirmed deletion against automatic replay. Existing confirmation authority
+  and host ownership remain unchanged.
+- Use compact localized composer hints by default.
+
+
 - `uitools` exposes scoped workspace read/write definitions and host-governed
   preparation/execution, with mandatory card code policy and atomic publication.
 - Compact chat layout keeps controls visible in short embedded panels.

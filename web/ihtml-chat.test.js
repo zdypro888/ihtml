@@ -1086,3 +1086,52 @@ test('terminal markdown and trace compaction keep the last line visible without 
 test('new-chat host notification is explicit and never fires on mount or destroy',async(t)=>{
  const page=await fixture(t);const result=await page.evaluate(async()=>{window.resetEvents=0;window.a=ihtml.mountChat('#a',{onNewChat:()=>resetEvents++});await a.ready();const initial=resetEvents;a.chat.clear();const cleared=resetEvents;a.destroy();return {initial,cleared,destroyed:resetEvents};});assert.deepEqual(result,{initial:0,cleared:1,destroyed:1});
 });
+
+test('optional history defaults off, pages by host IDs, preserves composer and renders titles as text', async t => {
+ const page=await fixture(t,{width:390,height:844});
+ await page.evaluate(async()=>{window.a=ihtml.mountChat('#a');await a.ready();});
+ assert.equal(await page.locator('.ihtml-chat-history-entry').count(),0);
+ await page.evaluate(async()=>{a.destroy();window.historyCalls=[];window.a=ihtml.mountChat('#a',{locale:'en',history:{list:async({cursor})=>{historyCalls.push(cursor);return cursor?{items:[{id:'second',title:'Second'},{id:'first',title:'duplicate'}]}:{items:[{id:'first',title:'<img src=x onerror=alert(1)>',subtitle:'Yesterday'}],cursor:'next'}},select:async({id})=>{window.selectedHistory=id}}});await a.ready();a.chat.draft('draft stays');});
+ await page.getByRole('button',{name:'History',exact:true}).click();
+ await page.getByRole('button',{name:'Earlier conversations'}).click();
+ assert.equal(await page.locator('.ihtml-chat-history-select').count(),2);
+ assert.equal(await page.locator('.ihtml-chat-history-list img').count(),0);
+ assert.equal(await page.locator('textarea').inputValue(),'draft stays');
+ const geometry=await page.locator('textarea').boundingBox();assert.ok(geometry&&geometry.height>=44&&geometry.y+geometry.height<845);
+ await page.getByRole('button',{name:'Second',exact:true}).click();
+ assert.equal(await page.evaluate(()=>selectedHistory),'second');assert.equal(await page.evaluate(()=>a.chat.history.opened),false);
+ assert.equal(await page.locator('textarea').getAttribute('readonly'),null);
+ assert.deepEqual(await page.evaluate(()=>historyCalls),['','next']);
+});
+
+test('history failures are bounded, do not leak callback secrets, and deletion requires explicit host receipt',async t=>{
+ const page=await fixture(t);await page.evaluate(async()=>{window.removes=0;window.a=ihtml.mountChat('#a',{locale:'en',history:{list:async()=>({items:[{id:'one',title:'One'}]}),select:async()=>{},remove:async()=>{removes++;throw new Error('SECRET_AUTH_TOKEN')}}});await a.ready();a.chat.history.open();});
+ await page.getByRole('button',{name:'Delete conversation · One',exact:true}).click();
+ await page.getByText('History request did not complete. Check the original record.').waitFor();
+ assert.equal(await page.locator('#a').innerText().then(s=>s.includes('SECRET_AUTH_TOKEN')),false);
+ assert.ok(await page.getByRole('button',{name:'Delete conversation · One',exact:true}).isDisabled());
+ await page.getByRole('button',{name:'Reload',exact:true}).click();assert.equal(await page.evaluate(()=>removes),1);
+ assert.ok(await page.getByRole('button',{name:'Delete conversation · One',exact:true}).isDisabled());
+ await page.evaluate(async()=>{a.destroy();window.a=ihtml.mountChat('#a',{locale:'en',history:{list:async()=>({items:[{id:'one',title:'One'}]}),select:async()=>{},remove:async()=>false}});await a.ready();a.chat.history.open();});
+ await page.getByRole('button',{name:'Delete conversation · One',exact:true}).click();assert.equal(await page.locator('.ihtml-chat-history-select').count(),1);
+});
+
+test('late history and selection cannot restore another identity; hidden entry uses public API only',async t=>{
+ const page=await fixture(t);await page.evaluate(async()=>{window.a=ihtml.mountChat('#a',{locale:'en',history:{entry:false,list:({signal})=>new Promise(resolve=>{window.resolveOldHistory=resolve;window.historySignal=signal}),select:async()=>{}}});await a.ready();a.chat.history.open();});
+ assert.ok(await page.locator('.ihtml-chat-history-entry').isHidden());
+ await page.evaluate(async()=>{window.identity='bob';await a.refreshAuth();resolveOldHistory({items:[{id:'private',title:'alice-private-history'}]});});
+ assert.equal(await page.evaluate(()=>historySignal.aborted),true);
+ assert.equal(await page.locator('#a').innerText().then(s=>s.includes('alice-private-history')),false);
+ assert.equal(await page.evaluate(()=>a.chat.history.opened),false);
+});
+
+test('history selection blocks parallel send and new-chat until host completes without restoring tool authority',async t=>{
+ const page=await fixture(t);await page.evaluate(async()=>{window.a=ihtml.mountChat('#a',{locale:'en',history:{list:async()=>({items:[{id:'one',title:'One'}]}),select:()=>new Promise(resolve=>{window.finishSelect=resolve})}});await a.ready();a.chat.draft('unsent');a.chat.history.open();});
+ await page.getByRole('button',{name:'One',exact:true}).click();
+ assert.equal(await page.evaluate(()=>a.chat.send('do not send')),false);
+ assert.ok(await page.getByRole('button',{name:'New chat',exact:true}).isDisabled());
+ await page.evaluate(()=>finishSelect());
+ await page.waitForFunction(()=>!a.chat.history.opened);
+ assert.equal(await page.evaluate(()=>sockets.length),0);
+ assert.equal(await page.locator('textarea').inputValue(),'unsent');
+});

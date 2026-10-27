@@ -352,3 +352,54 @@ Handler 私有输出、确认令牌、工具集、技能、检查点或引擎历
 工具事件新增 `tool_status: "accepted"`，表示异步请求已接收，不能视为业务完成。
 它是卡片的终态回执（没有可再次确认的按钮）；业务后续状态仍须查询原任务。
 公开投影可标记部分失败或 unknown，但不能把异步元数据降为同步 success。
+
+## 可选的历史对话界面
+
+`mountChat` 默认不显示历史入口，也不发起历史请求。已有业务历史的宿主可传入
+`history`，复用同一历史列表、加载/失败/空态、分页、选择及可选删除界面：
+
+```js
+const view = ihtml.mountChat(host, {
+  history: {
+    list: async ({cursor, signal}) => {
+      const page = await hostAPI.listConversations({cursor, signal});
+      return {
+        items: page.rows.map(row => ({
+          id: row.id, title: row.title, subtitle: row.displayTime,
+          selected: row.id === selectedConversation,
+        })),
+        cursor: page.nextCursor || '',
+      };
+    },
+    select: async ({id, signal}) => {
+      const saved = await hostAPI.readConversation(id, {signal});
+      if (signal.aborted) return;
+      // 宿主更新原生继续凭据/transport，并用 initialMessages 重新挂载显示。
+      // 不把浏览器消息数组作为模型的权威历史，不恢复旧确认卡。
+      openNativeConversation(saved);
+    },
+    // 不提供 remove 即不显示删除按钮；禁止自动生成删除 HTTP/工具请求。
+    remove: async ({id, signal}) => {
+      // 必须复用原生确认、强认证、权限/版本/审计及幂等接口。
+      // 返回 true 表示已确认删除，false 表示取消；未知结果抛错，不自动重试。
+      return hostAPI.confirmAndDeleteConversation(id, {signal});
+    },
+  },
+});
+```
+
+每页最多100条；ID、标题、副标题均为有界纯文本，重复 ID 去重，游标必须前进。
+列表/选择回调预算30秒，包含原生确认的删除回调预算2分钟；接收方必须监听
+`signal`，取消或权限变化后不能提交未开始的操作。已提交操作是否完成必须以原生
+回执核对，关闭 UI 不表示撤销。删除不确定时本实例锁住该记录的重复删除入口。
+
+历史只占消息区，输入框保持可见。新对话、刷新身份与销毁会使旧列表请求失效；
+`refreshAuth()` 会清除缓存，宿主仍须按当前 realm、租户、人员、权限及 funding
+代次校验每次查询/恢复/删除。保存期限、数据库、业务回执、审计、额度与删除墓碑
+均属于宿主，ihtml 不另建业务存储，也不退还额度或撤销已执行业务。
+
+已有外层标题栏的宿主可设 `history.entry: false`，用
+`view.chat.history.open()/close()/refresh()` 与只读 `opened` 控制同一界面；
+可选 `history.onOpenChange(opened)` 仅同步外层图标或折叠提示，不授予业务权限。
+AVPO 可继续使用原生操作记录与强认证删除；iClouder 可继续使用其 Mongo 历史和
+当前连接的会话绑定。适配器只映射上述回调，不复制一套列表组件。

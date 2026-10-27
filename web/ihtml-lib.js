@@ -6,6 +6,7 @@
   /* ---------- i18n: 内核 chrome 文案(zh/en, 宿主可经 mount strings 覆写) ---------- */
   const I18N = {
     zh: {
+      history_title: '历史对话', history_back: '返回对话', history_loading: '正在读取…', history_empty: '暂无历史对话', history_more: '更早的对话', history_retry: '重新加载', history_delete: '删除对话', history_error: '历史操作未完成，请重新核对记录。', history_unknown: '删除结果未确认，请到原记录核对，勿重复提交。',
       chat_entry: 'AI 助手', chat_title: 'AI 助手', send: '发送', stop: '停止',
       chat_latest: '回到最新', new_session: '新对话', close: '关闭', settings: '页面设置', menu: '菜单', dialog: '对话框', page_actions: '页面操作', conversation: '与 AI 助手的对话',
       refresh_models: '刷新模型', model_placeholder: '选择已加载模型, 或直接输入模型名',
@@ -18,7 +19,7 @@
       agent_root: '主代理', agent_inspector: '页面检查', agent_reviewer: 'UI 验收',
       agent_status_pending: '待处理', agent_status_running: '进行中', agent_status_completed: '完成', agent_status_paused: '暂停', agent_status_error: '失败',
       agent_manual_confirm: '确认只执行此操作，不会自动继续其他操作；以实际结果为准。',
-      composer_placeholder: '询问问题、分析数据，或描述想创建、修改的页面…', composer_hint: 'Enter 发送 · Shift+Enter 换行',
+      composer_placeholder: '输入问题…', composer_hint: 'Enter 发送 · Shift+Enter 换行',
       welcome: '你可以直接提问、分析业务数据，也可以明确要求创建或修改页面。回答会以合适的 HTML 结构展示在这里。',
       session_reset: '新会话已开始。之前的对话上下文已清空, 页面 Item 不受影响。',
       chat_reconnected: '连接已重连, 上下文已恢复。', chat_disconnected: '连接已断开, 发送消息时会自动重连。',
@@ -126,6 +127,7 @@
       template_unassigned: '未放置内容', template_unassigned_empty: '没有未放置内容',
     },
     en: {
+      history_title: 'History', history_back: 'Back to chat', history_loading: 'Loading…', history_empty: 'No saved conversations', history_more: 'Earlier conversations', history_retry: 'Reload', history_delete: 'Delete conversation', history_error: 'History request did not complete. Check the original record.', history_unknown: 'Deletion is unconfirmed. Check the original record; do not resubmit.',
       chat_entry: 'AI assistant', chat_title: 'AI assistant', send: 'Send', stop: 'Stop',
       chat_latest: 'Jump to latest', new_session: 'New chat', close: 'Close', settings: 'Page settings', menu: 'Menu', dialog: 'Dialog', page_actions: 'Page actions', conversation: 'Conversation with the AI assistant',
       refresh_models: 'Refresh', model_placeholder: 'Pick a loaded model or type a name',
@@ -138,7 +140,7 @@
       agent_root: 'Main agent', agent_inspector: 'Page inspector', agent_reviewer: 'UI reviewer',
       agent_status_pending: 'Pending', agent_status_running: 'Running', agent_status_completed: 'Done', agent_status_paused: 'Paused', agent_status_error: 'Failed',
       agent_manual_confirm: 'Confirmation runs only this operation. Other operations do not resume automatically; verify the actual result.',
-      composer_placeholder: 'Ask a question, analyze data, or describe a page to create or change…', composer_hint: 'Enter to send · Shift+Enter for a new line',
+      composer_placeholder: 'Ask a question…', composer_hint: 'Enter to send · Shift+Enter for a new line',
       welcome: 'Ask a question, analyze business data, or explicitly ask me to create or change the page. Answers appear here using an appropriate HTML structure.',
       session_reset: 'New session started. Conversation context cleared; page items are unaffected.',
       chat_reconnected: 'Reconnected; context restored.', chat_disconnected: 'Disconnected. Sending will reconnect automatically.',

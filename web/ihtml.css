@@ -2121,3 +2121,21 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
 }
 .ihtml-chat-head-compact .ihtml-readonly-badge { margin-right: auto; }
 .ihtml-chat-head-compact button { min-height: 44px; padding: 0 8px; border-color: transparent; background: transparent; font-size: 12px; }
+
+/* 可选历史占用消息区，保持输入框可见；不依赖宿主框架或额外浮层。 */
+.ihtml-chat-inline > .ihtml-chat > .ihtml-chat-history, .ihtml-chat-history { flex: 1 1 0%; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 12px 16px; }
+.ihtml-chat-history[hidden], .ihtml-chat-log[hidden] { display: none !important; }
+.ihtml-chat-history-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.ihtml-chat-history button { min-height: 44px; padding: 8px 12px; border: 1px solid var(--ui-control-border); border-radius: var(--ui-radius, 10px); color: var(--ui-text); background: var(--ui-surface); font: inherit; cursor: pointer; }
+.ihtml-chat-history button:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 2px; }
+.ihtml-chat-history button:disabled { opacity: .5; cursor: default; }
+.ihtml-chat-history-list { display: flex; flex-direction: column; gap: 8px; }
+.ihtml-chat-history-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.ihtml-chat-history-select { flex: 1 1 140px; min-width: 0; text-align: start; display: flex; flex-direction: column; gap: 6px; overflow-wrap: anywhere; }
+.ihtml-chat-history-select strong { font-weight: 600; }
+.ihtml-chat-history-select small, .ihtml-chat-history-status { color: var(--ui-text-muted); font-size: 12px; line-height: 1.6; }
+.ihtml-chat-history-select[aria-current="true"] { border-color: var(--ui-primary); }
+.ihtml-chat-history .ihtml-chat-history-remove, .ihtml-chat-history-unknown { color: var(--ui-err); }
+.ihtml-chat-history-unknown { flex-basis: 100%; font-size: 12px; }
+.ihtml-chat-history-status:not(:empty) { padding: 8px 0; }
+.ihtml-chat-history-more, .ihtml-chat-history-retry { margin-top: 10px; }
