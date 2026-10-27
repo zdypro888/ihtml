@@ -564,7 +564,13 @@ func (e *Engine) newDeepAgent(
 	}
 	// 摘要是受控上下文变换，不再进行业务推理或调用工具；使用 Eino 原生 ModelOptions，
 	// 避免把主 Agent 的高推理预算和工具选择带入压缩请求，造成长时间无可见进度。
-	summaryOptions := []einomodel.Option{einomodel.WithMaxTokens(min(4096, e.outputTokenLimit())), einomodel.WithToolChoice(schema.ToolChoiceForbidden)}
+	summaryOptions := []einomodel.Option{einomodel.WithToolChoice(schema.ToolChoiceForbidden)}
+	if e.cfg.Provider == ProviderOpenAI && e.cfg.OpenAIAPI != "responses" {
+		// Chat Completions 的推理预算使用 max_completion_tokens，不能同时发送 max_tokens。
+		summaryOptions = append(summaryOptions, einomodel.WithMaxTokens(0), openai.WithMaxCompletionTokens(min(4096, e.outputTokenLimit())))
+	} else {
+		summaryOptions = append(summaryOptions, einomodel.WithMaxTokens(min(4096, e.outputTokenLimit())))
+	}
 	if e.cfg.Provider == ProviderOpenAI && e.cfg.OpenAIAPI == "responses" {
 		summaryOptions = append(summaryOptions, einomodel.WrapImplSpecificOptFn(func(o *responsesCallOptions) { o.DisableReasoning = true }))
 	}
