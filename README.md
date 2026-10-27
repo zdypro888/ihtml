@@ -528,6 +528,10 @@ type ScopedPagePublicationService interface { … } // 对 ScopedService 做类�
 
 `PublicTurnError` 可把内部错误映射为固定公开文案，切勿返回供应商错误原文、令牌或调用参数。历史、错误分类和后台进度仍由宿主存储。
 
+宿主通过 `ContinueAfterTool` 重查权限后，可直接返回 `assistant.NewToolContinuation(ctx, result)`，复用通用续办事件，不自行复制提示词与执行状态判断。`agent.ClassifyTurnFailure(err)` 提供不包含错误原文的稳定分类；具体业务文案由宿主决定。
+
+如宿主持有会话租约，可通过 `assistant.Config.TurnLifetime` 返回已领取轮次的生命周期。桥接层统一合并租约、用户停止和连接关闭的取消信号；宿主只负责续租与存储。成功收尾时释放租约不会把已完成轮次误报为取消。后台业务作业的寿命仍由宿主管理，不依附本轮模型上下文。
+
 ### Agent 宿主接入核对
 
 `agent/eino` 使用 Eino `deep.New` 与 `adk.Runner` 执行多轮工具调用，不在宿主重新实现推理循环。工具目录较大时，只把常用入口标为 `ToolLoadImmediate`，其余保留 `ToolLoadDeferred`，交给原生 `tool_search`；延迟加载不会赋予新权限。工具作用域在压缩前记录真实检索结果，避免已加载工具被摘要隐藏。摘要使用原生 summarization middleware 的任务摘要配置，禁止摘要请求调用工具，Responses 摘要降低推理开销；Finalize 保留最近两组完整工具往返（合计不超过64 KiB，不截断 JSON 或加密元数据），准确保留任务编号及预览指纹。公开进度只发送压缩阶段名称，`TurnResult.ToolExposure.ContextCompactions` 记录实际压缩次数。

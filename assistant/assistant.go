@@ -36,6 +36,9 @@ type Config struct {
 	// transcript. The host owns identity, permissions, model selection, History,
 	// SessionID, EngineSession and InvocationScope. Return a fresh request.
 	PrepareTurn func(context.Context, *ihtml.ChatSessionContext, *ihtml.ChatClientEvent) (*agent.TurnRequest, error)
+	// TurnLifetime 返回宿主已领取轮次的生命周期（例如持久会话租约）。框架将其与请求取消合并；
+	// 结束只取消当前推理，不取消宿主已受理的独立业务任务。nil hook 保持原行为。
+	TurnLifetime func(context.Context, *ihtml.ChatSessionContext, *agent.TurnRequest) (context.Context, error)
 	// Exactly one explicit model source is required; no readiness is inferred.
 	Models         *ihtml.ChatModels
 	ModelsProvider func(context.Context) (ihtml.ChatModels, error)
@@ -578,6 +581,28 @@ func (s *session) run(ctx context.Context, cancel context.CancelFunc, ev *ihtml.
 	}
 	copyRequest := *req
 	req = &copyRequest
+	executionCtx := ctx
+	if lifetime := s.backend.cfg.TurnLifetime; lifetime != nil {
+		host := s.sctx
+		var owner context.Context
+		owner, runErr = lifetime(ctx, &host, req)
+		if runErr != nil {
+			return
+		}
+		if owner == nil {
+			runErr = errors.New("assistant: missing turn lifetime")
+			return
+		}
+		// 生命周期只增加取消条件，不能让宿主上下文脱离用户停止或连接关闭。
+		combined, release := context.WithCancel(ctx)
+		stopOwner := context.AfterFunc(owner, release)
+		defer release()
+		defer stopOwner()
+		if owner.Err() != nil {
+			release()
+		}
+		executionCtx = combined
+	}
 	if s.backend.cfg.NativeConfirmation != nil {
 		req.RequireApproval = true
 	}
@@ -593,7 +618,10 @@ func (s *session) run(ctx context.Context, cancel context.CancelFunc, ev *ihtml.
 	req.OnDelta = func(text string) { p.delta(text, onDelta) }
 	req.OnEvent = func(step agent.Step) { p.step(step, onEvent) }
 	if ctx.Err() == nil {
-		result, runErr = s.backend.cfg.Engine.RunTurn(ctx, req)
+		result, runErr = s.backend.cfg.Engine.RunTurn(executionCtx, req)
+		if runErr == nil && executionCtx.Err() != nil {
+			runErr = executionCtx.Err()
+		}
 	}
 }
 
