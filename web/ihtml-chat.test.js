@@ -1170,3 +1170,9 @@ test('sessionId spans turns and reconnects, and only explicit new chat renews it
  await page.evaluate(async()=>{a.destroy();window.a=ihtml.mountChat('#a');await a.ready();});
  assert.equal(await page.evaluate(()=>a.chat.sessionId),await page.evaluate(()=>nextSession));
 });
+
+
+test('empty conversation history uses chat copy instead of revision snapshots',async(t)=>{
+ const page=await fixture(t);await page.evaluate(async()=>{window.a=ihtml.mountChat('#a',{locale:'en',history:{list:async()=>({items:[]}),select:async()=>{}}});await a.ready();a.chat.history.open();});
+ await page.getByText('No saved conversations',{exact:true}).waitFor({state:'visible'});assert.equal(await page.getByText('No snapshots yet.',{exact:true}).count(),0);
+});

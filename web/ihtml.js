@@ -5247,7 +5247,7 @@
             return {id: item.id, title: item.title, subtitle: item.subtitle || '', selected: item.selected === true, removable: item.removable !== false};
           });
           const seen = new Set(); items = (append ? items : []).concat(rows).filter(item => { if (seen.has(item.id)) return false; seen.add(item.id); return true; });
-          cursor = page.cursor || ''; status.textContent = items.length ? '' : T('history_empty'); render();
+          cursor = page.cursor || ''; status.textContent = items.length ? '' : T('chat_history_empty'); render();
         } catch (error) { failure(error, id, abort); }
         finally { if (id === generation) { pending = null; abort.abort(); sync(); } }
       }
@@ -5262,7 +5262,7 @@
           if (kind === 'remove') {
             if (result !== true && result !== false) throw new TypeError('history removal requires explicit receipt');
             if (result) { items = items.filter(row => row.id !== item.id); render(); }
-            status.textContent = items.length ? '' : T('history_empty');
+            status.textContent = items.length ? '' : T('chat_history_empty');
           } else { mutating = false; close(false); }
         } catch (error) {
           if (kind === 'remove' && alive(id, abort)) { uncertain.add(item.id); render(); }
