@@ -95,3 +95,28 @@ func TestUnknownConfirmedToolDoesNotContinue(t *testing.T) {
 		t.Fatal("unknown result resumed plan")
 	}
 }
+
+// 能力描述必须取自桥接配置，不得把宿主列表中的字符串当成已接通续办。
+func TestModelsDescribeManagedContinuation(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		cfg := approvalConfig(t, func(context.Context, json.RawMessage) (string, error) { return `{}`, nil })
+		cfg.Models.DeepApprovalResume = "managed_turn"
+		if enabled {
+			cfg.ContinueAfterTool = func(context.Context, *ihtml.ChatSessionContext, *ConfirmedToolResult) (*ihtml.ChatClientEvent, error) {
+				return nil, nil
+			}
+		}
+		backend, err := NewChecked(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		models, err := backend.Models(context.Background())
+		want := "manual_tool_only"
+		if enabled {
+			want = "managed_turn"
+		}
+		if err != nil || models.DeepApprovalResume != want {
+			t.Fatalf("enabled=%v resume=%q err=%v", enabled, models.DeepApprovalResume, err)
+		}
+	}
+}

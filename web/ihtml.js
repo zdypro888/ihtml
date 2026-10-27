@@ -5663,10 +5663,11 @@
       },
       setAgentMode(mode, persist) {
         this.agentMode = chatAgentCore.selectMode(this.agentModes, mode);
-        const deepAvailable = this.agentModes.includes('deep');
+        // 仅一种模式时无可选项，隐藏整行和预留空间，但仍使用后端声明的模式发消息。
+        const multipleModes = this.agentModes.length > 1;
         if (this.dom) {
-          this.dom.modebar.hidden = !deepAvailable;
-          this.dom.panel.classList.toggle('has-agent-modes', deepAvailable);
+          this.dom.modebar.hidden = !multipleModes;
+          this.dom.panel.classList.toggle('has-agent-modes', multipleModes);
           for (const [key, button] of Object.entries(this.dom.modeButtons || {})) {
             const selected = key === this.agentMode;
             button.hidden = !this.agentModes.includes(key);
@@ -5675,7 +5676,7 @@
             button.disabled = !this.agentModes.includes(key) || this.active || this.sending;
           }
           const manual = this.agentMode === 'deep' && this.deepApprovalResume === 'manual_tool_only';
-          this.dom.modeHint.textContent = manual ? T('agent_deep_manual') : T(this.agentMode === 'deep' ? 'agent_deep_hint' : 'agent_fast_hint');
+          this.dom.modeHint.textContent = this.deepApprovalResume === 'managed_turn' ? T('agent_managed_confirm') : manual ? T('agent_deep_manual') : T(this.agentMode === 'deep' ? 'agent_deep_hint' : 'agent_fast_hint');
         }
         if (persist) {
           try { localStorage.setItem(storageKey('agent_mode'), this.agentMode); } catch { /* 忽略 */ }
@@ -6679,7 +6680,7 @@
           body.appendChild(stages);
         }
         if (state.manualPaused) {
-          const manual = el('div', 'ihtml-agent-manual', T('agent_manual_confirm'));
+          const manual = el('div', 'ihtml-agent-manual', T(this.deepApprovalResume === 'managed_turn' ? 'agent_managed_confirm' : 'agent_manual_confirm'));
           manual.setAttribute('role', 'note');
           body.appendChild(manual);
         }
@@ -6888,7 +6889,7 @@
         if (meta.childNodes.length) rec.body.appendChild(meta);
         // 宿主已有确认说明时不再叠加一段通用提示，保留空间展示完整名单。
         if (rec.status === 'pending' && rec.call.approval_resume === 'manual_tool_only' && !view.reason) {
-          const manual = el('div', 'ihtml-agent-manual', T('agent_manual_confirm'));
+          const manual = el('div', 'ihtml-agent-manual', T(this.deepApprovalResume === 'managed_turn' ? 'agent_managed_confirm' : 'agent_manual_confirm'));
           manual.setAttribute('role', 'note');
           rec.body.appendChild(manual);
         }

@@ -192,6 +192,10 @@ func (b *Backend) Models(ctx context.Context) (models ihtml.ChatModels, err erro
 	}
 	if b.cfg.Confirmation != nil {
 		models.DeepApprovalResume = "manual_tool_only"
+		// 续办复用普通受管轮次；只声明能继续核对，不把本卡批准扩大到后续写操作。
+		if b.cfg.ContinueAfterTool != nil {
+			models.DeepApprovalResume = "managed_turn"
+		}
 	}
 	if b.cfg.NativeConfirmation != nil {
 		models.DeepApprovalResume = "checkpoint"

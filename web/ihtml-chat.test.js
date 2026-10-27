@@ -22,14 +22,14 @@ async function fixture(t, viewport = { width: 1100, height: 800 }, device = {}) 
     window.calls = []; window.sockets = []; window.events = [];
     window.identity = 'alice'; window.readOnly = false; window.configStatus = 200;
     window.agentModes = ['fast', 'deep'];
-    window.confirmationScope = 'session';
+    window.confirmationScope = 'session'; window.approvalResume = 'manual_tool_only';
     window.fetch = async (url, init) => {
       const pathname = new URL(url).pathname;
       calls.push({ url: String(url), headers: init.headers });
       const data = pathname.endsWith('/api/config')
         ? { user: identity, chat: true, read_only: readOnly, params: {} }
         : pathname.endsWith('/api/chat/models')
-          ? { model_ready: true, model_select: false, models: [], agent_modes: agentModes, deep_approval_resume: 'manual_tool_only', confirmation_scope: confirmationScope }
+          ? { model_ready: true, model_select: false, models: [], agent_modes: agentModes, deep_approval_resume: approvalResume, confirmation_scope: confirmationScope }
           : {};
       const status = pathname.endsWith('/api/config') ? configStatus : 200;
       return { ok: status === 200, status, statusText: 'Unavailable', text: async () => JSON.stringify(data) };
@@ -65,12 +65,12 @@ test('deep-only capabilities hide Fast, replace stale saved Fast and send only D
   for (const viewport of [{ width: 1100, height: 800 }, { width: 390, height: 844 }]) {
     await page.setViewportSize(viewport);
     assert.equal(await page.locator('#a [data-agent-mode="fast"]').isVisible(), false);
-    assert.equal(await page.locator('#a [data-agent-mode="deep"]').isVisible(), true);
+    assert.equal(await page.locator('#a [data-agent-mode="deep"]').isVisible(), false);
+    assert.equal(await page.locator('#a .ihtml-agent-modebar').evaluate(bar => bar.hidden && bar.getBoundingClientRect().height === 0), true);
+    assert.equal(await page.locator('#a .has-agent-modes').count(), 0);
     assert.equal(await page.locator('#a [data-agent-mode="fast"]').evaluate(button => getComputedStyle(button).display), 'none');
   }
   assert.equal(await page.locator('#a [data-agent-mode="deep"]').getAttribute('aria-checked'), 'true');
-  await page.locator('#a [data-agent-mode="deep"]').focus();
-  await page.keyboard.press('ArrowRight');
   assert.equal(await page.locator('#a [data-agent-mode="deep"]').getAttribute('aria-checked'), 'true');
   const result = await page.evaluate(async () => {
     // Even a stale programmatic click cannot select an undeclared mode.
@@ -1176,3 +1176,27 @@ test('empty conversation history uses chat copy instead of revision snapshots',a
  const page=await fixture(t);await page.evaluate(async()=>{window.a=ihtml.mountChat('#a',{locale:'en',history:{list:async()=>({items:[]}),select:async()=>{}}});await a.ready();a.chat.history.open();});
  await page.getByText('No saved conversations',{exact:true}).waitFor({state:'visible'});assert.equal(await page.getByText('No snapshots yet.',{exact:true}).count(),0);
 });
+
+
+for (const locale of ['zh-CN', 'en']) {
+  test('managed continuation hint follows backend capability without adding a single-mode toolbar: '+locale, async (t) => {
+    const page = await fixture(t, { width: 390, height: 844 });
+    await page.evaluate(async (locale) => {
+      window.agentModes = ['deep']; window.approvalResume = 'managed_turn';
+      window.a = ihtml.mountChat('#a', { locale }); await a.ready(); await a.chat.send('fixture request');
+      sockets[0].emit({ type: 'turn_start', run_id: 'proposal', seq: 1 });
+      sockets[0].emit({ type: 'confirmation_required', run_id: 'proposal', seq: 2, tool_call: { id: 'fixture-confirm', name: 'fixture_write', title: 'Fixture write', approval_resume: 'manual_tool_only', confirmation_nonce: 'nonce', confirmation_token: 'SIGNED', confirmation_expires: Math.floor(Date.now()/1000)+600, body: { count: 1 } } });
+      sockets[0].emit({ type: 'assistant_done', run_id: 'proposal', seq: 3, message: 'Confirm fixture', content_format: 'text' });
+    }, locale);
+    assert.equal(await page.locator('#a .ihtml-agent-modebar').isVisible(), false);
+    const notice = await page.locator('#a .ihtml-tool .ihtml-agent-manual').innerText();
+    assert.match(notice, locale === 'zh-CN' ? /继续处理原请求.*再次请求确认/ : /continues your request.*asks again/);
+    assert.doesNotMatch(await page.locator('#a').innerText(), /不会自动继续|计划不会自动继续|do not resume automatically/);
+    // 新能力仅改变说明；仍然只发送当前签名卡，不把续办变成预先批准其他操作。
+    await page.locator('#a .t-actions .ok').click();
+    const frames = await page.evaluate(() => sockets[0].sent);
+    assert.equal(frames.filter(frame => frame.type === 'confirm_tool').length, 1);
+    assert.equal(frames.at(-1).tool_call.id, 'fixture-confirm');
+    assert.equal(frames.at(-1).tool_call.approval_resume, 'manual_tool_only');
+  });
+}

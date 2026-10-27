@@ -347,8 +347,9 @@ type ChatModels struct {
 	CurrentModel string   `json:"current_model"`
 	Models       []string `json:"models"`
 	AgentModes   []string `json:"agent_modes,omitempty"`
-	// DeepApprovalResume 由实际后端声明为 manual_tool_only 或 checkpoint；
-	// 后者要求原生中断/恢复和宿主持久化审批均已接通。
+	// DeepApprovalResume 由实际后端声明：manual_tool_only 仅执行当前卡片；
+	// managed_turn 在回执保存后进入新受管轮次，后续写操作仍需分别确认；
+	// checkpoint 要求原生中断/恢复和宿主持久化审批均已接通。
 	DeepApprovalResume string `json:"deep_approval_resume,omitempty"`
 	// Connection-scoped cards are invalidated on disconnect; the default is
 	// session-scoped. The backend must enforce the same ownership rule.
