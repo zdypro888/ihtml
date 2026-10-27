@@ -6,6 +6,7 @@ the first tagged release, changes are recorded under **Unreleased**.
 ## Unreleased
 
 ### Added
+- Inline chat supports optional host-owned headers (`chatHeader: "none"`) and empty-conversation `starters` that scroll with messages and disappear after sending.
 
 - Add opt-in `mountChat({history})` rendering, paginated host callbacks, explicit
   selection and optional native-confirmed deletion; no default storage or requests.

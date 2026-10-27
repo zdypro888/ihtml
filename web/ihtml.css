@@ -2139,3 +2139,8 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
 .ihtml-chat-history-unknown { flex-basis: 100%; font-size: 12px; }
 .ihtml-chat-history-status:not(:empty) { padding: 8px 0; }
 .ihtml-chat-history-more, .ihtml-chat-history-retry { margin-top: 10px; }
+
+/* 空对话示例跟随消息滚动，不占据固定工具栏。 */
+.ihtml-chat-starters { display: flex; flex-wrap: wrap; gap: 8px; padding: 4px 0 12px; }
+.ihtml-chat-starters button { min-height: 44px; max-width: 100%; padding: 8px 12px; font-size: 12px; text-align: left; white-space: normal; }
+.ihtml-chat-inline .ihtml-chat-head[hidden] { display: none; }

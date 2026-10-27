@@ -1144,3 +1144,19 @@ test('host clear after authoritative native deletion invalidates the current dis
  assert.equal(await page.evaluate(()=>a.chat.getMessages().length),0);
  assert.equal(await page.evaluate(()=>sockets.length),0);
 });
+
+test('host-owned header and empty-chat starters reclaim space without replaying conversation controls',async(t)=>{
+ const page=await fixture(t,{width:390,height:844});
+ await page.evaluate(async()=>{window.a=ihtml.mountChat('#a',{chatHeader:'none',starters:['How to begin?','Check status'],history:{entry:false,list:async()=>({items:[]}),select:async()=>{}}});await a.ready();});
+ assert.equal(await page.locator('#a .ihtml-chat-head').isVisible(),false);
+ assert.equal(await page.locator('#a .ihtml-chat-starters button').count(),2);
+ await page.getByRole('button',{name:'How to begin?',exact:true}).click();
+ assert.equal(await page.locator('#a .ihtml-chat-starters').count(),0);
+ assert.equal(await page.evaluate(()=>sockets[0].sent.find(x=>x.type==='user_message').messages[0].content),'How to begin?');
+ await page.evaluate(()=>a.chat.clear());
+ assert.equal(await page.locator('#a .ihtml-chat-starters button').count(),2);
+ await page.evaluate(()=>a.chat.history.open());assert.equal(await page.locator('#a .ihtml-chat-starters').isVisible(),false);
+ await page.evaluate(async()=>{a.destroy();window.a=ihtml.mountChat('#a',{chatHeader:'none',starters:['Not on restored chats'],initialMessages:[{role:'user',content:'Saved question'}]});await a.ready();});
+ assert.equal(await page.locator('#a .ihtml-chat-starters').count(),0);
+ assert.equal(await page.locator('#a .ihtml-chat').getAttribute('aria-label'),'AI assistant');
+});

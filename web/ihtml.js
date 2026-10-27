@@ -156,7 +156,7 @@
     const instanceKey = newInstanceKey(instanceID);
     const standalone = !!opts.standalone;
     const chatOnly = opts[chatOnlyOption] === true;
-    const compactChatHeader = chatOnly && opts.chatHeader === 'compact';
+    const compactChatHeader = chatOnly && ['compact', 'none'].includes(opts.chatHeader);
     if (opts.hostTransport != null && (!chatOnly ||
         typeof opts.hostTransport.request !== 'function' || typeof opts.hostTransport.open !== 'function')) {
       throw new TypeError('ihtml: hostTransport requires mountChat and request/open functions');
@@ -5390,6 +5390,8 @@
 
         const head = el('div', 'ihtml-chat-head');
         if (compactChatHeader) head.classList.add('ihtml-chat-head-compact');
+        // 宿主接管操作栏时不再占用第二行；原有公共 clear/history 接口保持一致。
+        if (chatOnly && opts.chatHeader === 'none') head.hidden = true;
         const title = el('h2', 'title', T('chat_title'));
         title.id = chatID + '-title';
         const readonlyBadge = el('span', 'ihtml-readonly-badge', T('readonly_note'));
@@ -5556,6 +5558,20 @@
         this.resizeComposer(); this.syncChatControls();
         this.notice(T('welcome'));
         this.appendMessages(opts.initialMessages);
+        if (!opts.initialMessages?.length) this.renderStarters();
+      },
+
+      // 示例属于空对话内容，随消息区滚动；发送后移除，不永久占用宿主顶部空间。
+      renderStarters() {
+        this.starters?.remove();
+        if (!opts.starters?.length) return;
+        const group = el('div', 'ihtml-chat-starters');
+        for (const text of opts.starters) {
+          const button = el('button', '', text); button.type = 'button';
+          button.onclick = () => { void this.send(text); };
+          group.appendChild(button);
+        }
+        this.starters = group; this.log.appendChild(group);
       },
 
       appendMessages(messages) {
@@ -5896,6 +5912,7 @@
         this.everConnected = false;
         this.setActive(false);
         this.notice(T('session_reset'));
+        this.renderStarters();
         if (this.modelInfo && (this.modelInfo.preview_only === true || this.modelInfo.model_ready === false)) {
           this.setAvailabilityNote(true, this.modelInfo.preview_only === true);
         }
@@ -6201,6 +6218,7 @@
           um._displayMessage = { role: 'user', content: text, contentFormat: 'text' };
           um.appendChild(el('div', 'author', T('author_user')));
           um.appendChild(el('div', 'content', text));
+          this.starters?.remove();
           this.log.appendChild(um);
           this.setFollowing(true);
           const request = chatAgentCore.requestSnapshot(this.agentModes, this.agentMode, this.model, !!this.modelInfo?.model_select);
@@ -7873,6 +7891,10 @@
         if (opts.history != null && opts.history !== false) {
           if (!opts[chatOnlyOption] || typeof opts.history !== 'object' || typeof opts.history.list !== 'function' || typeof opts.history.select !== 'function' || (opts.history.remove != null && typeof opts.history.remove !== 'function') || (opts.history.onOpenChange != null && typeof opts.history.onOpenChange !== 'function') || (opts.history.description != null && (typeof opts.history.description !== 'string' || opts.history.description.length > 2048))) throw new TypeError('ihtml: history requires mountChat and list/select callbacks');
           opts.history = {...opts.history};
+        }
+        if (opts.starters != null) {
+          if (!opts[chatOnlyOption] || !Array.isArray(opts.starters) || opts.starters.length > 4 || opts.starters.some(text => typeof text !== 'string' || !text.trim() || text.length > 160)) throw new TypeError('ihtml: starters requires at most four short nonempty strings in mountChat');
+          opts.starters = opts.starters.slice();
         }
         if (opts.initialMessages != null) {
           if (!Array.isArray(opts.initialMessages) || opts.initialMessages.length > 100) throw new TypeError('ihtml: initialMessages must be an array of at most 100 messages');
