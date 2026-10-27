@@ -5876,8 +5876,9 @@
         this.expireConnectionConfirmations();
         if (ws) { try { ws.close(); } catch { /* 忽略 */ } }
       },
-      reset() {
-        if (this.history?.mutating) return;
+      reset(hostReset = false) {
+        // 宿主可能在原生删除回执后主动清屏；公共 clear 保持可撤销本实例显示的语义。
+        if (this.history?.mutating && !hostReset) return;
         this.history?.reset();
         this.sendGeneration++;
         this.sending = false;
@@ -7722,7 +7723,7 @@
         clear: () => {
           if (destroyed || authRefreshing) return;
           if (!chat.dom) chat.build();
-          chat.reset();
+          chat.reset(true);
         },
         get enabled() { return !destroyed && chat.enabled; },
         get busy() { return !destroyed && (chat.active || chat.sending || !!chat.confirmationBusy); },

@@ -1135,3 +1135,12 @@ test('history selection blocks parallel send and new-chat until host completes w
  assert.equal(await page.evaluate(()=>sockets.length),0);
  assert.equal(await page.locator('textarea').inputValue(),'unsent');
 });
+
+test('host clear after authoritative native deletion invalidates the current display without replaying actions',async t=>{
+ const page=await fixture(t);await page.evaluate(async()=>{window.nativeDeleted=false;window.a=ihtml.mountChat('#a',{locale:'en',initialMessages:[{role:'user',content:'old transcript'}],history:{list:async()=>({items:[{id:'current',title:'Current'}]}),select:async()=>{},remove:async()=>{nativeDeleted=true;a.chat.clear();return true;}}});await a.ready();a.chat.history.open();});
+ await page.getByRole('button',{name:'Delete conversation · Current',exact:true}).click();
+ assert.equal(await page.evaluate(()=>nativeDeleted),true);
+ assert.equal(await page.evaluate(()=>a.chat.history.opened),false);
+ assert.equal(await page.evaluate(()=>a.chat.getMessages().length),0);
+ assert.equal(await page.evaluate(()=>sockets.length),0);
+});
