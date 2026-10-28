@@ -1137,6 +1137,13 @@
         projected.action = title;
         projected.facts = projected.facts.filter(fact => fact.label !== t('tool_fact_operation') || fact.value !== name);
       }
+      // 显式展示协议优先于从请求猜测字段；所有文本仍经过统一脱敏边界。
+      if (Array.isArray(source.presentation?.facts)) {
+        projected.facts = [];
+        for (const fact of source.presentation.facts.slice(0, 16)) {
+          if (fact && typeof fact.label === 'string' && typeof fact.value === 'string' && !isSensitiveKey(fact.label)) pushFact(projected.facts, fact.label, fact.value, t);
+        }
+      }
       const pending = ev.type === 'confirmation_required' || ev.tool_status === 'pending';
       const summarySource = pending && source.reason ? source.reason : (ev.tool_summary || projected.action);
       const summary = safeText(summarySource, SUMMARY_LIMIT);

@@ -1663,3 +1663,15 @@ test('notification seen failure preserves unread state and does not expose callb
  assert.equal(await page.locator('.ihtml-chat-history-row.is-unread').count(),1);
  assert.doesNotMatch(await page.locator('#a').innerText(),/PRIVATE_READ_ERROR/);
 });
+
+test('live status remains in collapsed summary across answer deltas and resets at next tool stage',async(t)=>{
+ const page=await fixture(t);
+ await page.evaluate(async()=>{window.a=ihtml.mountChat('#a',{locale:'zh-CN'});await a.ready();await a.chat.send('检查任务');const s=sockets[0];s.emit({type:'turn_start',run_id:'progress',seq:1});s.emit({type:'tool_result',run_id:'progress',seq:2,tool_call:{id:'read',title:'读取任务'},tool_status:'success'});s.emit({type:'assistant_delta',run_id:'progress',seq:3,delta:'正在等待原任务。'});s.emit({type:'assistant_status',run_id:'progress',seq:4,status:'已处理 2/30 项，读取 8947 条记录'});s.emit({type:'assistant_delta',run_id:'progress',seq:5,delta:'不会重复提交。'});});
+ assert.equal(await page.locator('#a .p-title').textContent(),'已处理 2/30 项，读取 8947 条记录');
+ assert.equal(await page.locator('#a .ihtml-process').getAttribute('open'),null);
+ await page.evaluate(()=>sockets[0].emit({type:'tool_start',run_id:'progress',seq:6,tool_call:{id:'next',title:'核对结果'}}));
+ assert.ok((await page.locator('#a .p-title').textContent()).includes('核对结果'));
+ await page.evaluate(()=>sockets[0].emit({type:'assistant_done',run_id:'progress',seq:7,message:'已完成'}));
+ assert.ok(!(await page.locator('#a .p-title').textContent()).includes('8947'));
+ await page.evaluate(()=>a.destroy());
+});

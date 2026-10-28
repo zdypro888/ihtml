@@ -6458,7 +6458,7 @@
           processPinned: false, elapsedMS: 0, clockStartedAt: null, clock: 0,
           agentMode: chatAgentCore.selectMode(this.agentModes, agentMode),
           agentState: chatAgentCore.initialState(agentMode), agentOverview: null,
-          text: '', textBytes: 0, textTruncated: false, contentFormat: 'auto', lastKind: '', lastStatusNode: null,
+          text: '', textBytes: 0, textTruncated: false, contentFormat: 'auto', lastKind: '', lastStatusNode: null, liveStatus: '',
           tools: new Map(), toolCount: 0, pendingCount: 0, errorCount: 0, unknownCount: 0, done: false,
           turnFailed: false,
           runSeq: new Map(), acceptNextRun: false, renderFrame: 0, lastRenderAt: 0,
@@ -6490,6 +6490,8 @@
         if (t.cancelled) return T('turn_stopped');
         if (t.pendingCount > 0) return T('tools_pending', { n: t.pendingCount });
         if (!t.done) {
+          // 业务进度是独立状态，正文流式输出不能把它降级为泛化的整理回答。
+          if (t.liveStatus) return t.liveStatus;
           const running = Array.from(t.tools.values()).filter((rec) => rec.status === 'running');
           if (running.length === 1) return T('running_tool', { name: running[0].title.textContent });
           if (running.length > 1) return T('tools_running', { n: running.length });
@@ -6594,7 +6596,8 @@
           queueMicrotask(() => { if (t.processSummary.isConnected) t.processSummary.focus({ preventScroll: true }); });
         }
       },
-      clearTransientStatus(t) {
+      clearTransientStatus(t, preserveProgress = false) {
+        if (t && !preserveProgress) t.liveStatus = '';
         if (!t || !t.pBody) return;
         for (const node of t.pBody.querySelectorAll('.ihtml-pline[data-persistent="false"]')) node.remove();
         if (t.lastStatusNode && t.lastStatusNode.dataset.persistent !== 'true') t.lastStatusNode = null;
@@ -6603,6 +6606,7 @@
       appendStatus(text, isError, t = this.turn) {
         text = (text || '').trim();
         if (!t || !text) return;
+        if (!isError) t.liveStatus = text;
         let node = null;
         if (!isError) node = t.pBody.querySelector('.ihtml-pline[data-persistent="false"]');
         else if (t.lastStatusNode && t.lastStatusNode.dataset.persistent === 'true') node = t.lastStatusNode;
@@ -6649,7 +6653,7 @@
       appendThinking(delta, ev, t = this.turn) {
         if (!t) return;
         ev = ev && typeof ev === 'object' ? ev : {};
-        if (delta) this.clearTransientStatus(t); // 已有真实分析内容后移除重复的临时“正在处理”。
+        if (delta) this.clearTransientStatus(t, true); // 已有真实分析内容后移除重复的临时“正在处理”。
         const rawID = String(ev.thinking_id || '');
         const runID = String(ev.run_id || 'legacy');
         let id = rawID ? runID + ':' + rawID : t.activeThinkingID;
@@ -6710,7 +6714,7 @@
         if (!t) return;
         t.contentFormat = chatContentCore.mergeFormat(t.contentFormat, contentFormat, false);
         if (!delta || t.textTruncated) return;
-        this.clearTransientStatus(t);
+        this.clearTransientStatus(t, true);
         // 正文和 reasoning 可能交错到达。正文开始只收起视觉详情，真正的
         // “分析完成”必须等待 thinking_done、工具边界或本轮终态。
         this.collapseThinking(t);
@@ -6887,7 +6891,7 @@
           confirmText: presentationText(call.presentation?.confirm_text, T('confirm_this_action')),
           cancelText: presentationText(call.presentation?.cancel_text, T('dismiss_tool')),
           reasonLabel: presentationText(call.presentation?.reason_label, T('tool_reason')),
-          facts: (Array.isArray(source.facts) ? source.facts : fallbackFacts).slice(0, 8).map((fact) => ({
+          facts: (Array.isArray(source.facts) ? source.facts : fallbackFacts).slice(0, 16).map((fact) => ({
             label: safeVisible(fact && fact.label || '', 80), value: safeVisible(fact && fact.value || '', 32768),
           })).filter((fact) => fact.label && fact.value),
           request: source.request !== undefined ? source.request : { method: call.method, path: call.path, query: call.query, body: call.body },

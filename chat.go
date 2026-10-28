@@ -318,10 +318,17 @@ type OperationReview struct {
 // ToolCallPresentation customizes a host-issued confirmation card using plain
 // text only. Empty fields use the localized SDK defaults. Presentation never
 // grants authority; include it in the signed call and revalidate live access.
+// ToolCallFact 是宿主核对后的可读操作信息，原始参数仍保留在技术详情中。
+type ToolCallFact struct {
+	Label string `json:"label"`
+	Value string `json:"value"`
+}
+
 type ToolCallPresentation struct {
-	ConfirmText string `json:"confirm_text,omitempty"`
-	CancelText  string `json:"cancel_text,omitempty"`
-	ReasonLabel string `json:"reason_label,omitempty"`
+	Facts       []ToolCallFact `json:"facts,omitempty"`
+	ConfirmText string         `json:"confirm_text,omitempty"`
+	CancelText  string         `json:"cancel_text,omitempty"`
+	ReasonLabel string         `json:"reason_label,omitempty"`
 }
 
 type ProposedToolCall struct {
@@ -1067,6 +1074,14 @@ func preflightChatStreamEvent(event ChatStreamEvent, maxBytes uint64, limits cha
 
 func preflightProposedToolCall(budget *chatWSJSONBudget, walker *chatWSJSONWalker, call ProposedToolCall) error {
 	if call.Presentation != nil {
+		for _, fact := range call.Presentation.Facts {
+			if err := budget.addString(fact.Label); err != nil {
+				return err
+			}
+			if err := budget.addString(fact.Value); err != nil {
+				return err
+			}
+		}
 		for _, value := range []string{call.Presentation.ConfirmText, call.Presentation.CancelText, call.Presentation.ReasonLabel} {
 			if err := budget.addString(value); err != nil {
 				return err

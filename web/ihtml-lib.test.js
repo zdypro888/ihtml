@@ -1200,3 +1200,10 @@ test('confirmation facts retain the entire bounded batch target list and receipt
   const result = chatTrace.toolView({title:'批量更新'}, {tool_status:'success',tool_summary:names}, makeT('zh'));
   assert.equal(result.summary,names);
 });
+
+test('host presentation facts replace guessed request facts with readable signed context', () => {
+ const names=Array.from({length:50},(_,i)=>`person-${i}@example.test`).join('\n');
+ const view=chatTrace.toolView({title:'批量操作',body:{proxySelection:'default',scope:'all'},presentation:{facts:[{label:'完整账号名单',value:names},{label:'范围',value:'全部文件'},{label:'password',value:'do-not-show'}]}},{tool_status:'pending'},makeT('zh'));
+ assert.deepEqual(view.facts,[{label:'完整账号名单',value:names},{label:'范围',value:'全部文件'}]);
+ assert.ok(view.request.includes('proxySelection'));
+});

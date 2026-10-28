@@ -202,6 +202,7 @@ func (s *Signer) PrepareUntil(ctx context.Context, user string, scope Scope, cal
 	out.Query, out.Body = query, body
 	if call.Presentation != nil {
 		view := *call.Presentation
+		view.Facts = append([]ihtml.ToolCallFact(nil), call.Presentation.Facts...)
 		out.Presentation = &view
 	}
 	nonce := make([]byte, 16)

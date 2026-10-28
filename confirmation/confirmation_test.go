@@ -311,17 +311,22 @@ func TestPresentationSignedAndSnapshotOwned(t *testing.T) {
 	s := testSigner(t, nil)
 	ctx := context.Background()
 	scope := NewScope("session", "capability")
-	view := &ihtml.ToolCallPresentation{ConfirmText: "Approve", CancelText: "Leave", ReasonLabel: "Effect"}
+	view := &ihtml.ToolCallPresentation{ConfirmText: "Approve", CancelText: "Leave", ReasonLabel: "Effect", Facts: []ihtml.ToolCallFact{{Label: "Targets", Value: "alice"}}}
 	card, err := s.Prepare(ctx, "alice", scope, ihtml.ProposedToolCall{Presentation: view})
 	if err != nil {
 		t.Fatal(err)
 	}
 	view.ConfirmText = "mutated"
+	view.Facts[0].Value = "mutated"
+	if card.Presentation.Facts[0].Value != "alice" {
+		t.Fatal("presentation facts alias input")
+	}
 	if card.Presentation.ConfirmText != "Approve" {
 		t.Fatal("presentation aliases input")
 	}
 	for _, mutate := range []func(*ihtml.ToolCallPresentation){
 		func(p *ihtml.ToolCallPresentation) { p.ConfirmText = "other" },
+		func(p *ihtml.ToolCallPresentation) { p.Facts = []ihtml.ToolCallFact{{Label: "Targets", Value: "bob"}} },
 		func(p *ihtml.ToolCallPresentation) { p.CancelText = "other" },
 		func(p *ihtml.ToolCallPresentation) { p.ReasonLabel = "other" },
 	} {
