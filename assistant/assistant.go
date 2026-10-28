@@ -698,25 +698,26 @@ func (s *session) governTools(tools []agent.Tool, ev *ihtml.ChatClientEvent, p *
 }
 
 type projection struct {
-	mu                sync.Mutex
-	session           *session
-	ctx               context.Context
-	cancel            context.CancelFunc
-	id                string
-	seq               int64
-	snapshot          string
-	finished          bool
-	err               error
-	emitFailed        bool
-	modelReady        bool
-	toolSeq           int64
-	started           bool
-	pendingNotice     bool
-	pendingSteps      map[string]int
-	approvalTools     map[string]bool
-	tools             map[string]agent.Tool
-	resumedCard       *ihtml.ProposedToolCall
-	resumedToolCallID string
+	continuationPending bool
+	mu                  sync.Mutex
+	session             *session
+	ctx                 context.Context
+	cancel              context.CancelFunc
+	id                  string
+	seq                 int64
+	snapshot            string
+	finished            bool
+	err                 error
+	emitFailed          bool
+	modelReady          bool
+	toolSeq             int64
+	started             bool
+	pendingNotice       bool
+	pendingSteps        map[string]int
+	approvalTools       map[string]bool
+	tools               map[string]agent.Tool
+	resumedCard         *ihtml.ProposedToolCall
+	resumedToolCallID   string
 }
 
 func newProjection(s *session, ctx context.Context, cancel context.CancelFunc) *projection {
@@ -885,7 +886,7 @@ func (p *projection) end(result *agent.TurnResult, err error) {
 		return
 	}
 	p.send(ihtml.ChatStreamEvent{Type: ihtml.ChatStreamAssistantDone, Message: result.Text,
-		ContentFormat: p.session.backend.cfg.ContentFormat, FinishReason: result.FinishReason,
+		ContentFormat: p.session.backend.cfg.ContentFormat, FinishReason: result.FinishReason, ContinuationPending: p.continuationPending,
 		Usage: &ihtml.ChatUsage{InputTokens: result.Usage.InputTokens, OutputTokens: result.Usage.OutputTokens,
 			TotalTokens: result.Usage.InputTokens + result.Usage.OutputTokens}})
 }

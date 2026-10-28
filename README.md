@@ -582,3 +582,5 @@ GPT-6.1 Terra 的工具调用必须使用 `OpenAIAPI:"responses"`；SDK 在发�
 `agent/eino.Config{Provider:ProviderOpenAI,OpenAIAPI:"responses",ContextCompaction:"provider"}` 使用 `context_management:[{type:"compaction"}]`。未显式设置 `SummarizeAfterTokens` 时**省略** `compact_threshold`，由服务端决定；不套用 Eino 的 24k 默认值，也不再按 80 条消息提前触发。供应商没有给所有模型推荐同一个固定阈值，不能把文档示例阈值或整个模型窗口当作推荐值。参见 [官方压缩指南](https://developers.openai.com/api/docs/guides/compaction)。
 
 加密 compaction item 只在协议工作记忆中原样传递，不展示其正文；回放保留当前 system/developer 约束及新的工具调用/回执。`ContextCompaction:"eino"` 保留 Eino summarization middleware，`SummarizeAfterMessages:0` 不启用消息数量触发。工具列表先返回筛选所需的摘要与分页，详情按需读取；压缩不能掩盖丢失的任务编号、冻结指纹或授权范围。
+
+受管确认的中间回执使用 `assistant_done.continuation_pending:true`：仅当前确认调用已经收尾，原请求仍会进入下一轮。客户端保持流程运行、下一 `run_id` 归入同一流程卡，不把“已受理”当作整个请求完成，也不重复把回执摘要当正文。普通终态和停止不设置该字段；业务完成仍须核查原任务。实时消息和断线回放使用同一归属逻辑。

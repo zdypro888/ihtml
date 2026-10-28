@@ -38,6 +38,15 @@ func TestConfirmedToolContinuesThroughFreshApproval(t *testing.T) {
 	first := proposedCard(t, s, r)
 	s.HandleEvent(context.Background(), &ihtml.ChatClientEvent{Type: ihtml.ChatClientConfirmTool, ToolCall: &first})
 	events := r.wait(t, ihtml.ChatStreamConfirmationRequired, 2)
+	intermediate := false
+	for _, event := range events {
+		if event.Type == ihtml.ChatStreamAssistantDone && event.ContinuationPending {
+			intermediate = true
+		}
+	}
+	if !intermediate {
+		t.Fatal("managed continuation did not announce its nonterminal receipt")
+	}
 	if writes.Load() != 1 {
 		t.Fatalf("continuation executed unconfirmed writes: %d", writes.Load())
 	}

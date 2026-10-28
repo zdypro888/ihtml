@@ -1412,3 +1412,46 @@ test('push registration failure never claims notifications are enabled or leaks 
  assert.doesNotMatch(await page.locator('#a').innerText(),/PRIVATE_PUSH_KEY/);
  assert.match(await page.locator('#a .ihtml-chat-push-enable').innerText(),/Enable|开启/);
 });
+
+// 用户确认的是受理预览；中间回执后仍需自动展示等待进度及新的确认卡。
+test('managed confirmation receipt keeps one active flow and displays its next run and approval',async(t)=>{
+ const page=await fixture(t,{width:390,height:844});
+ await page.evaluate(async()=>{
+  backgroundExecution=true;approvalResume='managed_turn';window.a=ihtml.mountChat('#a',{locale:'zh-CN'});await a.ready();await a.chat.send('preview then clear then transfer');
+  const emit=(type,seq,rest={})=>sockets[0].emit({type,run_id:'confirmed',seq,...rest});
+  emit('turn_start',1);emit('tool_result',2,{tool_id:'preview',tool_name:'preview',tool_title:'预览云盘',tool_status:'accepted',tool_summary:'请求已接受，尚未确认业务完成。'});
+  emit('assistant_done',3,{finish_reason:'manual_tool_only',continuation_pending:true,message:'请求已接受，尚未确认业务完成。'});
+ });
+ assert.equal(await page.evaluate(()=>a.chat.busy),true);
+ assert.doesNotMatch(await page.locator('#a .ihtml-process-head').innerText(),/本轮处理结束/);
+ assert.equal(await page.locator('#a .answer').last().textContent(),'');
+ await page.evaluate(()=>{
+  sockets[0].emit({type:'turn_start',run_id:'followup',seq:1});
+  sockets[0].emit({type:'assistant_status',run_id:'followup',seq:2,status:'正在读取云盘预览：4/10 个身份已就绪'});
+ });
+ assert.match(await page.locator('#a').innerText(),/4\/10/);
+ assert.equal(await page.locator('#a .ihtml-msg.assistant:has(.ihtml-process)').count(),1);
+ await page.evaluate(()=>{
+  sockets[0].emit({type:'confirmation_required',run_id:'followup',seq:3,tool_call:{id:'delete',name:'delete',title:'确认清空10个身份',method:'POST',path:'/delete',confirmation_token:'SIGNED',confirmation_nonce:'fresh',confirmation_expires:Math.floor(Date.now()/1000)+600}});
+  sockets[0].emit({type:'assistant_done',run_id:'followup',seq:4,message:'预览已完成，请核对并确认下一步。'});
+ });
+ assert.equal(await page.evaluate(()=>a.chat.busy),false);
+ assert.match(await page.locator('#a').innerText(),/确认清空10个身份/);
+ assert.deepEqual(await page.evaluate(()=>sockets[0].sent.map(e=>e.type)),['user_message']);
+});
+
+test('replay of a managed continuation keeps its accepted receipt and resumed run in the same flow',async(t)=>{
+ const page=await fixture(t);
+ await page.evaluate(async()=>{
+  backgroundExecution=true;window.a=ihtml.mountChat('#a');await a.ready();
+ });
+ await page.waitForFunction(()=>sockets.length===1);
+ await page.evaluate(()=>{
+  let seq=0;const emit=(type,run_id,rest={})=>sockets[0].emit({type,run_id,seq:++seq,background_session:'stable',background_seq:seq,background_replay:true,...rest});
+  emit('turn_start','receipt');emit('assistant_done','receipt',{finish_reason:'manual_tool_only',continuation_pending:true,message:'Accepted only'});
+  emit('turn_start','resumed');emit('assistant_status','resumed',{status:'Waiting for original preview'});
+ });
+ assert.equal(await page.evaluate(()=>a.chat.busy),true);
+ assert.equal(await page.locator('#a .ihtml-msg.assistant:has(.ihtml-process)').count(),1);
+ assert.match(await page.locator('#a').innerText(),/Waiting for original preview/);
+});

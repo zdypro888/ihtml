@@ -244,6 +244,8 @@ type ChatTurnBudget struct {
 type ChatStreamEvent struct {
 	// RestoredApproval marks a server-restored pending run, not client history.
 	RestoredApproval bool `json:"restored_approval,omitempty"`
+	// ContinuationPending 表示中间回执后将进入受管续办；不是整个请求的终态。
+	ContinuationPending bool `json:"continuation_pending,omitempty"`
 	// BackgroundSession/Seq 只标识可信后台回放，不代表客户端授权。
 	BackgroundSession string `json:"background_session,omitempty"`
 	BackgroundSeq     uint64 `json:"background_seq,omitempty"`

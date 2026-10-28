@@ -414,6 +414,9 @@ func (s *session) runConfirmedTool(ctx context.Context, cancel context.CancelFun
 			if next == nil && s.backend.cfg.Confirmation.ResultReply != nil && evidence != nil && pending != nil {
 				reply = s.explainToolResult(replyParent, p, pending, status, view, summary)
 			}
+			p.mu.Lock()
+			p.continuationPending = next != nil
+			p.mu.Unlock()
 			p.end(reply, nil)
 			if next != nil && replyParent.Err() == nil {
 				s.enqueueContinuation(replyParent, next)

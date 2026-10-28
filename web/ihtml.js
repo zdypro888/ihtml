@@ -7360,7 +7360,7 @@
         if (!runID) return this.turn;
         let t = this.turnsByRun.get(runID);
         if (!t && ev.type === 'turn_start') {
-          if (ev.restored_approval || ev.background_replay) {
+          if (!(this.turn?.acceptNextRun) && (ev.restored_approval || ev.background_replay)) {
             const foreground = this.turn;
             t = this.beginTurn('deep');
             this.turn = foreground && !foreground.done ? foreground : t;
@@ -7460,6 +7460,13 @@
         } catch { /* host observation is best effort */ }
       },
       finishTurn(ev, t = this.turn) {
+        // 中间确认回执必须保留当前请求的运行状态，下一 run_id 仍归属同一张流程卡。
+        const continuing=ev.continuation_pending===true;
+        if(continuing&&t){
+          cancelAssistantRender(t);this.clearTransientStatus(t);this.finalizeThinking(t);
+          t.confirmingTool=false;t.done=false;t.acceptNextRun=true;t.text='';t.textBytes=0;t.answer.replaceChildren();t.answer.style.display='none';
+          this.appendStatus(T('agent_continuing'),false,t);this.updateProcess(t);if(this.turn===t)this.setActive(true);return;
+        }
         if (!t || t.done) {
           if (this.turn === t && this.active) this.setActive(false);
           return;
