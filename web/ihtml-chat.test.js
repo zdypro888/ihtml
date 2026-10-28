@@ -1617,3 +1617,23 @@ test('accepted execution clears cancellation timers instead of failing later',as
  assert.equal(await page.locator('.ihtml-tool').getAttribute('data-status'),'accepted');
  assert.equal(await page.evaluate(()=>a.chat.busy),false);
 });
+
+// 产品历史已有受理正文时，SDK 仍须保留后续 run 的可见进度容器。
+test('saved receipt text does not hide replayed continuation progress after reconciling its original card',async(t)=>{
+ const page=await fixture(t);
+ await page.evaluate(async()=>{
+  backgroundExecution=true;window.a=ihtml.mountChat('#a',{initialMessages:[{role:'assistant',content:'Accepted only'}]});await a.ready();
+ });
+ await page.waitForFunction(()=>sockets.length===1);
+ await page.evaluate(()=>{
+  let n=0;const emit=(type,run_id,seq,rest={})=>sockets[0].emit({type,run_id,seq,background_session:'saved',background_seq:++n,background_replay:true,...rest});
+  const call={id:'preview',name:'preview',title:'Original preview',confirmation_nonce:'confirmed',confirmation_token:'SIGNED',confirmation_expires:Math.floor(Date.now()/1000)+600};
+  emit('turn_start','proposal',1);emit('confirmation_required','proposal',2,{tool_call:call});emit('assistant_done','proposal',3,{message:'Review'});
+  emit('turn_start','receipt',1);emit('tool_result','receipt',2,{tool_call:{id:'preview',confirmation_nonce:'confirmed'},tool_status:'accepted'});
+  emit('assistant_done','receipt',3,{continuation_pending:true,message:'Accepted only'});
+  emit('turn_start','continued',1);emit('assistant_status','continued',2,{status:'LIVE PROGRESS 16/30'});
+ });
+ assert.match(await page.locator('#a').innerText(),/LIVE PROGRESS 16\/30/);
+ assert.equal(await page.locator('.ihtml-tool[data-status="accepted"]').count(),1);
+ assert.equal(await page.evaluate(()=>a.chat.busy),true);
+});

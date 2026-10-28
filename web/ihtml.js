@@ -7491,7 +7491,9 @@
           case 'assistant_done': this.finishTurn(ev, t);
             if(ev.background_replay && (opts.initialMessages||[]).some(message=>message.role==='assistant'&&message.content===ev.message)) {
               // 产品历史已有正文，回放只补工具回执/待确认卡，避免同一答复显示两遍。
-              t.answer.hidden=true;if(!t.toolCount&&!t.pendingCount)t.card.remove();
+              t.answer.hidden=true;
+              // 已有正文只去重展示文字；续办还在使用此容器，不能连同后续进度一起删掉。
+              if(t.done&&!t.toolCount&&!t.pendingCount)t.card.remove();
             }
             break;
           case 'turn_error': if(ev.finish_reason==='cancelled')this.finishCancelled(t);else this.turnError(ev.error || 'error', t); break;
