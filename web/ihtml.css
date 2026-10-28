@@ -2127,7 +2127,9 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
 /* 可选历史占用消息区，保持输入框可见；不依赖宿主框架或额外浮层。 */
 .ihtml-chat-inline > .ihtml-chat > .ihtml-chat-history, .ihtml-chat-history { flex: 1 1 0%; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 12px 16px; }
 .ihtml-chat-history[hidden], .ihtml-chat-log[hidden] { display: none !important; }
-.ihtml-chat-history-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.ihtml-chat-history-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.ihtml-chat-history-head strong { flex: 1; }
+.ihtml-chat-history .ihtml-chat-history-clear { color: var(--ui-err); }
 .ihtml-chat-history button { min-height: 44px; padding: 8px 12px; border: 1px solid var(--ui-control-border); border-radius: var(--ui-radius, 10px); color: var(--ui-text); background: var(--ui-surface); font: inherit; cursor: pointer; }
 .ihtml-chat-history button:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 2px; }
 .ihtml-chat-history button:disabled { opacity: .5; cursor: default; }

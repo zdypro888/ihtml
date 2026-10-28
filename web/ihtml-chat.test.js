@@ -1455,3 +1455,22 @@ test('replay of a managed continuation keeps its accepted receipt and resumed ru
  assert.equal(await page.locator('#a .ihtml-msg.assistant:has(.ihtml-process)').count(),1);
  assert.match(await page.locator('#a').innerText(),/Waiting for original preview/);
 });
+
+test('notification deletion and clearing reuse optional hooks and refresh unread state',async(t)=>{
+ const page=await fixture(t,{width:390,height:844});
+ await page.evaluate(async()=>{
+  window.notices=[{id:'one',title:'First'},{id:'two',title:'Second'}];window.noticeUnread=-1;window.allowRemoval=false;window.clearCalls=0;
+  window.a=ihtml.mountChat('#a',{locale:'zh-CN',notifications:{emptyMessage:'暂无助手通知',list:async()=>({items:notices,unread:notices.length}),select:async()=>{},onUnreadChange:n=>{noticeUnread=n},remove:async({id})=>{if(!allowRemoval)return false;notices=notices.filter(row=>row.id!==id);return true},clear:async()=>{clearCalls++;notices=[{id:'concurrent',title:'New progress'}];return true}}});await a.ready();a.chat.notifications.open();
+ });
+ const pane=page.locator('.ihtml-chat-history');
+ await pane.getByRole('button',{name:'删除通知 · First',exact:true}).click();
+ await page.waitForFunction(()=>noticeUnread===2);
+ assert.equal(await pane.locator('.ihtml-chat-history-row').count(),2);
+ await page.evaluate(()=>{allowRemoval=true});
+ await pane.getByRole('button',{name:'删除通知 · First',exact:true}).click();
+ await page.waitForFunction(()=>noticeUnread===1);
+ assert.equal(await pane.locator('.ihtml-chat-history-row').count(),1);
+ await pane.getByRole('button',{name:'清空通知',exact:true}).click();
+ await page.waitForFunction(()=>clearCalls===1&&noticeUnread===1&&document.querySelector('.ihtml-chat-history-select')?.textContent==='New progress');
+ assert.equal(await pane.locator('.ihtml-chat-history-row').count(),1);
+});

@@ -573,7 +573,7 @@ GPT-6.1 Terra 的工具调用必须使用 `OpenAIAPI:"responses"`；SDK 在发�
 
 包装器在单进程保留执行和有界展示回放；这不是跨服务重启的模型栈恢复器。多副本需要粘性路由或宿主分布式执行协调。宿主必须持久保存产品历史、任务编号、回执与通知，服务退出后的未知业务状态查询原记录，不能自动重新执行写操作。旧展示轨迹的回放预算不限制模型工具上下文。
 
-`mountChat` 可选 `notifications` 沿用历史面板合同：`{title, entry, description, list({cursor,signal}), select({id,signal}), onOpenChange, onUnreadChange}`。`list` 返回 `{items,cursor,unread}`，`chat.notifications.open/close/refresh()` 是公开入口；同一时刻只展示历史或通知面板。宿主负责通知归属、版本已读、持久队列和逐设备投递回执。
+`mountChat` 可选 `notifications` 沿用历史面板合同：`{title, entry, description, list({cursor,signal}), select({id,signal}), onOpenChange, onUnreadChange, remove?, clear?, removeLabel?, clearLabel?}`。`list` 返回 `{items,cursor,unread}`，`chat.notifications.open/close/refresh()` 是公开入口；同一时刻只展示历史或通知面板。宿主负责通知归属、版本已读、持久队列和逐设备投递回执。
 
 可选 `notifications.push={publicKey,subscriptionIds,subscribe(subscriptionJSON),remove(subscriptionJSON)}` 增加系统推送设置。只有用户点击才请求浏览器权限，`subscribe` 必须在服务端保存后返回 `{enabled:true}`。`subscriptionIds` 为当前用户已登记端点的 SHA-256；不能仅凭浏览器已有订阅就宣称当前用户已开启。`push` 包复用标准 Web Push 加密传输；VAPID 私钥由宿主凭据配置保管，不返回前端。固定同源资源 `ihtml-push-sw.js` 只显示通知和打开同源页面，不执行业务。宿主需放行该 SDK 静态资源；`/assistant/` 集成使用同路径 scope，不覆盖站点已有根 Service Worker。iOS 可能要求将站点添加到主屏幕；不支持或拒绝权限时站内通知照常可用。
 
@@ -584,3 +584,5 @@ GPT-6.1 Terra 的工具调用必须使用 `OpenAIAPI:"responses"`；SDK 在发�
 加密 compaction item 只在协议工作记忆中原样传递，不展示其正文；回放保留当前 system/developer 约束及新的工具调用/回执。`ContextCompaction:"eino"` 保留 Eino summarization middleware，`SummarizeAfterMessages:0` 不启用消息数量触发。工具列表先返回筛选所需的摘要与分页，详情按需读取；压缩不能掩盖丢失的任务编号、冻结指纹或授权范围。
 
 受管确认的中间回执使用 `assistant_done.continuation_pending:true`：仅当前确认调用已经收尾，原请求仍会进入下一轮。客户端保持流程运行、下一 `run_id` 归入同一流程卡，不把“已受理”当作整个请求完成，也不重复把回执摘要当正文。普通终态和停止不设置该字段；业务完成仍须核查原任务。实时消息和断线回放使用同一归属逻辑。
+
+通知可选 `remove({id,signal})` 和 `clear({signal})` 复用历史面板的删除交互，均须由宿主完成确认并返回 `true`（取消返回 `false`）。未提供回调时不显示相应按钮；`removeLabel`、`clearLabel` 可定制文案。清空后重新读取服务端列表与未读数，避免吞掉并发新通知。宿主应只清除操作者确认的通知快照；删除对话还应关联移除通知并阻止迟到事件复活，通知删除不代表停止任务或删除历史。

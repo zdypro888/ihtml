@@ -5190,6 +5190,8 @@
       const heading = el('div', 'ihtml-chat-history-head');
       const title = el('strong', '', (source.title || T('history_title')));
       const back = el('button', '', T('history_back')); back.type = 'button'; heading.append(title, back);
+      const clear = source.clear ? el('button', 'ihtml-chat-history-clear', source.clearLabel || T('notifications_clear')) : null;
+      if (clear) { clear.type = 'button'; heading.insertBefore(clear, back); clear.onclick = () => { void act('clear', {id: ''}); }; }
       const status = el('div', 'ihtml-chat-history-status'); status.setAttribute('role', 'status');
       const list = el('div', 'ihtml-chat-history-list');
       const retry = el('button', 'ihtml-chat-history-retry', T('history_retry')); retry.type = 'button'; retry.hidden = true;
@@ -5242,6 +5244,7 @@
       const sync = () => {
         entry.disabled = destroyed || authRefreshing;
         back.disabled = mutating;
+        if (clear) { clear.hidden = !items.length; clear.disabled = !!pending || busy(); }
         for (const button of list.querySelectorAll('button')) button.disabled = !!pending || busy() || (button.dataset.removeId && uncertain.has(button.dataset.removeId));
         more.disabled = !!pending; retry.disabled = !!pending;
       };
@@ -5255,8 +5258,9 @@
           if (item.selected) open.setAttribute('aria-current', 'true');
           open.onclick = () => { void act('select', item); }; row.appendChild(open);
           if (source.remove && item.removable !== false) {
-            const remove = el('button', 'ihtml-chat-history-remove', T('history_delete')); remove.type = 'button';
-            remove.dataset.removeId = item.id; remove.setAttribute('aria-label', T('history_delete') + ' · ' + item.title);
+            const label = source.removeLabel || T(kind === 'notifications' ? 'notifications_delete' : 'history_delete');
+            const remove = el('button', 'ihtml-chat-history-remove', label); remove.type = 'button';
+            remove.dataset.removeId = item.id; remove.setAttribute('aria-label', label + ' · ' + item.title);
             remove.onclick = () => { void act('remove', item); }; row.appendChild(remove);
           }
           if (uncertain.has(item.id)) row.appendChild(el('small', 'ihtml-chat-history-unknown', T('history_unknown')));
@@ -5295,17 +5299,17 @@
         pending = abort; mutating = true; status.textContent = T('history_loading'); retry.hidden = true; sync(); chat.syncChatControls();
         try {
           // 删除 hook 必须完成宿主原生确认并返回 true；取消返回 false，绝不默认删除。
-          const result = await boundedChatHook(() => source[kind]({id: item.id, signal: abort.signal}), abort.signal, kind === 'remove' ? 120000 : 30000);
+          const result = await boundedChatHook(() => source[kind]({id: item.id, signal: abort.signal}), abort.signal, kind !== 'select' ? 120000 : 30000);
           if (!alive(id, abort)) return;
-          if (kind === 'remove') {
+          if (kind !== 'select') {
             if (result !== true && result !== false) throw new TypeError('history removal requires explicit receipt');
-            if (result) { items = items.filter(row => row.id !== item.id); render(); }
-            status.textContent = items.length ? '' : T('chat_history_empty');
+            if (result) { items = kind === 'clear' ? [] : items.filter(row => row.id !== item.id); if (kind === 'clear') cursor = ''; render(); }
+            status.textContent = items.length ? '' : (source.emptyMessage || T('chat_history_empty'));
           } else { mutating = false; close(false); }
         } catch (error) {
           if (kind === 'remove' && alive(id, abort)) { uncertain.add(item.id); render(); }
           failure(error, id, abort);
-        } finally { if (id === generation) { pending = null; mutating = false; abort.abort(); sync(); chat.syncChatControls(); } }
+        } finally { if (id === generation) { pending = null; mutating = false; abort.abort(); sync(); chat.syncChatControls(); if (source.onUnreadChange && retry.hidden) void load(); } }
       }
       function close(focus = true) {
         if (!opened || mutating) return;
