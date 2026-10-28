@@ -7110,6 +7110,20 @@
         if (!t) return;
         const call = ev.tool_call && typeof ev.tool_call === 'object' ? ev.tool_call : {};
         const nonce = String(call.confirmation_nonce || '');
+        // 历史回放中的确认执行属于新 run；按签名卡的 id+nonce 回写原卡，
+        // 不能仅按工具 id 或标题匹配，已执行状态不能被迟到的待确认事件回退。
+        if (nonce) {
+          const original = this.findConfirmationRecord({ tool_id: call.id || ev.tool_id, confirmation_nonce: nonce });
+          if (original) {
+            if (['success', 'accepted', 'error', 'cancelled'].includes(original.status) && ['pending', 'running'].includes(status)) return;
+            if (original.status === 'running' && status === 'pending') return;
+            if (original.ownerTurn !== t) {
+              this.upsertTool(ev, status, original.ownerTurn);
+              this.syncChatControls();
+              return;
+            }
+          }
+        }
         const queueKey = this.anonymousToolQueueKey(ev, call);
         let id = call.id || ev.tool_id || (nonce && t.anonymousToolAliases.get(nonce)) || '';
         if (!id) {
@@ -7312,7 +7326,8 @@
         }
         this.syncChatControls();
       },
-      findCancellationRecord(ev) {
+      // 执行与取消回执共用签名卡定位，不依赖当前模型轮次。
+      findConfirmationRecord(ev) {
         if (!this.log) return null;
         for (const message of Array.from(this.log.children)) {
           const owner = message._turn;
@@ -7324,7 +7339,7 @@
         return null;
       },
       handleCancellationResult(ev) {
-        const rec = this.findCancellationRecord(ev);
+        const rec = this.findConfirmationRecord(ev);
         if (!rec) return;
         if (rec.cancelAckTimer) clearTimeout(rec.cancelAckTimer);
         rec.cancelAckTimer = 0;

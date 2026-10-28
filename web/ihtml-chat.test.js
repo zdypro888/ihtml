@@ -1474,3 +1474,28 @@ test('notification deletion and clearing reuse optional hooks and refresh unread
  await page.waitForFunction(()=>clearCalls===1&&noticeUnread===1&&document.querySelector('.ihtml-chat-history-select')?.textContent==='New progress');
  assert.equal(await pane.locator('.ihtml-chat-history-row').count(),1);
 });
+
+// 确认在另一 run 执行；历史回放没有浏览器点击留下的 acceptNextRun 状态。
+for(const status of ['accepted','success','error']) test('historical confirmation resolves its original card across runs: '+status,async(t)=>{
+ const page=await fixture(t);
+ await page.evaluate(async()=>{backgroundExecution=true;window.a=ihtml.mountChat('#a',{locale:'zh-CN'});await a.ready();});
+ await page.waitForFunction(()=>sockets.length===1);
+ await page.evaluate((status)=>{
+  let n=0;const emit=(type,run_id,seq,rest={})=>sockets[0].emit({type,run_id,seq,background_session:'history',background_seq:++n,background_replay:true,...rest});
+  const card={id:'same-id',name:'preview',title:'原预览确认卡',confirmation_nonce:'original-nonce',confirmation_token:'SIGNED',confirmation_expires:Math.floor(Date.now()/1000)+600};
+  emit('turn_start','proposal',1);emit('confirmation_required','proposal',2,{tool_call:card});emit('assistant_done','proposal',3,{message:'等待确认'});
+  emit('turn_start','other',1);emit('confirmation_required','other',2,{tool_call:{...card,title:'另一张确认卡',confirmation_nonce:'other-nonce'}});emit('assistant_done','other',3,{message:'另一个操作'});
+  emit('turn_start','execution',1);emit('tool_start','execution',2,{tool_call:{id:card.id,confirmation_nonce:card.confirmation_nonce}});
+  emit('tool_result','execution',3,{tool_call:{id:card.id,confirmation_nonce:card.confirmation_nonce},tool_status:status,tool_summary:'服务端回执'});
+  emit('assistant_done','execution',4,{message:'本操作已处理'});
+  // 迟到的同卡恢复事件不能把已完成的回执降级为可再次确认。
+  emit('turn_start','late',1);emit('confirmation_required','late',2,{tool_call:card});emit('assistant_done','late',3,{message:'旧恢复事件'});
+ },status);
+ const original=page.locator('.ihtml-tool').filter({hasText:'原预览确认卡'});
+ assert.equal(await original.count(),1);assert.equal(await original.getAttribute('data-status'),status);
+ assert.equal(await original.getByRole('button',{name:'确认此操作',exact:true}).count(),0);
+ const other=page.locator('.ihtml-tool').filter({hasText:'另一张确认卡'});
+ assert.equal(await other.getAttribute('data-status'),'pending');
+ assert.equal(await page.locator('.ihtml-tool[data-status="pending"]').count(),1);
+ assert.deepEqual(await page.evaluate(()=>sockets.flatMap(s=>s.sent)),[]);
+});
