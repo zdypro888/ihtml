@@ -5042,7 +5042,7 @@
     /* ---------- AI 对话抽屉 ---------- */
     const TOOL_STATUS_LABEL = {
       running: T('tool_running'), pending: T('tool_pending'), success: T('tool_success'), accepted: T('tool_accepted'),
-      error: T('tool_error'), cancelled: T('tool_cancelled'), unknown: T('tool_unknown'),
+      error: T('tool_error'), cancelled: T('tool_cancelled'), expired: T('tool_expired'), unknown: T('tool_unknown'),
     };
     const RISK_LABEL = { low: T('risk_low'), medium: T('risk_medium'), high: T('risk_high'), blocked: T('risk_blocked') };
 
@@ -5785,7 +5785,7 @@
             const owner = message._turn;
             if (!owner) continue;
             for (const rec of owner.tools.values()) {
-              if (rec.expired && rec.status === 'cancelled') {
+              if (rec.expired && rec.status === 'expired') {
                 const refresh = rec.body.querySelector('.t-refresh');
                 if (refresh) refresh.disabled = unavailable || readOnly || confirmationBusy;
               }
@@ -6081,7 +6081,8 @@
             if (rec.confirmAbort) rec.confirmAbort.abort();
             if (this.confirmationBusy === rec) this.confirmationBusy = null;
             rec.confirmPending = false;
-            this.setToolStatus(rec, 'cancelled', turn);
+            rec.expired = true;
+            this.setToolStatus(rec, 'expired', turn);
             rec.lastEvent = Object.assign({}, rec.lastEvent, { tool_summary: T('confirm_expired') });
             this.renderToolRecord(rec, rec.lastEvent, turn);
           }
@@ -6478,6 +6479,9 @@
         if (t.turnFailed) return T('turn_failed');
         if (t.errorCount > 0) return T('tools_failed', { n: t.errorCount });
         if (t.agentState && t.agentState.manualPaused && t.agentState.plan.length) return T('agent_plan_paused');
+        // 接纳回执只结束提交阶段，不证明异步业务结束；过期也不是取消回执。
+        if (Array.from(t.tools.values()).some(rec => rec.status === 'accepted')) return T('trace_accepted');
+        if (Array.from(t.tools.values()).some(rec => rec.status === 'expired')) return T('trace_expired');
         const steps = this.processStepCount(t);
         if (steps > 0) return T('trace_completed', { n: steps });
         return T('done');
@@ -6880,6 +6884,8 @@
         if (!rec || !t) return;
         const previous = rec.status;
         if (previous === status) return;
+        // 服务端开始/回执可纠正回放时的本地过期判断，不保留错误的过期操作入口。
+        if (['running', 'accepted', 'success', 'error', 'cancelled'].includes(status)) rec.expired = false;
         if (status !== 'pending' && rec.confirmAbort) rec.confirmAbort.abort();
         if (rec.countedPending && status !== 'pending') { t.pendingCount = Math.max(0, t.pendingCount - 1); rec.countedPending = false; }
         if (!rec.countedPending && status === 'pending') { t.pendingCount++; rec.countedPending = true; }
@@ -7019,7 +7025,7 @@
               rec.confirmAbort = null;
               if (this.confirmationBusy === rec) this.confirmationBusy = null;
               rec.confirmPending = false;
-              this.setToolStatus(rec, 'cancelled', t);
+              this.setToolStatus(rec, 'expired', t);
               this.releaseAnonymousTool(t, rec.id);
               rec.lastEvent = Object.assign({}, rec.lastEvent, { tool_summary: T('confirm_expired') });
               this.renderToolRecord(rec, rec.lastEvent, t);
@@ -7078,7 +7084,7 @@
           rec.body.setAttribute('aria-labelledby', rec.title.id);
           if (primary) rec.body.setAttribute('aria-describedby', primary.id);
         }
-        if (rec.expired && rec.status === 'cancelled') {
+        if (rec.expired && rec.status === 'expired') {
           const bar = el('div', 't-actions');
           const refresh = el('button', 't-refresh', T('refresh_confirmation'));
           refresh.disabled = !!this.confirmationBusy || this.active || this.sending;

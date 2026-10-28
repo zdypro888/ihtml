@@ -453,7 +453,7 @@ test('manual_tool_only cancellation matches id and nonce, waits for ACK, fails c
     manualCalls.forEach((tool_call, i) => sockets[0].emit({ type: 'confirmation_required', run_id: 'proposal', seq: i + 2, tool_call }));
     sockets[0].emit({ type: 'assistant_done', run_id: 'proposal', seq: 6, message: 'Approve or dismiss' });
   });
-  assert.equal(await page.locator('#a .ihtml-tool[data-status="cancelled"]').count(), 1);
+  assert.equal(await page.locator('#a .ihtml-tool[data-status="expired"]').count(), 1);
   await page.locator('#a .t-actions button:not(.ok):not(.t-refresh)').first().click();
   await page.waitForFunction(() => sockets[0].sent.length === 2);
   assert.equal(await page.evaluate(() => sockets[0].sent[1].type), 'cancel_tool');
@@ -462,7 +462,7 @@ test('manual_tool_only cancellation matches id and nonce, waits for ACK, fails c
   assert.equal(await page.evaluate(() => a.chat.busy), true);
   await page.evaluate(() => sockets[0].emit({ type: 'cancel_tool_result', tool_id: 'c1', confirmation_nonce: 'n1', tool_status: 'cancelled', tool_summary: 'Not executed' }));
   assert.equal(await page.evaluate(() => a.chat.busy), false);
-  assert.equal(await page.locator('#a .ihtml-tool[data-status="cancelled"]').count(), 2);
+  assert.equal(await page.locator('#a .ihtml-tool[data-status="cancelled"]').count(), 1);
   await page.locator('#a .t-actions button:not(.ok):not(.t-refresh)').first().click();
   await page.waitForFunction(() => sockets[0].sent.length === 3);
   await page.evaluate(() => sockets[0].emit({ type: 'cancel_tool_result', tool_id: 'c2', confirmation_nonce: 'n2', tool_status: 'error', error: 'Authorization: Bearer PRIVATE_SECRET' }));
@@ -1217,7 +1217,7 @@ test('confirmation shows exact shared deadline, expires without confirming and o
  await page.clock.runFor(350);
  await page.screenshot({path:'/tmp/ihtml-confirmation-deadline-mobile.png',animations:'disabled'});
  await page.clock.fastForward(4000);
- assert.equal(await page.locator('#a .ihtml-tool[data-status="cancelled"]').count(),1);
+ assert.equal(await page.locator('#a .ihtml-tool[data-status="expired"]').count(),1);
  assert.equal(await page.locator('#a .t-actions .ok').count(),0);
  assert.equal(await page.locator('#a .t-refresh').isVisible(),true);
  await page.locator('#a .t-refresh').click();
@@ -1498,4 +1498,32 @@ for(const status of ['accepted','success','error']) test('historical confirmatio
  assert.equal(await other.getAttribute('data-status'),'pending');
  assert.equal(await page.locator('.ihtml-tool[data-status="pending"]').count(),1);
  assert.deepEqual(await page.evaluate(()=>sockets.flatMap(s=>s.sent)),[]);
+});
+
+test('expired historical card is corrected by its accepted receipt without claiming cancellation or workflow completion',async(t)=>{
+ const page=await fixture(t);
+ await page.evaluate(async()=>{backgroundExecution=true;window.a=ihtml.mountChat('#a',{locale:'zh-CN'});await a.ready();});
+ await page.waitForFunction(()=>sockets.length===1);
+ await page.evaluate(()=>{
+  const card={id:'preview',name:'preview',title:'过期历史预览',confirmation_nonce:'already-confirmed',confirmation_expires:Math.floor(Date.now()/1000)-30};
+  sockets[0].emit({type:'turn_start',run_id:'old-proposal',seq:1,background_replay:true});
+  sockets[0].emit({type:'confirmation_required',run_id:'old-proposal',seq:2,tool_call:card});
+  sockets[0].emit({type:'assistant_done',run_id:'old-proposal',seq:3,message:'旧轮次'});
+ });
+ assert.equal(await page.locator('.ihtml-tool[data-status="expired"]').count(),1);
+ assert.doesNotMatch(await page.locator('#a').innerText(),/已取消|本次未执行|本轮处理结束/);
+ await page.evaluate(()=>{
+  sockets[0].emit({type:'turn_start',run_id:'accepted-receipt',seq:1,background_replay:true});
+  sockets[0].emit({type:'tool_result',run_id:'accepted-receipt',seq:2,tool_call:{id:'preview',confirmation_nonce:'already-confirmed'},tool_status:'accepted',tool_summary:'预览请求已受理'});
+  sockets[0].emit({type:'assistant_done',run_id:'accepted-receipt',seq:3,continuation_pending:true});
+  sockets[0].emit({type:'turn_start',run_id:'followup',seq:1,background_replay:true});
+  sockets[0].emit({type:'assistant_status',run_id:'followup',seq:2,status:'正在读取云盘预览：16/30'});
+ });
+ assert.equal(await page.locator('.ihtml-tool').count(),1);
+ assert.equal(await page.locator('.ihtml-tool[data-status="accepted"]').count(),1);
+ assert.equal(await page.locator('.t-refresh').count(),0);
+ assert.match(await page.locator('#a').innerText(),/操作请求已受理/);
+ assert.match(await page.locator('#a').innerText(),/16\/30/);
+ assert.doesNotMatch(await page.locator('#a').innerText(),/已取消|本轮处理结束/);
+ assert.equal(await page.evaluate(()=>a.chat.busy),true);
 });
