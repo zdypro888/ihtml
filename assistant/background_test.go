@@ -222,3 +222,29 @@ func TestBackgroundPendingApprovalSurvivesDetachAndExecutesOnce(t *testing.T) {
 		t.Fatal("approval did not execute exactly once", calls.Load())
 	}
 }
+
+// 执行器被回收/重建后全局序号会从头开始；流代次必须变化，不能被旧页面的去重水位丢弃。
+func TestBackgroundStreamGenerationChangesWhenRootIsRecreated(t *testing.T) {
+	hub, _ := backgroundFixture(t, &fakeEngine{run: func(context.Context, *agent.TurnRequest) (*agent.TurnResult, error) {
+		return &agent.TurnResult{Text: "done"}, nil
+	}})
+	firstLog := newRecorder()
+	first := attachBackground(t, hub, t.Context(), "owner", "one", firstLog)
+	send(first, "first")
+	events := firstLog.wait(t, ihtml.ChatStreamAssistantDone, 1)
+	previous := events[len(events)-1].BackgroundSession
+	first.Close()
+	hub.mu.Lock()
+	retired := hub.sessions["owner:one"]
+	delete(hub.sessions, "owner:one")
+	hub.mu.Unlock()
+	retired.close()
+	secondLog := newRecorder()
+	second := attachBackground(t, hub, t.Context(), "owner", "one", secondLog)
+	send(second, "second")
+	events = secondLog.wait(t, ihtml.ChatStreamAssistantDone, 1)
+	current := events[len(events)-1].BackgroundSession
+	if previous == "" || current == "" || previous == current {
+		t.Fatal("new root reused an old replay generation")
+	}
+}

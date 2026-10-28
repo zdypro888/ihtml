@@ -2,6 +2,8 @@ package assistant
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -39,6 +41,7 @@ type backgroundSession struct {
 	publishMu sync.Mutex
 	hub       *BackgroundBackend
 	key       string
+	streamID  string
 	ctx       context.Context
 	cancel    context.CancelFunc
 	source    ihtml.ChatSessionContext
@@ -136,7 +139,17 @@ func (b *BackgroundBackend) NewSession(ctx context.Context, sc *ihtml.ChatSessio
 		} else {
 			source.Request = (&http.Request{}).WithContext(root)
 		}
-		e = &backgroundSession{hub: b, key: key, ctx: root, cancel: func() { stop(); cancel() }, source: source, release: release, clients: map[*backgroundAttachment]bool{}, text: map[string]string{}, active: map[string]bool{}, stopping: map[string]bool{}, touched: time.Now()}
+		stream := make([]byte, 16)
+		if _, err := rand.Read(stream); err != nil {
+			b.mu.Unlock()
+			cancel()
+			stop()
+			if release != nil {
+				release()
+			}
+			return nil, errors.New("assistant: background stream unavailable")
+		}
+		e = &backgroundSession{hub: b, key: key, streamID: hex.EncodeToString(stream), ctx: root, cancel: func() { stop(); cancel() }, source: source, release: release, clients: map[*backgroundAttachment]bool{}, text: map[string]string{}, active: map[string]bool{}, stopping: map[string]bool{}, touched: time.Now()}
 		source.Emit = e.publish
 		e.source.Emit = e.publish
 		e.inner, err = b.cfg.Backend.NewSession(root, &source)
@@ -164,7 +177,7 @@ func (b *BackgroundBackend) NewSession(ctx context.Context, sc *ihtml.ChatSessio
 		if event.RunID != "" && !seen[event.RunID] {
 			seen[event.RunID] = true
 			if event.Type != ihtml.ChatStreamTurnStart {
-				prefix = append(prefix, ihtml.ChatStreamEvent{Type: ihtml.ChatStreamTurnStart, RunID: event.RunID, BackgroundSession: e.key})
+				prefix = append(prefix, ihtml.ChatStreamEvent{Type: ihtml.ChatStreamTurnStart, RunID: event.RunID, BackgroundSession: e.streamID})
 			}
 		}
 	}
@@ -204,9 +217,9 @@ func (e *backgroundSession) publish(event ihtml.ChatStreamEvent) error {
 		delete(e.stopping, event.RunID)
 	}
 	e.sequence++
-	event.BackgroundSession = e.key
+	event.BackgroundSession = e.streamID
 	event.BackgroundSeq = e.sequence
-	stored.BackgroundSession = e.key
+	stored.BackgroundSession = e.streamID
 	stored.BackgroundSeq = e.sequence
 	e.touched = time.Now()
 	if event.Type == ihtml.ChatStreamTurnStart {
@@ -279,7 +292,7 @@ func (c *backgroundAttachment) HandleEvent(ctx context.Context, event *ihtml.Cha
 		if last.Role == "user" && len(last.Content) <= 65536 {
 			c.session.mu.Lock()
 			c.session.sequence++
-			echo := ihtml.ChatStreamEvent{Type: "background_user_message", Message: last.Content, BackgroundSession: c.session.key, BackgroundSeq: c.session.sequence}
+			echo := ihtml.ChatStreamEvent{Type: "background_user_message", Message: last.Content, BackgroundSession: c.session.streamID, BackgroundSeq: c.session.sequence}
 			c.session.events = append(c.session.events, echo)
 			encoded, _ := json.Marshal(echo)
 			c.session.bytes += len(encoded)
