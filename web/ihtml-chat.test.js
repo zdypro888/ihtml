@@ -1527,3 +1527,93 @@ test('expired historical card is corrected by its accepted receipt without claim
  assert.doesNotMatch(await page.locator('#a').innerText(),/已取消|本轮处理结束/);
  assert.equal(await page.evaluate(()=>a.chat.busy),true);
 });
+
+// 提案 ID 可被模型复用；确认卡必须以 id+nonce 隔离，不能覆盖同轮次的其他授权。
+test('same-turn cards with reused ids retain independent nonces and counters',async(t)=>{
+ const page=await fixture(t);
+ await page.evaluate(async()=>{
+  window.a=ihtml.mountChat('#a',{locale:'zh-CN'});await a.ready();await a.chat.send('two operations');
+  const card={id:'reused',name:'write',confirmation_token:'SIGNED',confirmation_expires:Math.floor(Date.now()/1000)+600};
+  sockets[0].emit({type:'turn_start',run_id:'proposal',seq:1});
+  sockets[0].emit({type:'confirmation_required',run_id:'proposal',seq:2,tool_call:{...card,title:'第一项操作',confirmation_nonce:'one'}});
+  sockets[0].emit({type:'confirmation_required',run_id:'proposal',seq:3,tool_call:{...card,title:'第二项操作',confirmation_nonce:'two'}});
+  sockets[0].emit({type:'assistant_done',run_id:'proposal',seq:4,message:'Review'});
+ });
+ assert.equal(await page.locator('.ihtml-tool[data-status="pending"]').count(),2);
+ await page.evaluate(()=>{
+  sockets[0].emit({type:'turn_start',run_id:'execution',seq:1,background_replay:true});
+  sockets[0].emit({type:'tool_result',run_id:'execution',seq:2,tool_call:{id:'reused',confirmation_nonce:'one'},tool_status:'accepted'});
+ });
+ assert.equal(await page.locator('.ihtml-tool').filter({hasText:'第一项操作'}).getAttribute('data-status'),'accepted');
+ assert.equal(await page.locator('.ihtml-tool').filter({hasText:'第二项操作'}).getAttribute('data-status'),'pending');
+ assert.match(await page.locator('.ihtml-process-head').first().innerText(),/1 个操作待确认/);
+});
+
+for(const lateStatus of ['cancelled','error']) test('late cancellation acknowledgement cannot overwrite accepted execution: '+lateStatus,async(t)=>{
+ const page=await fixture(t);
+ await page.evaluate(async()=>{
+  window.a=ihtml.mountChat('#a');await a.ready();await a.chat.send('operation');
+  window.review={id:'operation',name:'write',confirmation_nonce:'executed',confirmation_token:'SIGNED',confirmation_expires:Math.floor(Date.now()/1000)+600};
+  sockets[0].emit({type:'turn_start',run_id:'proposal',seq:1});
+  sockets[0].emit({type:'confirmation_required',run_id:'proposal',seq:2,tool_call:review});
+  sockets[0].emit({type:'tool_result',run_id:'proposal',seq:3,tool_call:review,tool_status:'accepted'});
+  sockets[0].emit({type:'assistant_done',run_id:'proposal',seq:4,message:'Accepted'});
+ });
+ await page.evaluate((status)=>sockets[0].emit({type:'cancel_tool_result',tool_id:'operation',confirmation_nonce:'executed',tool_status:status,error:'Nonce already consumed'}),lateStatus);
+ assert.equal(await page.locator('.ihtml-tool').getAttribute('data-status'),'accepted');
+});
+
+test('late accepted receipt cannot downgrade a completed operation',async(t)=>{
+ const page=await fixture(t);
+ await page.evaluate(async()=>{
+  window.a=ihtml.mountChat('#a');await a.ready();await a.chat.send('operation');
+  const call={id:'operation',name:'write',confirmation_nonce:'done'};
+  sockets[0].emit({type:'turn_start',run_id:'completed',seq:1});
+  sockets[0].emit({type:'tool_result',run_id:'completed',seq:2,tool_call:call,tool_status:'success'});
+  sockets[0].emit({type:'assistant_done',run_id:'completed',seq:3,message:'Done'});
+  sockets[0].emit({type:'turn_start',run_id:'late',seq:1,background_replay:true});
+  sockets[0].emit({type:'tool_result',run_id:'late',seq:2,tool_call:call,tool_status:'accepted'});
+ });
+ assert.equal(await page.locator('.ihtml-tool').count(),1);
+ assert.equal(await page.locator('.ihtml-tool').getAttribute('data-status'),'success');
+});
+
+test('a cancellation failure is not execution evidence and a real receipt corrects it',async(t)=>{
+ const page=await fixture(t);
+ await page.evaluate(async()=>{
+  window.a=ihtml.mountChat('#a');await a.ready();await a.chat.send('operation');
+  window.card={id:'operation',name:'write',confirmation_nonce:'one',confirmation_token:'SIGNED',confirmation_expires:Math.floor(Date.now()/1000)+600};
+  sockets[0].emit({type:'turn_start',run_id:'proposal',seq:1});
+  sockets[0].emit({type:'confirmation_required',run_id:'proposal',seq:2,tool_call:card});
+  sockets[0].emit({type:'assistant_done',run_id:'proposal',seq:3,message:'Review'});
+  sockets[0].emit({type:'cancel_tool_result',tool_id:'operation',confirmation_nonce:'one',tool_status:'error',error:'Already consumed'});
+ });
+ assert.equal(await page.locator('.ihtml-tool').getAttribute('data-status'),'error');
+ await page.evaluate(()=>{
+  sockets[0].emit({type:'turn_start',run_id:'actual',seq:1,background_replay:true});
+  sockets[0].emit({type:'tool_result',run_id:'actual',seq:2,tool_call:card,tool_status:'accepted'});
+ });
+ assert.equal(await page.locator('.ihtml-tool').getAttribute('data-status'),'accepted');
+ assert.doesNotMatch(await page.locator('#a').innerText(),/Already consumed/);
+});
+
+test('accepted execution clears cancellation timers instead of failing later',async(t)=>{
+ const page=await fixture(t);await page.clock.install();
+ await page.evaluate(async()=>{
+  window.a=ihtml.mountChat('#a');await a.ready();await a.chat.send('operation');
+  window.card={id:'operation',name:'write',confirmation_nonce:'timer',confirmation_token:'SIGNED',confirmation_expires:Math.floor(Date.now()/1000)+600};
+  sockets[0].emit({type:'turn_start',run_id:'proposal',seq:1});
+  sockets[0].emit({type:'confirmation_required',run_id:'proposal',seq:2,tool_call:card});
+  sockets[0].emit({type:'assistant_done',run_id:'proposal',seq:3,message:'Review'});
+ });
+ await page.locator('#a .t-actions button:not(.ok)').click();
+ await page.waitForFunction(()=>sockets[0].sent.some(e=>e.type==='cancel_tool'));
+ await page.evaluate(()=>{
+  sockets[0].emit({type:'turn_start',run_id:'actual',seq:1,background_replay:true});
+  sockets[0].emit({type:'tool_result',run_id:'actual',seq:2,tool_call:card,tool_status:'accepted'});
+  sockets[0].emit({type:'assistant_done',run_id:'actual',seq:3,message:'Accepted'});
+ });
+ await page.clock.fastForward(60000);
+ assert.equal(await page.locator('.ihtml-tool').getAttribute('data-status'),'accepted');
+ assert.equal(await page.evaluate(()=>a.chat.busy),false);
+});

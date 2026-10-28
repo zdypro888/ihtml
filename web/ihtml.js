@@ -6885,7 +6885,13 @@
         const previous = rec.status;
         if (previous === status) return;
         // 服务端开始/回执可纠正回放时的本地过期判断，不保留错误的过期操作入口。
-        if (['running', 'accepted', 'success', 'error', 'cancelled'].includes(status)) rec.expired = false;
+        if (['running', 'accepted', 'success', 'error', 'cancelled'].includes(status)) {
+          rec.expired = false;
+          // 已收到执行证据后撤销等待已经失效，不能让旧定时器稍后把卡片改成失败。
+          if (rec.cancelAckTimer) clearTimeout(rec.cancelAckTimer);
+          rec.cancelAckTimer = 0;rec.cancelPending = false;rec.cancelSent = false;
+          if (this.confirmationBusy === rec) this.confirmationBusy = null;
+        }
         if (status !== 'pending' && rec.confirmAbort) rec.confirmAbort.abort();
         if (rec.countedPending && status !== 'pending') { t.pendingCount = Math.max(0, t.pendingCount - 1); rec.countedPending = false; }
         if (!rec.countedPending && status === 'pending') { t.pendingCount++; rec.countedPending = true; }
@@ -7112,6 +7118,12 @@
           else t.anonymousToolQueues.delete(key);
         }
       },
+      // 只有服务端执行/撤销回执形成确定状态；本地超时或撤销失败仍可被真实回执纠正。
+      settledToolStatus(rec) {
+        const source = rec?.lastEvent?.type;
+        if (source === 'tool_result' && ['accepted', 'success', 'error', 'cancelled'].includes(rec.status)) return rec.status;
+        return source === 'cancel_tool_result' && rec.status === 'cancelled' ? 'cancelled' : '';
+      },
       upsertTool(ev, status, t = this.turn) {
         if (!t) return;
         const call = ev.tool_call && typeof ev.tool_call === 'object' ? ev.tool_call : {};
@@ -7121,7 +7133,10 @@
         if (nonce) {
           const original = this.findConfirmationRecord({ tool_id: call.id || ev.tool_id, confirmation_nonce: nonce });
           if (original) {
-            if (['success', 'accepted', 'error', 'cancelled'].includes(original.status) && ['pending', 'running'].includes(status)) return;
+            // 已有终态后，迟到的中间回执不能回退展示；过期/未知仍允许真实回执纠正。
+            const settled = this.settledToolStatus(original);
+            if (['success', 'error', 'cancelled'].includes(settled) && status !== settled) return;
+            if (settled && ['pending', 'running'].includes(status)) return;
             if (original.status === 'running' && status === 'pending') return;
             if (original.ownerTurn !== t) {
               this.upsertTool(ev, status, original.ownerTurn);
@@ -7145,6 +7160,9 @@
             }) || queueKey + '#' + (++t.anonymousToolSeq);
           }
         }
+        // 同一轮模型可能复用 call.id；不同 nonce 必须保留各自参数、按钮和计数。
+        const occupied = t.tools.get(id);
+        if (nonce && occupied && String(occupied.call.confirmation_nonce || '') !== nonce) id += '|confirmation:' + nonce;
         let rec = t.tools.get(id);
         if (!rec) {
           const card = el('details', 'ihtml-tool');
@@ -7173,6 +7191,11 @@
         if (nonce) t.anonymousToolAliases.set(nonce, id);
         // 开始/回执事件通常只有签名卡的引用，不能覆盖原来已验证的目标和标题。
         if (ev.tool_call) rec.call = Object.assign({}, rec.call, ev.tool_call);
+        if (ev.type === 'tool_start' || ev.type === 'tool_result') {
+          rec.interactionError = '';
+          // 新执行证据替换上一阶段结果，不能继续展示撤销失败或旧回执的摘要。
+          rec.lastEvent = Object.assign({}, rec.lastEvent, {tool_summary: '', error: '', tool_result: undefined});
+        }
         const previous = rec.status;
         rec.lastEvent = Object.assign({}, rec.lastEvent, ev, { tool_call: rec.call });
         if (ev.type === 'tool_start') {
@@ -7310,7 +7333,7 @@
         }
       },
       failCancellation(rec, message, terminal) {
-        if (!rec) return;
+        if (!rec || this.settledToolStatus(rec)) return;
         terminal = chatAgentCore.cancellationFailureTerminal(rec.cancelSent, terminal);
         if (rec.cancelAckTimer) clearTimeout(rec.cancelAckTimer);
         rec.cancelAckTimer = 0;
@@ -7347,6 +7370,8 @@
       handleCancellationResult(ev) {
         const rec = this.findConfirmationRecord(ev);
         if (!rec) return;
+        // 取消回执只回答撤销请求，不能推翻已收到的执行结果或先前撤销结果。
+        if (this.settledToolStatus(rec)) return;
         if (rec.cancelAckTimer) clearTimeout(rec.cancelAckTimer);
         rec.cancelAckTimer = 0;
         if (String(ev.tool_status || '') !== 'cancelled') {
