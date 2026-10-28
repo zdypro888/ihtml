@@ -1241,3 +1241,25 @@ test('confirmation does not submit after a delayed user hook crosses its deadlin
  assert.equal(await page.evaluate(()=>a.chat.busy),false);
  assert.equal(await page.locator('#a .t-refresh').isVisible(),true);
 });
+
+test('pending cancellation keeps its authoritative wait across the confirmation deadline',async(t)=>{
+ const page=await fixture(t);
+ await page.clock.install({time:new Date('2026-10-28T06:00:00Z')});
+ await page.evaluate(async()=>{
+  window.a=ihtml.mountChat('#a',{locale:'zh-CN'});await a.ready();await a.chat.send('fixture');
+  sockets[0].emit({type:'turn_start',run_id:'cancel-deadline',seq:1});
+  sockets[0].emit({type:'confirmation_required',run_id:'cancel-deadline',seq:2,tool_call:{id:'cancel-expiring',name:'write',title:'取消夹具',approval_resume:'manual_tool_only',confirmation_nonce:'n',confirmation_token:'SIGNED',confirmation_expires:Math.floor(Date.now()/1000)+3}});
+  sockets[0].emit({type:'assistant_done',run_id:'cancel-deadline',seq:3,message:'等待确认'});
+ });
+ await page.locator('#a .t-actions button:not(.ok)').click();
+ await page.waitForFunction(()=>sockets[0].sent.some(m=>m.type==='cancel_tool'));
+ await page.clock.fastForward(4000);
+ assert.equal(await page.locator('#a .ihtml-tool[data-status="pending"]').count(),1,'deadline cannot manufacture a cancellation receipt');
+ assert.equal(await page.locator('#a .t-refresh').count(),0,'uncertain cancellation cannot offer automatic preview refresh');
+ assert.equal(await page.evaluate(()=>a.chat.busy),true);
+ await page.clock.fastForward(30000);
+ assert.equal(await page.locator('#a .ihtml-tool[data-status="error"]').count(),1,'missing acknowledgement is a terminal transport error');
+ assert.match(await page.locator('#a .ihtml-tool').innerText(),/状态未知/,'transport error must keep execution explicitly unknown');
+ assert.equal(await page.locator('#a .t-refresh').count(),0);
+ assert.equal(await page.evaluate(()=>sockets.flatMap(s=>s.sent).filter(m=>m.type==='cancel_tool').length),1);
+});

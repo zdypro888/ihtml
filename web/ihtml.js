@@ -6873,6 +6873,13 @@
             if (left <= 0) {
               if (rec.countdown) clearInterval(rec.countdown);
               rec.countdown = 0;
+              // An in-flight cancellation needs its server acknowledgement.
+              // Expiry is not an execution/cancellation receipt; retain the
+              // acknowledgement timer and its honest unknown-state fallback.
+              if (rec.cancelPending) {
+                countdown.textContent = T('cancellation_waiting');
+                return;
+              }
               rec.expired = true;
               if (rec.confirmAbort) rec.confirmAbort.abort();
               rec.confirmAbort = null;

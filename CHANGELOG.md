@@ -34,6 +34,8 @@ the first tagged release, changes are recorded under **Unreleased**.
 
 ### Fixed
 
+- A confirmation deadline does not replace an in-flight cancellation acknowledgement; missing receipts remain unknown and cannot offer preview refresh.
+
 - Chinese IME confirmation no longer leaves a 250 ms send cooldown: the next
   independent Enter sends immediately, and the trailing confirmation key does
   not insert an accidental newline. Shift+Enter still inserts a newline.
