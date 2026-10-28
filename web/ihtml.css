@@ -2146,3 +2146,7 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
 .ihtml-chat-starters { display: flex; flex-wrap: wrap; gap: 8px; padding: 4px 0 12px; }
 .ihtml-chat-starters button { min-height: 44px; max-width: 100%; padding: 8px 12px; font-size: 12px; text-align: left; white-space: normal; }
 .ihtml-chat-inline .ihtml-chat-head[hidden] { display: none; }
+
+/* 通知沿用历史面板；推送设置是显式可选动作，保持同一套紧凑按钮样式。 */
+.ihtml-chat-push-enable{align-self:flex-start;margin:0 12px 8px;padding:8px 12px;border:1px solid var(--ui-control-border);border-radius:12px;background:var(--ui-surface);color:var(--ui-primary);font:inherit;cursor:pointer;min-height:40px}
+.ihtml-chat-push-enable:disabled{opacity:.6;cursor:default}

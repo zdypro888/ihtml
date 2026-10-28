@@ -71,11 +71,8 @@ func New(ctx context.Context, cfg Config, opts ...Option) (*Engine, error) {
 	if cfg.MaxTurns <= 0 {
 		cfg.MaxTurns = 64
 	}
-	if cfg.SummarizeAfterTokens <= 0 {
+	if cfg.ContextCompaction != "provider" && cfg.SummarizeAfterTokens <= 0 {
 		cfg.SummarizeAfterTokens = 24000
-	}
-	if cfg.SummarizeAfterMessages <= 0 {
-		cfg.SummarizeAfterMessages = 80
 	}
 	m, err := newChatModel(ctx, cfg)
 	if err != nil {
@@ -337,6 +334,7 @@ func (e *Engine) RunTurn(ctx context.Context, req *ai.TurnRequest) (*ai.TurnResu
 	if result != nil {
 		result.Usage.InputTokens += summaryUsage.InputTokens
 		result.Usage.OutputTokens += summaryUsage.OutputTokens
+		toolExposure.ContextCompactions += result.ToolExposure.ContextCompactions
 		result.ToolExposure = toolExposure
 		if managedSession && !terminalFailure {
 			result.EngineSession = engineSession
@@ -549,52 +547,53 @@ func (e *Engine) newDeepAgent(
 		}
 		handlers = append(handlers, middleware)
 	}
-	summaryTokens := e.cfg.SummarizeAfterTokens
-	if summaryTokens <= 0 {
-		summaryTokens = 24000
+	handlers = append(handlers, toolScope)
+	if e.cfg.ContextCompaction != "provider" {
+		summaryTokens := e.cfg.SummarizeAfterTokens
+		if summaryTokens <= 0 {
+			summaryTokens = 24000
+		}
+		summaryMessages := e.cfg.SummarizeAfterMessages
+		// 默认不按消息条数压缩，工具交换数量不能代替实际上下文用量。
+		// 摘要是受控上下文变换，不再进行业务推理或调用工具；使用 Eino 原生 ModelOptions，
+		// 避免把主 Agent 的高推理预算和工具选择带入压缩请求，造成长时间无可见进度。
+		summaryOptions := []einomodel.Option{einomodel.WithToolChoice(schema.ToolChoiceForbidden)}
+		if e.cfg.Provider == ProviderOpenAI && e.cfg.OpenAIAPI != "responses" {
+			// Chat Completions 的推理预算使用 max_completion_tokens，不能同时发送 max_tokens。
+			summaryOptions = append(summaryOptions, einomodel.WithMaxTokens(0), openai.WithMaxCompletionTokens(min(4096, e.outputTokenLimit())))
+		} else {
+			summaryOptions = append(summaryOptions, einomodel.WithMaxTokens(min(4096, e.outputTokenLimit())))
+		}
+		if e.cfg.Provider == ProviderOpenAI && e.cfg.OpenAIAPI == "responses" {
+			summaryOptions = append(summaryOptions, einomodel.WrapImplSpecificOptFn(func(o *responsesCallOptions) { o.DisableReasoning = true }))
+		}
+		summaryMiddleware, err := summarization.New(ctx, &summarization.Config{
+			Model:              model,
+			ModelOptions:       summaryOptions,
+			EmitInternalEvents: true,
+			UserInstruction:    agentSummaryInstruction,
+			Trigger: &summarization.TriggerCondition{
+				ContextTokens:   summaryTokens,
+				ContextMessages: summaryMessages,
+			},
+			Finalize: func(ctx context.Context, original []*schema.Message, summary *schema.Message) ([]*schema.Message, error) {
+				if toolExposure != nil {
+					toolExposure.ContextCompactions++
+				}
+				if summaryUsage != nil && summary != nil && summary.ResponseMeta != nil && summary.ResponseMeta.Usage != nil {
+					summaryUsage.InputTokens += int64(summary.ResponseMeta.Usage.PromptTokens)
+					summaryUsage.OutputTokens += int64(summary.ResponseMeta.Usage.CompletionTokens)
+				}
+				return finalizeAgentSummary(ctx, original, summary)
+			},
+		})
+		if err != nil {
+			return nil, nil, fmt.Errorf("构建 Eino 上下文摘要: %w", err)
+		}
+		// 必须先记住本轮 tool_search 的真实结果，再压缩消息；否则摘要会移除检索结果，
+		// 后置的作用域保护把刚加载的工具再次隐藏，导致 Agent 反复检索却无法执行下一步。
+		handlers = append(handlers, summaryMiddleware)
 	}
-	summaryMessages := e.cfg.SummarizeAfterMessages
-	if summaryMessages <= 0 {
-		summaryMessages = 80
-	}
-	// 摘要是受控上下文变换，不再进行业务推理或调用工具；使用 Eino 原生 ModelOptions，
-	// 避免把主 Agent 的高推理预算和工具选择带入压缩请求，造成长时间无可见进度。
-	summaryOptions := []einomodel.Option{einomodel.WithToolChoice(schema.ToolChoiceForbidden)}
-	if e.cfg.Provider == ProviderOpenAI && e.cfg.OpenAIAPI != "responses" {
-		// Chat Completions 的推理预算使用 max_completion_tokens，不能同时发送 max_tokens。
-		summaryOptions = append(summaryOptions, einomodel.WithMaxTokens(0), openai.WithMaxCompletionTokens(min(4096, e.outputTokenLimit())))
-	} else {
-		summaryOptions = append(summaryOptions, einomodel.WithMaxTokens(min(4096, e.outputTokenLimit())))
-	}
-	if e.cfg.Provider == ProviderOpenAI && e.cfg.OpenAIAPI == "responses" {
-		summaryOptions = append(summaryOptions, einomodel.WrapImplSpecificOptFn(func(o *responsesCallOptions) { o.DisableReasoning = true }))
-	}
-	summaryMiddleware, err := summarization.New(ctx, &summarization.Config{
-		Model:              model,
-		ModelOptions:       summaryOptions,
-		EmitInternalEvents: true,
-		UserInstruction:    agentSummaryInstruction,
-		Trigger: &summarization.TriggerCondition{
-			ContextTokens:   summaryTokens,
-			ContextMessages: summaryMessages,
-		},
-		Finalize: func(ctx context.Context, original []*schema.Message, summary *schema.Message) ([]*schema.Message, error) {
-			if toolExposure != nil {
-				toolExposure.ContextCompactions++
-			}
-			if summaryUsage != nil && summary != nil && summary.ResponseMeta != nil && summary.ResponseMeta.Usage != nil {
-				summaryUsage.InputTokens += int64(summary.ResponseMeta.Usage.PromptTokens)
-				summaryUsage.OutputTokens += int64(summary.ResponseMeta.Usage.CompletionTokens)
-			}
-			return finalizeAgentSummary(ctx, original, summary)
-		},
-	})
-	if err != nil {
-		return nil, nil, fmt.Errorf("构建 Eino 上下文摘要: %w", err)
-	}
-	// 必须先记住本轮 tool_search 的真实结果，再压缩消息；否则摘要会移除检索结果，
-	// 后置的作用域保护把刚加载的工具再次隐藏，导致 Agent 反复检索却无法执行下一步。
-	handlers = append(handlers, toolScope, summaryMiddleware)
 
 	maxIterations := deepMaxIterations(e.maxTurns, req.MaxIterations)
 	name := e.cfg.AgentName
@@ -1015,6 +1014,12 @@ func collect(iter *adk.AsyncIterator[*adk.AgentEvent], onEvent func(ai.Step), on
 		}
 		switch mo.Role {
 		case schema.Assistant:
+			if count := responsesCompactionCount(msg); count > 0 {
+				res.ToolExposure.ContextCompactions += count
+				if onEvent != nil {
+					onEvent(ai.Step{Kind: ai.StepStatus, Result: "服务端已整理本轮工具上下文，保留任务目标和执行依据"})
+				}
+			}
 			if u := msg.ResponseMeta; u != nil && u.Usage != nil {
 				res.Usage.InputTokens += int64(u.Usage.PromptTokens)
 				res.Usage.OutputTokens += int64(u.Usage.CompletionTokens)

@@ -22,24 +22,26 @@ const (
 // Config belongs to the runtime, not to a host's database or secret loader.
 // Credentials must be resolved explicitly by the host before construction.
 type Config struct {
-	AgentName              string  `json:"agent_name,omitempty"`
-	AgentDescription       string  `json:"agent_description,omitempty"`
-	EnableWriteTodos       bool    `json:"enable_write_todos,omitempty"`
-	EnableGeneralSubAgent  bool    `json:"enable_general_subagent,omitempty"`
-	Provider               string  `json:"provider"`
-	OpenAIAPI              string  `json:"openai_api,omitempty"`
-	APIKey                 string  `json:"api_key"`
-	BaseURL                string  `json:"base_url"`
-	Model                  string  `json:"model"`
-	MaxTokens              int     `json:"max_tokens"`
-	MaxCompletionTokens    int     `json:"max_completion_tokens"`
-	ReasoningEffort        string  `json:"reasoning_effort"`
-	ReasoningSummary       string  `json:"reasoning_summary,omitempty"`
-	Temperature            float32 `json:"temperature"`
-	TimeoutMS              int     `json:"timeout_ms"`
-	MaxTurns               int     `json:"max_turns"`
-	SummarizeAfterTokens   int     `json:"summarize_after_tokens"`
-	SummarizeAfterMessages int     `json:"summarize_after_messages"`
+	AgentName             string  `json:"agent_name,omitempty"`
+	AgentDescription      string  `json:"agent_description,omitempty"`
+	EnableWriteTodos      bool    `json:"enable_write_todos,omitempty"`
+	EnableGeneralSubAgent bool    `json:"enable_general_subagent,omitempty"`
+	Provider              string  `json:"provider"`
+	OpenAIAPI             string  `json:"openai_api,omitempty"`
+	APIKey                string  `json:"api_key"`
+	BaseURL               string  `json:"base_url"`
+	Model                 string  `json:"model"`
+	MaxTokens             int     `json:"max_tokens"`
+	MaxCompletionTokens   int     `json:"max_completion_tokens"`
+	ReasoningEffort       string  `json:"reasoning_effort"`
+	ReasoningSummary      string  `json:"reasoning_summary,omitempty"`
+	Temperature           float32 `json:"temperature"`
+	TimeoutMS             int     `json:"timeout_ms"`
+	MaxTurns              int     `json:"max_turns"`
+	// ContextCompaction=provider 使用 Responses 原生压缩；未指定阈值时交由服务端决定。
+	ContextCompaction      string `json:"context_compaction,omitempty"`
+	SummarizeAfterTokens   int    `json:"summarize_after_tokens"`
+	SummarizeAfterMessages int    `json:"summarize_after_messages"`
 	// SessionNamespace must distinguish hosts sharing one runtime store.
 	SessionNamespace string `json:"session_namespace,omitempty"`
 	// ValidateSessionID optionally narrows IDs accepted for durable sessions.
@@ -67,6 +69,15 @@ func NewChatModel(ctx context.Context, cfg Config) (einomodel.ToolCallingChatMod
 }
 
 func validateConfig(cfg Config) error {
+	if cfg.ContextCompaction != "" && cfg.ContextCompaction != "eino" && cfg.ContextCompaction != "provider" {
+		return errors.New("unsupported context compaction mode")
+	}
+	if cfg.ContextCompaction == "provider" && (cfg.Provider != ProviderOpenAI || cfg.OpenAIAPI != "responses" || cfg.SummarizeAfterMessages != 0) {
+		return errors.New("provider compaction requires Responses and no local message trigger")
+	}
+	if cfg.SummarizeAfterTokens < 0 || cfg.SummarizeAfterMessages < 0 {
+		return errors.New("compaction thresholds must be nonnegative")
+	}
 	if cfg.ReasoningSummary != "" && cfg.ReasoningSummary != "auto" && cfg.ReasoningSummary != "concise" && cfg.ReasoningSummary != "detailed" {
 		return errors.New("unsupported reasoning summary")
 	}

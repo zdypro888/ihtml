@@ -74,6 +74,13 @@ func (m *responsesChatModel) request(input []*schema.Message, opts ...einomodel.
 		"model": model, "input": items, "store": false,
 		"include": []string{"reasoning.encrypted_content"},
 	}
+	if m.cfg.ContextCompaction == "provider" {
+		entry := map[string]any{"type": "compaction"}
+		if m.cfg.SummarizeAfterTokens > 0 {
+			entry["compact_threshold"] = m.cfg.SummarizeAfterTokens
+		}
+		body["context_management"] = []any{entry}
+	}
 	budget := m.cfg.MaxCompletionTokens
 	if budget <= 0 {
 		budget = m.cfg.MaxTokens
@@ -177,6 +184,18 @@ func responsesInput(messages []*schema.Message) ([]any, error) {
 					switch decoded["type"] {
 					case "message":
 						hasMessage = true
+					case "compaction":
+						if encrypted, ok := decoded["encrypted_content"].(string); !ok || encrypted == "" {
+							return nil, errors.New("incomplete Responses compaction item")
+						}
+						// 仅保留最新压缩项之前的当前系统约束；旧工具正文已被官方不透明压缩项承接。
+						retained := items[:0]
+						for _, previous := range items {
+							if message, ok := previous.(map[string]any); ok && (fmt.Sprint(message["role"]) == "system" || fmt.Sprint(message["role"]) == "developer") {
+								retained = append(retained, previous)
+							}
+						}
+						items = retained
 					case "reasoning":
 					case "function_call":
 						id, _ := decoded["call_id"].(string)
@@ -323,6 +342,13 @@ func responsesMessage(raw string) (*schema.Message, error) {
 			index := len(msg.ToolCalls)
 			msg.ToolCalls = append(msg.ToolCalls, schema.ToolCall{Index: &index, ID: item.CallID, Type: "function",
 				Function: schema.FunctionCall{Name: item.Name, Arguments: item.Arguments}})
+		case "compaction":
+			var compact struct {
+				Encrypted string `json:"encrypted_content"`
+			}
+			if json.Unmarshal(envelope.Output[i], &compact) != nil || compact.Encrypted == "" {
+				return nil, errors.New("responses returned an incomplete compaction item")
+			}
 		case "reasoning":
 			for _, summary := range item.Summary {
 				msg.ReasoningContent += summary.Text
@@ -481,4 +507,29 @@ func (m *responsesChatModel) Stream(ctx context.Context, input []*schema.Message
 		}
 	}()
 	return reader, nil
+}
+
+// 压缩项只留在模型专用回放状态，不把不透明内容送到 UI、摘要文本或业务工具。
+func responsesCompactionCount(message *schema.Message) int {
+	if message == nil {
+		return 0
+	}
+	raw, err := json.Marshal(message.Extra[responsesItemsKey])
+	if err != nil {
+		return 0
+	}
+	var items []string
+	if json.Unmarshal(raw, &items) != nil {
+		return 0
+	}
+	count := 0
+	for _, item := range items {
+		var value struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal([]byte(item), &value) == nil && value.Type == "compaction" {
+			count++
+		}
+	}
+	return count
 }

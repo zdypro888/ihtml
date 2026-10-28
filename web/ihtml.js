@@ -5180,27 +5180,63 @@
     }
 
     // 可选历史 UI 只消费宿主回调；持久化、身份/权限及删除确认始终由宿主拥有。
-    function createChatHistory(head, log, foot) {
-      if (!opts.history) return null;
-      const source = opts.history;
-      const entry = el('button', 'ihtml-chat-history-entry', T('history_title'));
+    function createChatHistory(head, log, foot, source = opts.history, kind = 'history') {
+      if (!source) return null;
+      const entry = el('button', 'ihtml-chat-history-entry', (source.title || T('history_title')));
       entry.type = 'button'; entry.setAttribute('aria-expanded', 'false'); entry.hidden = source.entry === false;
       head.appendChild(entry);
-      const pane = el('section', 'ihtml-chat-history'); pane.hidden = true; pane.setAttribute('aria-label', T('history_title'));
+      const pane = el('section', 'ihtml-chat-history'); pane.hidden = true; pane.setAttribute('aria-label', (source.title || T('history_title')));
       pane.tabIndex = -1;
       const heading = el('div', 'ihtml-chat-history-head');
-      const title = el('strong', '', T('history_title'));
+      const title = el('strong', '', (source.title || T('history_title')));
       const back = el('button', '', T('history_back')); back.type = 'button'; heading.append(title, back);
       const status = el('div', 'ihtml-chat-history-status'); status.setAttribute('role', 'status');
       const list = el('div', 'ihtml-chat-history-list');
       const retry = el('button', 'ihtml-chat-history-retry', T('history_retry')); retry.type = 'button'; retry.hidden = true;
       const more = el('button', 'ihtml-chat-history-more', T('history_more')); more.type = 'button'; more.hidden = true;
       pane.appendChild(heading);
+      let refreshPushState=()=>{};
+      if (source.push) {
+        const push = source.push;
+ const subscriptionIds=new Set(push.subscriptionIds||[]);
+ const subscriptionID=async endpoint=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(endpoint))),n=>n.toString(16).padStart(2,'0')).join('');
+        const button = el('button','ihtml-chat-push-enable',T('notifications_push_enable'));button.type='button';
+        const supported = typeof Notification!=='undefined' && 'serviceWorker' in navigator && typeof PushManager!=='undefined' && isSecureContext;
+        button.disabled=!supported;
+        if (!supported) button.textContent=T('notifications_push_unsupported');
+        let registration=null,enabled=false;
+        button.onclick=async()=>{
+          if (button.disabled) return;button.disabled=true;
+          try {
+            if (!enabled && await Notification.requestPermission()!=='granted') throw new Error('permission');
+            const worker=new URL('ihtml-push-sw.js',baseURL);if(worker.origin!==location.origin)throw new Error('origin');
+            registration=registration||await navigator.serviceWorker.register(worker.href,{scope:new URL('./',worker).pathname,updateViaCache:'none'});
+            if (!registration.active) await new Promise((resolve,reject)=>{const instance=registration.installing||registration.waiting;if(!instance){reject(new Error('worker'));return;}const timer=setTimeout(()=>reject(new Error('worker timeout')),15000);instance.addEventListener('statechange',()=>{if(instance.state==='activated'){clearTimeout(timer);resolve();}});});
+            let subscription=await registration.pushManager.getSubscription();
+            if (enabled) {if(subscription){await push.remove(subscription.toJSON());await subscription.unsubscribe();subscriptionIds.delete(await subscriptionID(subscription.endpoint));}enabled=false;}
+            else {
+              if(!subscription){const encoded=String(push.publicKey||'').replace(/-/g,'+').replace(/_/g,'/');const key=Uint8Array.from(atob(encoded),c=>c.charCodeAt(0));subscription=await registration.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:key});}
+              const saved=await push.subscribe(subscription.toJSON());if(saved?.enabled!==true)throw new Error('not saved');subscriptionIds.add(await subscriptionID(subscription.endpoint));enabled=true;
+            }
+            button.textContent=T(enabled?'notifications_push_disable':'notifications_push_enable');
+          }catch{status.textContent=T('notifications_push_error');}finally{button.disabled=false;}
+        };
+        refreshPushState=async()=>{
+          if(!supported||Notification.permission!=='granted')return;
+          try{const worker=new URL('ihtml-push-sw.js',baseURL);const found=await navigator.serviceWorker.getRegistration(new URL('./',worker).href);
+            if(!found?.active||new URL(found.active.scriptURL).pathname!==worker.pathname)return;
+            registration=found;const current=await found.pushManager.getSubscription();
+            if(current){const id=await subscriptionID(current.endpoint);enabled=subscriptionIds.has(id);button.textContent=T(enabled?'notifications_push_disable':'notifications_push_enable');}
+          }catch{}
+        };
+        pane.appendChild(button);
+      }
+
       if (source.description) pane.appendChild(el('p', 'ihtml-chat-history-description', source.description));
       pane.append(status, list, retry, more); log.before(pane);
       let opened = false, generation = 0, pending = null, mutating = false, cursor = '', items = [];
       const uncertain = new Set();
-      const busy = () => chat.active || chat.sending || !!chat.confirmationBusy || authRefreshing || destroyed;
+      const busy = () => (!chat.modelInfo?.background_execution && chat.active) || chat.sending || !!chat.confirmationBusy || authRefreshing || destroyed;
       const notify = () => { if (typeof source.onOpenChange === 'function') { try { source.onOpenChange(opened); } catch { /* presentation only */ } } };
       const invalidate = () => { generation++; if (pending) pending.abort(); pending = null; mutating = false; };
       const sync = () => {
@@ -5247,7 +5283,9 @@
             return {id: item.id, title: item.title, subtitle: item.subtitle || '', selected: item.selected === true, removable: item.removable !== false};
           });
           const seen = new Set(); items = (append ? items : []).concat(rows).filter(item => { if (seen.has(item.id)) return false; seen.add(item.id); return true; });
-          cursor = page.cursor || ''; status.textContent = items.length ? '' : T('chat_history_empty'); render();
+          cursor = page.cursor || ''; status.textContent = items.length ? '' : (source.emptyMessage || T('chat_history_empty'));
+          if (typeof source.onUnreadChange==='function') source.onUnreadChange(Math.max(0,Number(page.unread)||0));
+          render();
         } catch (error) { failure(error, id, abort); }
         finally { if (id === generation) { pending = null; abort.abort(); sync(); } }
       }
@@ -5282,11 +5320,20 @@
       function open() {
         if (destroyed || authRefreshing) return;
         if (opened) return;
+        if (kind==='notifications') chat.history?.close(false); else chat.notifications?.close(false);
         opened = true; pane.hidden = false; log.hidden = true; chat.dom.latestBtn.hidden = true;
-        entry.setAttribute('aria-expanded', 'true'); notify(); pane.focus({preventScroll: true}); void load();
+        entry.setAttribute('aria-expanded', 'true'); notify(); pane.focus({preventScroll: true}); void refreshPushState(); void load();
       }
-      addDisposer(reset);
-      return {open, close, reset, sync, refresh: () => load(), get opened() { return opened; }, get mutating() { return mutating; }};
+      let summaryAbort=null;
+      const refreshSummary=async()=>{
+        if(opened||summaryAbort||destroyed||authRefreshing||document.visibilityState==='hidden')return;
+        summaryAbort=new AbortController();const summaryGeneration=generation;
+        try{const page=await boundedChatHook(()=>source.list({cursor:'',signal:summaryAbort.signal}),summaryAbort.signal,30000);if(!destroyed&&!opened&&summaryGeneration===generation&&typeof source.onUnreadChange==='function')source.onUnreadChange(Math.max(0,Number(page?.unread)||0));}catch{}finally{summaryAbort?.abort();summaryAbort=null;}
+      };
+      const poll = kind==='notifications'?setInterval(refreshSummary,30000):0;
+      if(poll)void refreshSummary();
+      addDisposer(()=>{if(poll)clearInterval(poll);summaryAbort?.abort();reset();});
+      return {open, close, reset, sync, refresh: () => opened?load():refreshSummary(), get opened() { return opened; }, get mutating() { return mutating; }};
     }
 
     const chat = {
@@ -5300,6 +5347,8 @@
       reconnectTimer: 0,
       reconnectAttempt: 0,
       reconnectWanted: false,
+      backgroundSession: '',
+      backgroundSeq: 0,
       connectionNotice: null,
       active: false,
       sending: false,
@@ -5540,6 +5589,7 @@
         document.addEventListener('visibilitychange', recoverConnection);
         addDisposer(() => {window.removeEventListener('online', recoverConnection); document.removeEventListener('visibilitychange', recoverConnection);});
         this.history = createChatHistory(head, log, foot);
+        this.notifications = opts.notifications ? createChatHistory(head,log,foot,opts.notifications,'notifications') : null;
         // 观察真正渲染后的消息高度；覆盖延迟 Markdown、图片加载、折叠及宿主视口变化。
         if (typeof ResizeObserver === 'function') {
           const resize = new ResizeObserver(() => {
@@ -5761,6 +5811,7 @@
           if (seq !== this.modelLoadSeq || destroyed) throw staleRequestError();
           info = info && typeof info === 'object' ? info : { model_ready: false, models: [] };
           this.modelInfo = info;
+        if (info?.background_execution) queueMicrotask(()=>{if(!destroyed&&this.enabled&&!authRefreshing)void this.ensureWS().catch(()=>{});});
           const models = (Array.isArray(info.models) ? info.models : []).map((model) => String(model)).slice(0, 256);
           this.agentModes = chatAgentCore.normalizeModes(info.agent_modes);
           this.deepApprovalResume = String(info.deep_approval_resume || '');
@@ -5917,7 +5968,10 @@
               // 短暂握手成功后再次断开也保留退避；稳定连接才恢复首次重试间隔。
               if (openedAt && Date.now() - openedAt >= 10000) this.reconnectAttempt = 0;
               this.connectionNote(T(denied ? 'chat_connection_denied' : incompatible ? 'chat_connection_incompatible' : 'chat_disconnected'));
-              if (this.active && this.turn && !this.turn.done) this.turnError(T('chat_turn_interrupted'));
+              if (this.active && this.turn && !this.turn.done) {
+                if (this.modelInfo?.background_execution) this.appendStatus(T('chat_background_running'),false,this.turn);
+                else this.turnError(T('chat_turn_interrupted'));
+              }
               else this.setActive(false, false);
               this.scheduleReconnect();
             };
@@ -5959,6 +6013,7 @@
         // 宿主可能在原生删除回执后主动清屏；公共 clear 保持可撤销本实例显示的语义。
         if (this.history?.mutating && !hostReset) return;
         this.history?.reset();
+        this.notifications?.reset();
         this.sendGeneration++;
         this.sending = false;
         if (this.contextAbort) this.contextAbort.abort();
@@ -6032,6 +6087,7 @@
       },
       resetForAuth() {
         this.history?.reset();
+        this.notifications?.reset();
         this.sendGeneration++;
         this.modelLoadSeq++;
         this.sending = false;
@@ -6248,6 +6304,7 @@
       async send(value) {
         if (destroyed || !this.enabled || authRefreshing || !this.dom || this.active || this.sending || this.confirmationBusy || this.history?.mutating) return false;
         this.history?.close(false);
+        this.notifications?.close(false);
         if (value !== undefined) {
           if (typeof value !== 'string') throw new TypeError('ihtml.chat.send: text must be a string');
           this.dom.input.value = value;
@@ -6318,6 +6375,7 @@
         }
       },
       cancel() {
+        if (this.modelInfo?.background_execution) {void this.stopBackground();return;}
         this.sendGeneration++;
         this.sending = false;
         if (this.contextAbort) this.contextAbort.abort();
@@ -6332,6 +6390,20 @@
         if (this.dom) this.syncChatControls();
       },
 
+      async stopBackground() {
+        if (destroyed || !this.active || !this.turn || this.turn.done) return;
+        const turn=this.turn;
+        this.appendStatus(T('chat_background_stopping'),false,turn);
+        try {
+          const ws=await this.ensureWS();
+          if (destroyed || this.turn!==turn || turn.done) return;
+          ws.send(JSON.stringify({type:'cancel'}));
+          this.finishCancelled(turn);
+        } catch {
+          this.appendStatus(T('chat_background_stop_unsent'),true,turn);
+          this.syncChatControls();
+        }
+      },
       beginTurn(agentMode) {
         const card = el('article', 'ihtml-msg assistant');
         card.appendChild(el('div', 'author', 'AI'));
@@ -7288,10 +7360,11 @@
         if (!runID) return this.turn;
         let t = this.turnsByRun.get(runID);
         if (!t && ev.type === 'turn_start') {
-          if (ev.restored_approval) {
+          if (ev.restored_approval || ev.background_replay) {
             const foreground = this.turn;
             t = this.beginTurn('deep');
-            this.turn = foreground;
+            this.turn = foreground && !foreground.done ? foreground : t;
+            if (ev.background_replay && this.turn===t) this.setActive(true);
             t.runSeq.set(runID, 0);
             this.turnsByRun.set(runID, t);
           }
@@ -7317,6 +7390,19 @@
       },
       onEvent(ev) {
         if (!ev || typeof ev !== 'object' || typeof ev.type !== 'string') return;
+        if (ev.background_session && Number(ev.background_seq)>0) {
+          if (this.backgroundSession!==ev.background_session) {this.backgroundSession=ev.background_session;this.backgroundSeq=0;}
+          if (Number(ev.background_seq)<=this.backgroundSeq) return;
+          this.backgroundSeq=Number(ev.background_seq);
+        }
+        if (ev.type==='background_user_message') {
+          const existing=(opts.initialMessages||[]).some(message=>message.role==='user'&&message.content===ev.message);
+          if (!existing && ev.background_replay && typeof ev.message==='string') {
+            const row=el('article','ihtml-msg user');row.append(el('div','author',T('author_user')),el('div','content',ev.message));
+            this.log.appendChild(row);
+          }
+          return;
+        }
         // inspect_request 是服务端的带外请求, 不依赖轮次归属与序号去重:
         // 即使本地轮次已收尾也应答, 否则服务端工具只能等到超时。
         if (ev.type === 'inspect_request') { this.sendInspectResult(ev); this.notifyEvent(ev); return; }
@@ -7334,6 +7420,7 @@
           case 'assistant_thinking': this.appendThinking(ev.thinking || '', ev, t); break;
           case 'assistant_reset': this.resetAssistant(ev, t); break;
           case 'assistant_delta': this.appendDelta(ev.delta || '', ev.content_format, t); break;
+          case 'assistant_snapshot': this.resetAssistant(ev,t);this.appendDelta(ev.delta||'',ev.content_format,t);break;
           case 'assistant_plan':
           case 'assistant_agent':
           case 'assistant_budget': break;
@@ -7351,8 +7438,13 @@
             this.appendStatus(ev.status || T('tool_pending'), false, t);
             this.updateProcess(t);
             break;
-          case 'assistant_done': this.finishTurn(ev, t); break;
-          case 'turn_error': this.turnError(ev.error || 'error', t); break;
+          case 'assistant_done': this.finishTurn(ev, t);
+            if(ev.background_replay && (opts.initialMessages||[]).some(message=>message.role==='assistant'&&message.content===ev.message)) {
+              // 产品历史已有正文，回放只补工具回执/待确认卡，避免同一答复显示两遍。
+              t.answer.hidden=true;if(!t.toolCount&&!t.pendingCount)t.card.remove();
+            }
+            break;
+          case 'turn_error': if(ev.finish_reason==='cancelled')this.finishCancelled(t);else this.turnError(ev.error || 'error', t); break;
         }
         this.notifyEvent(ev);
       },
@@ -7841,6 +7933,11 @@
         },
         get enabled() { return !destroyed && chat.enabled; },
         get busy() { return !destroyed && (chat.active || chat.sending || !!chat.confirmationBusy); },
+        notifications: {
+          open:()=>{if(chat.notifications){chat.history?.close(false);chat.notifications.open();}},
+          close:()=>chat.notifications?.close(false),
+          refresh:()=>chat.notifications?.refresh(),
+        },
         get readOnly() { return readOnly; },
       },
       destroy() {

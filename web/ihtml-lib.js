@@ -7,7 +7,7 @@
   const I18N = {
     zh: {
       history_title: '历史对话', history_back: '返回对话', history_loading: '正在读取…', chat_history_empty: '暂无历史对话', history_more: '更早的对话', history_retry: '重新加载', history_delete: '删除对话', history_error: '历史操作未完成，请重新核对记录。', history_unknown: '删除结果未确认，请到原记录核对，勿重复提交。',
-      chat_entry: 'AI 助手', chat_title: 'AI 助手', send: '发送', stop: '停止',
+      chat_entry: 'AI 助手', notifications_push_enable:'开启系统推送', notifications_push_disable:'关闭系统推送', notifications_push_unsupported:'此浏览器暂不支持系统推送；iPhone 请从主屏幕打开应用。', notifications_push_error:'系统推送尚未设置成功，请检查通知权限后重试。', chat_title: 'AI 助手', send: '发送', stop: '停止',
       chat_latest: '回到最新', new_session: '新对话', close: '关闭', settings: '页面设置', menu: '菜单', dialog: '对话框', page_actions: '页面操作', conversation: '与 AI 助手的对话',
       refresh_models: '刷新模型', model_placeholder: '选择已加载模型, 或直接输入模型名',
       agent_mode_label: '执行模式', agent_fast: 'Fast', agent_deep: 'Deep',
@@ -23,7 +23,7 @@
       composer_placeholder: '输入问题…', composer_hint: 'Enter 发送 · Shift+Enter 换行',
       welcome: '你可以直接提问、分析业务数据，也可以明确要求创建或修改页面。回答会以合适的 HTML 结构展示在这里。',
       session_reset: '新会话已开始。之前的对话上下文已清空, 页面 Item 不受影响。',
-      chat_reconnected: '连接已恢复，未重复提交原请求或操作。', chat_disconnected: '连接已断开，网络可用时将自动重连。', chat_connection_incompatible: '连接协议或响应异常，自动重连已停止，请刷新页面后核对原任务。', chat_connection_denied: '连接授权已失效，请重新登录后继续。', chat_turn_interrupted: '连接中断，本轮尚未完成；恢复连接后请继续核对原任务。',
+      chat_background_running: '连接暂时断开，后台仍在继续；恢复后会接回原进度。', chat_background_stopping: '正在发送停止请求…', chat_background_stop_unsent: '停止请求未送达，后台可能仍在执行；请恢复网络后重试停止。', chat_reconnected: '连接已恢复，未重复提交原请求或操作。', chat_disconnected: '连接已断开，网络可用时将自动重连。', chat_connection_incompatible: '连接协议或响应异常，自动重连已停止，请刷新页面后核对原任务。', chat_connection_denied: '连接授权已失效，请重新登录后继续。', chat_turn_interrupted: '连接中断，本轮尚未完成；恢复连接后请继续核对原任务。',
       process: '处理记录', analyzing: '正在处理', thinking: '模型思考', done: '已完成', turn_stopped: '已请求停止', turn_failed: '处理失败',
       turn_stop_unknown: '已请求停止当前轮次。已开始的操作可能仍在收尾，请核对最终结果。',
       tool_running: '执行中', tool_pending: '待确认', tool_success: '完成', tool_accepted: '已接受', tool_error: '失败', tool_unknown: '结果未知', tools_unknown: '{n} 个操作待核对', execution_unknown: '未收到执行结果，操作可能已在服务端生效。请勿重复执行，先核对操作记录。', tool_cancelled: '已取消', tool_cancelling: '撤销中',
@@ -129,7 +129,7 @@
     },
     en: {
       history_title: 'History', history_back: 'Back to chat', history_loading: 'Loading…', chat_history_empty: 'No saved conversations', history_more: 'Earlier conversations', history_retry: 'Reload', history_delete: 'Delete conversation', history_error: 'History request did not complete. Check the original record.', history_unknown: 'Deletion is unconfirmed. Check the original record; do not resubmit.',
-      chat_entry: 'AI assistant', chat_title: 'AI assistant', send: 'Send', stop: 'Stop',
+      chat_entry: 'AI assistant', notifications_push_enable:'Enable system notifications', notifications_push_disable:'Disable system notifications', notifications_push_unsupported:'System notifications unavailable; on iPhone use the installed Home Screen app.', notifications_push_error:'Push setup failed. Check notification permission and retry.', chat_title: 'AI assistant', send: 'Send', stop: 'Stop',
       chat_latest: 'Jump to latest', new_session: 'New chat', close: 'Close', settings: 'Page settings', menu: 'Menu', dialog: 'Dialog', page_actions: 'Page actions', conversation: 'Conversation with the AI assistant',
       refresh_models: 'Refresh', model_placeholder: 'Pick a loaded model or type a name',
       agent_mode_label: 'Execution mode', agent_fast: 'Fast', agent_deep: 'Deep',
@@ -145,7 +145,7 @@
       composer_placeholder: 'Ask a question…', composer_hint: 'Enter to send · Shift+Enter for a new line',
       welcome: 'Ask a question, analyze business data, or explicitly ask me to create or change the page. Answers appear here using an appropriate HTML structure.',
       session_reset: 'New session started. Conversation context cleared; page items are unaffected.',
-      chat_reconnected: 'Connection restored; no request or operation was resubmitted.', chat_disconnected: 'Disconnected. Reconnecting automatically when the network is available.', chat_connection_incompatible: 'Connection protocol or response error. Automatic reconnect stopped; refresh and verify the original task.', chat_connection_denied: 'Connection authorization expired. Sign in again to continue.', chat_turn_interrupted: 'Connection interrupted; this turn is incomplete. Verify the original task after reconnecting.',
+      chat_background_running: 'Connection lost; work continues in the background and progress will resume.', chat_background_stopping: 'Sending stop request…', chat_background_stop_unsent: 'Stop request was not delivered; work may still be running. Reconnect and try stopping again.', chat_reconnected: 'Connection restored; no request or operation was resubmitted.', chat_disconnected: 'Disconnected. Reconnecting automatically when the network is available.', chat_connection_incompatible: 'Connection protocol or response error. Automatic reconnect stopped; refresh and verify the original task.', chat_connection_denied: 'Connection authorization expired. Sign in again to continue.', chat_turn_interrupted: 'Connection interrupted; this turn is incomplete. Verify the original task after reconnecting.',
       process: 'Work log', analyzing: 'Working', thinking: 'Model reasoning', done: 'Done', turn_stopped: 'Stop requested', turn_failed: 'Failed',
       turn_stop_unknown: 'Stop was requested. An operation that already started may still be finishing; verify its final result.',
       tool_running: 'Running', tool_pending: 'Confirm', tool_success: 'Done', tool_accepted: 'Accepted', tool_error: 'Failed', tool_unknown: 'Outcome unknown', tools_unknown: '{n} operations need verification', execution_unknown: 'No execution result was received. The operation may have committed. Do not repeat it; check the records first.', tool_cancelled: 'Cancelled', tool_cancelling: 'Cancelling',

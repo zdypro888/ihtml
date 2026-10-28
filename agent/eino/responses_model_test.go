@@ -424,3 +424,106 @@ func TestResponsesReaderCloseCancelsUpstream(t *testing.T) {
 		t.Fatal("reader close left upstream running")
 	}
 }
+
+func responseCompaction(id string) map[string]any {
+	return map[string]any{"type": "compaction", "id": id, "encrypted_content": "opaque-" + id}
+}
+
+// 按官方 Responses 协议交回不透明压缩项；保留当前系统约束，不把旧工具正文再次塞回模型。
+func TestProviderCompactionDefaultsAndOpaqueReplay(t *testing.T) {
+	var bodies []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		bodies = append(bodies, body)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(responseFixture("completed", responseCompaction("first"), responseText("done"), responseCompaction("latest")))
+	}))
+	defer server.Close()
+	model := newResponsesChatModel(Config{Provider: ProviderOpenAI, OpenAIAPI: "responses", APIKey: "dummy", BaseURL: server.URL, Model: "gpt-6.1-sol", ContextCompaction: "provider"})
+	message, err := model.Generate(t.Context(), []*schema.Message{schema.UserMessage("original")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if responsesCompactionCount(message) != 2 {
+		t.Fatal("compaction evidence lost")
+	}
+	raw, _ := json.Marshal(message)
+	var restored schema.Message
+	_ = json.Unmarshal(raw, &restored)
+	_, err = model.Generate(t.Context(), []*schema.Message{schema.SystemMessage("current trusted constraints"), schema.UserMessage("old bulky tool input"), &restored, schema.UserMessage("continue")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	management := bodies[0]["context_management"].([]any)[0].(map[string]any)
+	if management["type"] != "compaction" {
+		t.Fatal(management)
+	}
+	if _, exists := management["compact_threshold"]; exists {
+		t.Fatal("invented a provider default threshold")
+	}
+	encoded, _ := json.Marshal(bodies[1]["input"])
+	text := string(encoded)
+	if strings.Contains(text, "old bulky tool input") || strings.Contains(text, "opaque-first") || !strings.Contains(text, "opaque-latest") || !strings.Contains(text, "current trusted constraints") {
+		t.Fatal("incorrect stateless compaction replay", text)
+	}
+}
+
+func TestProviderCompactionKeepsNewCallsAndNeverExposesOpaqueContentAsText(t *testing.T) {
+	raw, _ := json.Marshal(responseFixture("completed", responseCompaction("plan"), responseCall("lookup", `{}`)))
+	message, err := responsesMessage(string(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if message.Content != "" || len(message.ToolCalls) != 1 {
+		t.Fatal("opaque data treated as text or call lost")
+	}
+	items, err := responsesInput([]*schema.Message{schema.UserMessage("old"), message, schema.ToolMessage("verified", "call_test")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 3 {
+		t.Fatal("compaction/call/output not preserved", len(items))
+	}
+	malformed, _ := json.Marshal(responseFixture("completed", map[string]any{"type": "compaction"}))
+	if _, err := responsesMessage(string(malformed)); err == nil {
+		t.Fatal("incomplete opaque item accepted")
+	}
+}
+
+// 走正式 New 构造器，防止旧的 Eino 默认值被错误注入 provider compact_threshold。
+func TestProviderCompactionProductionConstructorAndStreamingToolLoop(t *testing.T) {
+	requests := 0
+	executed := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if json.NewDecoder(r.Body).Decode(&body) != nil {
+			t.Error("invalid request")
+			return
+		}
+		requests++
+		management := body["context_management"].([]any)[0].(map[string]any)
+		if _, exists := management["compact_threshold"]; exists {
+			t.Error("production constructor injected a local threshold")
+		}
+		compact := map[string]any{"type": "compaction", "id": "compact_fixture", "encrypted_content": "opaque_compact_fixture"}
+		if requests == 1 {
+			writeResponseSSE(w, "response.completed", responseFixture("completed", compact, responseCall("lookup", `{}`)))
+			return
+		}
+		encoded, _ := json.Marshal(body["input"])
+		if !strings.Contains(string(encoded), "opaque_compact_fixture") || !strings.Contains(string(encoded), "function_call_output") {
+			t.Error("compaction/tool receipt lost in streamed continuation")
+		}
+		writeResponseSSE(w, "response.completed", responseFixture("completed", responseText("verification-42")))
+	}))
+	defer server.Close()
+	engine, err := New(t.Context(), Config{Provider: ProviderOpenAI, OpenAIAPI: "responses", BaseURL: server.URL, APIKey: "dummy", Model: "gpt-6.1-sol", ContextCompaction: "provider"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := engine.RunTurn(t.Context(), &ai.TurnRequest{System: "Use lookup once.", UserText: "lookup", Tools: []ai.Tool{{Name: "lookup", Description: "test lookup", LoadMode: ai.ToolLoadImmediate, Effect: ai.ToolEffectRead, InputSchema: map[string]any{"type": "object", "properties": map[string]any{}}, Handler: func(context.Context, json.RawMessage) (string, error) { executed++; return "verification-42", nil }}}})
+	if err != nil || requests != 2 || executed != 1 || result == nil || result.Text != "verification-42" {
+		t.Fatal("provider production tool loop failed", requests, executed, err)
+	}
+}

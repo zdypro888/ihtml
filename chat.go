@@ -47,6 +47,8 @@ const (
 	ChatStreamAssistantStatus   = "assistant_status"
 	ChatStreamAssistantThinking = "assistant_thinking"
 	ChatStreamAssistantDelta    = "assistant_delta"
+	// ChatStreamAssistantSnapshot 是后台重连的完整文本快照，替换该轮已有文本，不是追加。
+	ChatStreamAssistantSnapshot = "assistant_snapshot"
 	// ChatStreamAssistantReset discards assistant deltas already projected for
 	// the current turn. The built-in backend uses it before a streaming retry;
 	// legacy clients may ignore it because assistant_done remains authoritative.
@@ -241,12 +243,16 @@ type ChatTurnBudget struct {
 // turn_error。
 type ChatStreamEvent struct {
 	// RestoredApproval marks a server-restored pending run, not client history.
-	RestoredApproval bool   `json:"restored_approval,omitempty"`
-	Type             string `json:"type"`
-	RunID            string `json:"run_id,omitempty"`
-	TurnID           string `json:"turn_id,omitempty"`
-	Seq              int64  `json:"seq,omitempty"`
-	Delta            string `json:"delta,omitempty"`
+	RestoredApproval bool `json:"restored_approval,omitempty"`
+	// BackgroundSession/Seq 只标识可信后台回放，不代表客户端授权。
+	BackgroundSession string `json:"background_session,omitempty"`
+	BackgroundSeq     uint64 `json:"background_seq,omitempty"`
+	BackgroundReplay  bool   `json:"background_replay,omitempty"`
+	Type              string `json:"type"`
+	RunID             string `json:"run_id,omitempty"`
+	TurnID            string `json:"turn_id,omitempty"`
+	Seq               int64  `json:"seq,omitempty"`
+	Delta             string `json:"delta,omitempty"`
 	// ContentFormat applies only to assistant_delta.delta and
 	// assistant_done.message. Empty preserves the legacy auto-detected format;
 	// clients must render unknown values as plain text. HTML is always untrusted
@@ -355,7 +361,9 @@ type ChatModels struct {
 	// Connection-scoped cards are invalidated on disconnect; the default is
 	// session-scoped. The backend must enforce the same ownership rule.
 	ConfirmationScope string `json:"confirmation_scope,omitempty"`
-	RequestTimeoutMS  int64  `json:"request_timeout_ms"`
+	// BackgroundExecution 表示传输断开不会取消后台轮次，重连会回放原执行进度。
+	BackgroundExecution bool  `json:"background_execution,omitempty"`
+	RequestTimeoutMS    int64 `json:"request_timeout_ms"`
 	// ModelSelect 为 true 时前端展示模型选择器(默认隐藏——
 	// 模型是运维概念, 不该暴露给终端用户)。
 	ModelSelect bool `json:"model_select,omitempty"`

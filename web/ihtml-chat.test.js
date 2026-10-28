@@ -22,14 +22,14 @@ async function fixture(t, viewport = { width: 1100, height: 800 }, device = {}) 
     window.calls = []; window.sockets = []; window.events = [];
     window.identity = 'alice'; window.readOnly = false; window.configStatus = 200;
     window.agentModes = ['fast', 'deep'];
-    window.confirmationScope = 'session'; window.approvalResume = 'manual_tool_only';
+    window.confirmationScope = 'session'; window.approvalResume = 'manual_tool_only';window.backgroundExecution=false;
     window.fetch = async (url, init) => {
       const pathname = new URL(url).pathname;
       calls.push({ url: String(url), headers: init.headers });
       const data = pathname.endsWith('/api/config')
         ? { user: identity, chat: true, read_only: readOnly, params: {} }
         : pathname.endsWith('/api/chat/models')
-          ? { model_ready: true, model_select: false, models: [], agent_modes: agentModes, deep_approval_resume: approvalResume, confirmation_scope: confirmationScope }
+          ? { model_ready: true, model_select: false, models: [], agent_modes: agentModes, deep_approval_resume: approvalResume, confirmation_scope: confirmationScope,background_execution:backgroundExecution }
           : {};
       const status = pathname.endsWith('/api/config') ? configStatus : 200;
       return { ok: status === 200, status, statusText: 'Unavailable', text: async () => JSON.stringify(data) };
@@ -1339,4 +1339,76 @@ test('a stalled reconnect handshake times out and backs off without replay',asyn
  await page.clock.runFor(10000);assert.equal(await page.evaluate(()=>sockets[1].readyState),3);
  await page.clock.runFor(2100);assert.equal(await page.evaluate(()=>sockets.length),3);
  assert.deepEqual(await page.evaluate(()=>sockets.slice(1).flatMap(s=>s.sent)),[]);
+});
+
+test('background execution reconnects without ending the active turn and replaces recovered text snapshots',async(t)=>{
+ const page=await fixture(t);await page.clock.install();
+ await page.evaluate(async()=>{
+  backgroundExecution=true;window.a=ihtml.mountChat('#a');await a.ready();await a.chat.send('original');
+  sockets[0].emit({type:'turn_start',run_id:'background',seq:1,background_session:'owned',background_seq:2});
+  sockets[0].emit({type:'assistant_delta',run_id:'background',seq:2,background_session:'owned',background_seq:3,delta:'part'});
+  sockets[0].close();
+ });
+ assert.equal(await page.evaluate(()=>a.chat.busy),true);
+ assert.equal(await page.locator('#a .ihtml-process.failed').count(),0);
+ await page.clock.runFor(1100);await page.waitForFunction(()=>sockets.length===2);
+ assert.deepEqual(await page.evaluate(()=>sockets[1].sent),[]);
+ await page.evaluate(()=>{
+  sockets[1].emit({type:'background_user_message',background_session:'owned',background_seq:1,background_replay:true,message:'original'});
+  sockets[1].emit({type:'turn_start',run_id:'background',seq:1,background_session:'owned',background_seq:2,background_replay:true});
+  sockets[1].emit({type:'assistant_snapshot',run_id:'background',seq:4,background_session:'owned',background_seq:5,background_replay:true,delta:'partial complete'});
+  sockets[1].emit({type:'assistant_done',run_id:'background',seq:5,background_session:'owned',background_seq:6,message:'partial complete'});
+ });
+ assert.equal(await page.evaluate(()=>a.chat.busy),false);
+ assert.equal(await page.locator('#a .ihtml-msg.user').count(),1);
+ assert.equal(await page.locator('#a .answer').last().textContent(),'partial complete');
+});
+
+test('a reopened background view restores the original user request and run without submitting a message',async(t)=>{
+ const page=await fixture(t);
+ await page.evaluate(async()=>{
+  backgroundExecution=true;window.a=ihtml.mountChat('#a');await a.ready();
+ });
+ await page.waitForFunction(()=>sockets.length===1);
+ await page.evaluate(()=>{
+  const socket=sockets[0];socket.emit({type:'background_user_message',background_session:'owned',background_seq:1,background_replay:true,message:'saved request'});
+  socket.emit({type:'turn_start',run_id:'restored',seq:1,background_session:'owned',background_seq:2,background_replay:true});
+  socket.emit({type:'assistant_snapshot',run_id:'restored',seq:2,background_session:'owned',background_seq:3,background_replay:true,delta:'restored progress'});
+  socket.emit({type:'assistant_done',run_id:'restored',seq:3,background_session:'owned',background_seq:4,background_replay:true,message:'saved result'});
+ });
+ assert.deepEqual(await page.evaluate(()=>sockets[0].sent),[]);
+ assert.match(await page.locator('#a').innerText(),/saved request/);
+ assert.match(await page.locator('#a').innerText(),/saved result/);
+});
+
+test('notification inbox reuses history navigation and requests push permission only on explicit enable',async(t)=>{
+ const page=await fixture(t,{width:390,height:844});
+ await page.evaluate(async()=>{
+  window.permissionCalls=0;window.subscribes=0;window.selectedNotification='';window.unread=-1;
+  window.Notification={permission:'default',requestPermission:async()=>{permissionCalls++;return 'granted';}};window.PushManager=class{};
+  Object.defineProperty(navigator,'serviceWorker',{configurable:true,value:{getRegistration:async()=>null,register:async()=>({active:{scriptURL:'https://host.test/ihtml-push-sw.js'},pushManager:{getSubscription:async()=>({endpoint:'https://web.push.apple.com/test',toJSON:()=>({endpoint:'https://web.push.apple.com/test'}),unsubscribe:async()=>true})}})}});
+  window.a=ihtml.mountChat('#a',{history:{list:async()=>({items:[]}),select:async()=>{}},notifications:{title:'Inbox',emptyMessage:'No notifications',onUnreadChange:n=>{unread=n;},list:async()=>({items:[{id:'owned',title:'Original task',subtitle:'Needs confirmation',removable:false}],unread:1}),select:async({id})=>{selectedNotification=id;},push:{publicKey:'test',subscribe:async()=>{subscribes++;return {enabled:true};},remove:async()=>{}}}});await a.ready();a.chat.notifications.open();
+ });
+ assert.equal(await page.evaluate(()=>permissionCalls),0);
+ assert.match(await page.locator('#a .ihtml-chat-history').last().innerText(),/Original task/);
+ await page.locator('#a .ihtml-chat-push-enable').click();
+ await page.waitForFunction(()=>subscribes===1);
+ assert.equal(await page.evaluate(()=>permissionCalls),1);
+ assert.match(await page.locator('#a .ihtml-chat-push-enable').innerText(),/Disable|关闭/);
+ await page.locator('#a .ihtml-chat-history').last().getByRole('button',{name:'Original task Needs confirmation'}).click();
+ assert.equal(await page.evaluate(()=>selectedNotification),'owned');
+ assert.equal(await page.evaluate(()=>unread),1);
+});
+
+test('push registration failure never claims notifications are enabled or leaks errors',async(t)=>{
+ const page=await fixture(t);
+ await page.evaluate(async()=>{
+  window.permissionCalls=0;window.Notification={permission:'default',requestPermission:async()=>{permissionCalls++;return 'denied';}};window.PushManager=class{};
+  Object.defineProperty(navigator,'serviceWorker',{configurable:true,value:{getRegistration:async()=>null,register:async()=>{throw new Error('PRIVATE_PUSH_KEY');}}});
+  window.a=ihtml.mountChat('#a',{notifications:{title:'Inbox',list:async()=>({items:[]}),select:async()=>{},push:{publicKey:'test',subscribe:async()=>({enabled:true}),remove:async()=>{}}}});await a.ready();a.chat.notifications.open();
+ });
+ await page.locator('#a .ihtml-chat-push-enable').click();
+ assert.equal(await page.evaluate(()=>permissionCalls),1);
+ assert.doesNotMatch(await page.locator('#a').innerText(),/PRIVATE_PUSH_KEY/);
+ assert.match(await page.locator('#a .ihtml-chat-push-enable').innerText(),/Enable|开启/);
 });

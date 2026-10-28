@@ -23,7 +23,7 @@ import (
 // Only production assets belong in downstream binaries. Tests and design
 // artifacts must not be pulled in by a directory-wide embed pattern.
 //
-//go:embed web/index.html web/ihtml-lib.js web/ihtml.js web/ihtml.css
+//go:embed web/index.html web/ihtml-lib.js web/ihtml.js web/ihtml.css web/ihtml-push-sw.js
 var webFS embed.FS
 
 // Handler 是库的 HTTP 入口: 服务空壳页面、内核资源与全部 /api/* 接口。
@@ -273,6 +273,7 @@ func UIAssets() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /ihtml.js", h.handleBundle("text/javascript; charset=utf-8", "web/ihtml-lib.js", "web/ihtml.js"))
 	mux.HandleFunc("GET /ihtml.css", h.handleAsset("web/ihtml.css", "text/css; charset=utf-8"))
+	mux.HandleFunc("GET /ihtml-push-sw.js", h.handleAsset("web/ihtml-push-sw.js", "text/javascript; charset=utf-8"))
 	return mux
 }
 
@@ -283,6 +284,7 @@ func (h *Handler) routes() {
 	assets := UIAssets()
 	mux.Handle("GET /ihtml.js", assets)
 	mux.Handle("GET /ihtml.css", assets)
+	mux.Handle("GET /ihtml-push-sw.js", assets)
 
 	mux.HandleFunc("GET /api/config", h.withUser(h.handleConfig))
 	mux.HandleFunc("GET /api/items", h.withUser(h.handleListItems))
