@@ -1637,3 +1637,29 @@ test('saved receipt text does not hide replayed continuation progress after reco
  assert.equal(await page.locator('.ihtml-tool[data-status="accepted"]').count(),1);
  assert.equal(await page.evaluate(()=>a.chat.busy),true);
 });
+
+for(const colorScheme of ['dark','light']) test('compact notification inbox marks rendered notices seen without reading background polls: '+colorScheme,async(t)=>{
+ const page=await fixture(t,{width:390,height:844});await page.emulateMedia({colorScheme});
+ await page.evaluate(async()=>{
+  window.seenCalls=0;window.unreadCount=-1;window.listCalls=0;
+  window.a=ihtml.mountChat('#a',{locale:'zh-CN',chatHeader:'none',notifications:{title:'助手通知',description:'关闭页面后助手继续处理；需要确认时会等你返回。',push:{publicKey:'test',subscribe:async()=>({enabled:true}),remove:async()=>{}},list:async()=>{listCalls++;return{items:[{id:'notice',title:'清空30个身份的云盘，然后转移给 nbpro',subtitle:'等待确认下一步',meta:'10/29 01:02',unread:true}],unread:1}},seen:async({ids})=>{seenCalls++;return{readIds:ids,unread:0}},onUnreadChange:n=>{unreadCount=n},remove:async()=>false,clear:async()=>false}});await a.ready();
+ });
+ await page.waitForFunction(()=>listCalls>0);assert.equal(await page.evaluate(()=>seenCalls),0);
+ await page.evaluate(()=>a.chat.notifications.open());
+ await page.waitForFunction(()=>seenCalls===1&&unreadCount===0);
+ assert.equal(await page.locator('.ihtml-chat-history-row.is-unread').count(),0);
+ const remove=page.getByRole('button',{name:'删除通知 · 清空30个身份的云盘，然后转移给 nbpro',exact:true});
+ assert.equal(await remove.locator('svg').count(),1);
+ const pane=page.locator('.ihtml-chat-history').last();
+ assert.equal(await pane.evaluate(n=>n.scrollWidth<=n.clientWidth),true);
+ await pane.screenshot({path:'/tmp/ihtml-notifications-'+colorScheme+'.png'});
+});
+
+test('notification seen failure preserves unread state and does not expose callback errors',async(t)=>{
+ const page=await fixture(t);
+ await page.evaluate(async()=>{window.unreadCount=-1;window.a=ihtml.mountChat('#a',{locale:'zh-CN',notifications:{list:async()=>({items:[{id:'unread',title:'原通知',unread:true}],unread:1}),onUnreadChange:n=>{unreadCount=n},seen:async()=>{throw new Error('PRIVATE_READ_ERROR')}}});await a.ready();a.chat.notifications.open();});
+ await page.waitForFunction(()=>unreadCount===1);
+ await page.getByText('通知已显示，已读状态暂未同步。').waitFor();
+ assert.equal(await page.locator('.ihtml-chat-history-row.is-unread').count(),1);
+ assert.doesNotMatch(await page.locator('#a').innerText(),/PRIVATE_READ_ERROR/);
+});

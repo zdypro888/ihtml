@@ -2127,20 +2127,28 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
 /* 可选历史占用消息区，保持输入框可见；不依赖宿主框架或额外浮层。 */
 .ihtml-chat-inline > .ihtml-chat > .ihtml-chat-history, .ihtml-chat-history { flex: 1 1 0%; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 12px 16px; }
 .ihtml-chat-history[hidden], .ihtml-chat-log[hidden] { display: none !important; }
-.ihtml-chat-history-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
-.ihtml-chat-history-head strong { flex: 1; }
-.ihtml-chat-history .ihtml-chat-history-clear { color: var(--ui-err); }
-.ihtml-chat-history button { min-height: 44px; padding: 8px 12px; border: 1px solid var(--ui-control-border); border-radius: var(--ui-radius, 10px); color: var(--ui-text); background: var(--ui-surface); font: inherit; cursor: pointer; }
-.ihtml-chat-history button:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 2px; }
-.ihtml-chat-history button:disabled { opacity: .5; cursor: default; }
-.ihtml-chat-history-list { display: flex; flex-direction: column; gap: 8px; }
-.ihtml-chat-history-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.ihtml-chat-history-select { flex: 1 1 140px; min-width: 0; text-align: start; display: flex; flex-direction: column; gap: 6px; overflow-wrap: anywhere; }
-.ihtml-chat-history-select strong { font-weight: 600; line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.ihtml-chat-history-select small, .ihtml-chat-history-status, .ihtml-chat-history-description { color: var(--ui-text-muted); font-size: 12px; line-height: 1.6; }
-.ihtml-chat-history-select[aria-current="true"] { border-color: var(--ui-primary); }
-.ihtml-chat-history .ihtml-chat-history-remove, .ihtml-chat-history-unknown { color: var(--ui-err); }
-.ihtml-chat-history-unknown { flex-basis: 100%; font-size: 12px; }
+.ihtml-chat-history-head { display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px; }
+.ihtml-chat-history-head > strong {flex:1;min-width:0;font-size:15px;line-height:1.4;}
+.ihtml-chat-history-actions {display:flex;align-items:center;gap:4px;}
+.ihtml-chat-history button {min-height:40px;padding:8px 10px;border:1px solid var(--ui-control-border);border-radius:10px;color:var(--ui-text);background:var(--ui-surface);font:inherit;font-size:13px;cursor:pointer;}
+.ihtml-chat-history button:focus-visible {outline:2px solid var(--ui-focus);outline-offset:2px;}
+.ihtml-chat-history button:disabled {opacity:.5;cursor:default;}
+.ihtml-chat-history .ihtml-history-icon {display:inline-flex;align-items:center;justify-content:center;flex:0 0 44px;width:44px;height:44px;padding:10px;border-color:transparent;background:transparent;color:var(--ui-text-muted);}
+.ihtml-history-icon svg {width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;}
+.ihtml-chat-history .ihtml-history-icon:hover {background:var(--ui-surface);border-color:var(--ui-control-border);}
+.ihtml-chat-history .ihtml-chat-history-clear:hover,.ihtml-chat-history .ihtml-chat-history-remove:hover {color:var(--ui-err);}
+.ihtml-chat-history-list {display:flex;flex-direction:column;gap:8px;}
+.ihtml-chat-history-row {display:grid;grid-template-columns:minmax(0,1fr);align-items:center;gap:4px;padding:6px;border:1px solid var(--ui-control-border);border-radius:12px;background:var(--ui-surface);}
+.ihtml-chat-history-row.has-actions {grid-template-columns:minmax(0,1fr) 44px;}
+.ihtml-chat-history .ihtml-chat-history-select {min-width:0;text-align:start;display:flex;flex-direction:column;gap:4px;border:0;background:transparent;padding:6px 8px;overflow-wrap:anywhere;}
+.ihtml-chat-history-select strong {font-size:14px;font-weight:600;line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
+.ihtml-chat-history-select small,.ihtml-chat-history-status,.ihtml-chat-history-description {color:var(--ui-text-muted);font-size:12px;line-height:1.5;}
+.ihtml-chat-history-select small {display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
+.ihtml-chat-history-select .ihtml-chat-history-meta {font-size:11px;opacity:.8;}
+.ihtml-chat-history-row.is-unread strong::before {content:'';display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--ui-primary);margin-inline-end:7px;vertical-align:middle;}
+.ihtml-chat-history-select[aria-current="true"] {color:var(--ui-primary);}
+.ihtml-chat-history-unknown {color:var(--ui-err);}
+.ihtml-chat-history-unknown { grid-column:1 / -1; font-size: 12px; }
 .ihtml-chat-history-status:not(:empty) { padding: 8px 0; }
 .ihtml-chat-history-more, .ihtml-chat-history-retry { margin-top: 10px; }
 
@@ -2150,5 +2158,5 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
 .ihtml-chat-inline .ihtml-chat-head[hidden] { display: none; }
 
 /* 通知沿用历史面板；推送设置是显式可选动作，保持同一套紧凑按钮样式。 */
-.ihtml-chat-push-enable{align-self:flex-start;margin:0 12px 8px;padding:8px 12px;border:1px solid var(--ui-control-border);border-radius:12px;background:var(--ui-surface);color:var(--ui-primary);font:inherit;cursor:pointer;min-height:40px}
+.ihtml-chat-push-enable{align-self:flex-start;margin:0 0 8px;padding:5px 9px;border:1px solid var(--ui-control-border);border-radius:12px;background:var(--ui-surface);color:var(--ui-primary);font:inherit;font-size:12px;cursor:pointer;min-height:32px}
 .ihtml-chat-push-enable:disabled{opacity:.6;cursor:default}

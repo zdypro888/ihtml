@@ -5187,11 +5187,20 @@
       head.appendChild(entry);
       const pane = el('section', 'ihtml-chat-history'); pane.hidden = true; pane.setAttribute('aria-label', (source.title || T('history_title')));
       pane.tabIndex = -1;
+      pane.dataset.kind = kind;
       const heading = el('div', 'ihtml-chat-history-head');
       const title = el('strong', '', (source.title || T('history_title')));
-      const back = el('button', '', T('history_back')); back.type = 'button'; heading.append(title, back);
+      // 标题栏和行操作使用统一图标按钮，保留完整无障碍名称与触控区域。
+      const iconButton = (button, path, label) => {
+        button.setAttribute('aria-label', label);button.title=label;button.classList.add('ihtml-history-icon');button.textContent='';
+        const svg=doc.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('viewBox','0 0 24 24');svg.setAttribute('aria-hidden','true');
+        const shape=doc.createElementNS('http://www.w3.org/2000/svg','path');shape.setAttribute('d',path);svg.appendChild(shape);button.appendChild(svg);
+      };
+      const trashPath='M3 6h18M9 6V4h6v2M6 6l1 15h10l1-15M10 10v7M14 10v7';
+      const actions=el('div','ihtml-chat-history-actions');
+      const back = el('button', '', T('history_back')); back.type = 'button';iconButton(back,'m14 6-6 6 6 6',T('history_back'));actions.appendChild(back);heading.append(title,actions);
       const clear = source.clear ? el('button', 'ihtml-chat-history-clear', source.clearLabel || T('notifications_clear')) : null;
-      if (clear) { clear.type = 'button'; heading.insertBefore(clear, back); clear.onclick = () => { void act('clear', {id: ''}); }; }
+      if (clear) { clear.type = 'button';iconButton(clear,trashPath,source.clearLabel || T('notifications_clear'));actions.insertBefore(clear,back); clear.onclick = () => { void act('clear', {id: ''}); }; }
       const status = el('div', 'ihtml-chat-history-status'); status.setAttribute('role', 'status');
       const list = el('div', 'ihtml-chat-history-list');
       const retry = el('button', 'ihtml-chat-history-retry', T('history_retry')); retry.type = 'button'; retry.hidden = true;
@@ -5251,16 +5260,18 @@
       const render = () => {
         list.replaceChildren();
         for (const item of items) {
-          const row = el('div', 'ihtml-chat-history-row');
+          const row = el('div', 'ihtml-chat-history-row');row.classList.toggle('has-actions',!!source.remove&&item.removable!==false);
           const open = el('button', 'ihtml-chat-history-select'); open.type = 'button';
           open.title = item.title; open.appendChild(el('strong', '', item.title));
           if (item.subtitle) open.appendChild(el('small', '', item.subtitle));
+          if (item.meta) open.appendChild(el('small','ihtml-chat-history-meta',item.meta));
+          row.classList.toggle('is-unread',item.unread===true);
           if (item.selected) open.setAttribute('aria-current', 'true');
           open.onclick = () => { void act('select', item); }; row.appendChild(open);
           if (source.remove && item.removable !== false) {
             const label = source.removeLabel || T(kind === 'notifications' ? 'notifications_delete' : 'history_delete');
             const remove = el('button', 'ihtml-chat-history-remove', label); remove.type = 'button';
-            remove.dataset.removeId = item.id; remove.setAttribute('aria-label', label + ' · ' + item.title);
+            remove.dataset.removeId = item.id;iconButton(remove,trashPath,label + ' · ' + item.title);
             remove.onclick = () => { void act('remove', item); }; row.appendChild(remove);
           }
           if (uncertain.has(item.id)) row.appendChild(el('small', 'ihtml-chat-history-unknown', T('history_unknown')));
@@ -5283,13 +5294,24 @@
           if (!alive(id, abort)) return;
           if (!page || !Array.isArray(page.items) || page.items.length > 100 || (page.cursor != null && (typeof page.cursor !== 'string' || page.cursor.length > 2048)) || (page.cursor && page.cursor === before)) throw new TypeError('invalid history page');
           const rows = page.items.map(item => {
-            if (!item || typeof item.id !== 'string' || !item.id || item.id.length > 512 || typeof item.title !== 'string' || !item.title || item.title.length > 1024 || (item.subtitle != null && (typeof item.subtitle !== 'string' || item.subtitle.length > 1024))) throw new TypeError('invalid history item');
-            return {id: item.id, title: item.title, subtitle: item.subtitle || '', selected: item.selected === true, removable: item.removable !== false};
+            if (!item || typeof item.id !== 'string' || !item.id || item.id.length > 512 || typeof item.title !== 'string' || !item.title || item.title.length > 1024 || (item.subtitle != null && (typeof item.subtitle !== 'string' || item.subtitle.length > 1024)) || (item.meta != null && (typeof item.meta !== 'string' || item.meta.length > 1024))) throw new TypeError('invalid history item');
+            return {id: item.id, title: item.title, subtitle: item.subtitle || '', meta:item.meta||'',unread:item.unread===true, selected: item.selected === true, removable: item.removable !== false};
           });
           const seen = new Set(); items = (append ? items : []).concat(rows).filter(item => { if (seen.has(item.id)) return false; seen.add(item.id); return true; });
           cursor = page.cursor || ''; status.textContent = items.length ? '' : (source.emptyMessage || T('chat_history_empty'));
           if (typeof source.onUnreadChange==='function') source.onUnreadChange(Math.max(0,Number(page.unread)||0));
           render();
+          // 仅对已打开并实际渲染的这一页通知调用已读 hook；摘要轮询没有此副作用。
+          if(kind==='notifications'&&typeof source.seen==='function') {
+            try {
+              const seen=await boundedChatHook(()=>source.seen({ids:rows.map(row=>row.id),signal:abort.signal}),abort.signal,30000);
+              if(!alive(id,abort))return;
+              if(seen&&Array.isArray(seen.readIds)) {
+                const read=new Set(seen.readIds);items=items.map(row=>read.has(row.id)?{...row,unread:false}:row);render();
+              }
+              if(seen&&Number.isFinite(seen.unread)&&typeof source.onUnreadChange==='function')source.onUnreadChange(Math.max(0,seen.unread));
+            }catch {if(alive(id,abort))status.textContent=T('notifications_seen_error');}
+          }
         } catch (error) { failure(error, id, abort); }
         finally { if (id === generation) { pending = null; abort.abort(); sync(); } }
       }
