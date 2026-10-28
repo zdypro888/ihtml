@@ -1675,3 +1675,15 @@ test('live status remains in collapsed summary across answer deltas and resets a
  assert.ok(!(await page.locator('#a .p-title').textContent()).includes('8947'));
  await page.evaluate(()=>a.destroy());
 });
+
+test('readable confirmation metadata renders exact targets and clear action on mobile',async(t)=>{
+ const page=await fixture(t,{width:393,height:850});
+ await page.evaluate(async()=>{window.a=ihtml.mountChat('#a',{locale:'zh-CN'});await a.ready();await a.chat.send('查看文件');sockets[0].emit({type:'turn_start',run_id:'readable',seq:1});sockets[0].emit({type:'confirmation_required',run_id:'readable',seq:2,tool_call:{id:'preview',title:'查看所选账号的文件清单',method:'POST',path:'/preview',body:{scope:'all',proxySelection:'default'},risk:'medium',reason:'仅查看文件清单和空间占用，不删除文件。',presentation:{confirm_text:'确认查看文件清单',reason_label:'确认后会做什么',facts:[{label:'账号数量',value:'2'},{label:'完整账号名单',value:'one@example.test\ntwo@example.test'},{label:'清理范围',value:'整个 iCloud Drive（包含其他来源文件）'},{label:'网络出口',value:'沿用账号的默认网络设置'}]},confirmation_token:'fixture',confirmation_nonce:'fixture'}});});
+ await page.evaluate(()=>sockets[0].emit({type:'assistant_done',run_id:'readable',seq:3,message:'核对名单后可确认查看清单。'}));
+ assert.equal(await page.locator('#a .t-actions .ok').textContent(),'确认查看文件清单');
+ assert.equal(await page.locator('#a .t-actions .ok').isVisible(),true);
+ const facts=await page.locator('#a .t-facts').innerText();assert.ok(facts.includes('two@example.test'));assert.ok(facts.includes('沿用账号的默认网络设置'));assert.ok(!facts.includes('proxySelection'));
+ assert.equal(await page.locator('#a .ihtml-tool').evaluate(node=>node.scrollWidth<=node.clientWidth+1),true);
+ if(process.env.IHTML_REVIEW_SCREENSHOT) { await page.waitForTimeout(250); await page.screenshot({path:process.env.IHTML_REVIEW_SCREENSHOT}); }
+ await page.evaluate(()=>a.destroy());
+});
