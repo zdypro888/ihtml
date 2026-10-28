@@ -5297,6 +5297,10 @@
       ws: null,
       wsPromise: null,
       wsGeneration: 0,
+      reconnectTimer: 0,
+      reconnectAttempt: 0,
+      reconnectWanted: false,
+      connectionNotice: null,
       active: false,
       sending: false,
       sendGeneration: 0,
@@ -5526,6 +5530,15 @@
         rootEl.appendChild(panelEl);
         this.dom = { mask, panel: panelEl, log, latestBtn, foot, input, sendBtn, providerBadge, modelInput, dataList, freshBtn, newBtn, toolbar, modebar, modeButtons, modeHint, live, readonlyBadge };
         this.log = log;
+        // 网络/前台恢复只重建连接，不重放用户消息或确认帧。
+        const recoverConnection = () => {
+          if (!this.reconnectWanted || document.visibilityState === 'hidden') return;
+          this.reconnectAttempt = 0;
+          this.scheduleReconnect(true);
+        };
+        window.addEventListener('online', recoverConnection);
+        document.addEventListener('visibilitychange', recoverConnection);
+        addDisposer(() => {window.removeEventListener('online', recoverConnection); document.removeEventListener('visibilitychange', recoverConnection);});
         this.history = createChatHistory(head, log, foot);
         // 观察真正渲染后的消息高度；覆盖延迟 Markdown、图片加载、折叠及宿主视口变化。
         if (typeof ResizeObserver === 'function') {
@@ -5823,7 +5836,29 @@
         this.scrollFrame = requestAnimationFrame(() => settle(1));
       },
 
-      ensureWS() {
+      connectionNote(text) {
+        if (!this.dom || destroyed) return;
+        if (!this.connectionNotice?.isConnected) {
+          this.connectionNotice = el('div', 'ihtml-sysnote'); this.log.appendChild(this.connectionNotice);
+        }
+        if (this.connectionNotice.textContent === text) return;
+        this.connectionNotice.textContent = text; this.announce(text); this.scroll();
+      },
+      scheduleReconnect(immediate = false) {
+        if (destroyed || !this.enabled || authRefreshing || !this.reconnectWanted || navigator.onLine === false || document.visibilityState === 'hidden') return;
+        if (this.ws?.readyState === WebSocket.OPEN || this.wsPromise) return;
+        if (this.reconnectTimer) {if (!immediate) return; clearTimeout(this.reconnectTimer);}
+        const delay = immediate ? 0 : Math.min(30000, 1000 * 2 ** Math.min(this.reconnectAttempt++, 5));
+        this.reconnectTimer = setTimeout(() => {
+          this.reconnectTimer = 0;
+          if (destroyed || !this.reconnectWanted || navigator.onLine === false || document.visibilityState === 'hidden') return;
+          this.ensureWS(true).catch(() => {});
+        }, delay);
+      },
+      ensureWS(automatic = false) {
+        if (!automatic) {this.reconnectWanted = true; this.reconnectAttempt = 0;}
+        if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = 0;
         if (destroyed) return Promise.reject(new Error('ihtml: destroyed'));
         if (this.ws && this.ws.readyState === WebSocket.OPEN) return Promise.resolve(this.ws);
         if (this.wsPromise) return this.wsPromise;
@@ -5841,12 +5876,16 @@
           const ws = hostTransport ? hostTransport.open() : new WebSocket(wsURL);
           this.ws = ws;
           let settled = false;
+          let openedAt = 0;
+          let handshakeTimer;
           return new Promise((resolve, reject) => {
             const fail = (err) => {
               if (settled) return;
               settled = true;
+              clearTimeout(handshakeTimer);
               reject(err);
             };
+            handshakeTimer = setTimeout(() => {fail(new Error(T('chat_broken'))); try {ws.close();} catch {}}, 10000);
             ws.onopen = () => {
               if (destroyed || generation !== this.wsGeneration || this.ws !== ws) {
                 try { ws.close(); } catch { /* 忽略 */ }
@@ -5854,13 +5893,16 @@
                 return;
               }
               settled = true;
+              clearTimeout(handshakeTimer);
+              openedAt = Date.now();
               this.wsPromise = null;
-              if (this.everConnected) this.systemNote(T('chat_reconnected'));
+              if (this.everConnected) this.connectionNote(T('chat_reconnected'));
               this.everConnected = true;
               resolve(ws);
             };
             ws.onerror = () => fail(new Error(T('chat_broken')));
-            ws.onclose = () => {
+            ws.onclose = (event) => {
+              clearTimeout(handshakeTimer);
               fail(new Error(T('chat_disconnected')));
               if (generation !== this.wsGeneration || this.ws !== ws) return;
               this.ws = null;
@@ -5869,9 +5911,15 @@
               if (this.confirmationBusy && this.confirmationBusy.cancelPending && this.confirmationBusy.cancelSent) {
                 this.failCancellation(this.confirmationBusy, T('cancellation_ack_timeout'), true);
               }
-              if (this.dom && !destroyed) this.systemNote(T('chat_disconnected'));
-              if (this.active && this.turn && !this.turn.done) this.turnError(T('chat_disconnected'));
+              const denied = [1008, 4001, 4003].includes(event?.code);
+              const incompatible = [1002, 1003, 1009].includes(event?.code);
+              if (denied || incompatible) this.reconnectWanted = false;
+              // 短暂握手成功后再次断开也保留退避；稳定连接才恢复首次重试间隔。
+              if (openedAt && Date.now() - openedAt >= 10000) this.reconnectAttempt = 0;
+              this.connectionNote(T(denied ? 'chat_connection_denied' : incompatible ? 'chat_connection_incompatible' : 'chat_disconnected'));
+              if (this.active && this.turn && !this.turn.done) this.turnError(T('chat_turn_interrupted'));
               else this.setActive(false, false);
+              this.scheduleReconnect();
             };
             ws.onmessage = (ev) => {
               if (destroyed || generation !== this.wsGeneration || this.ws !== ws) return;
@@ -5882,12 +5930,22 @@
           });
         })();
         this.wsPromise = promise;
-        promise.catch(() => {
-          if (generation === this.wsGeneration && this.wsPromise === promise) this.wsPromise = null;
+        promise.catch(error => {
+          if (generation !== this.wsGeneration || !this.reconnectWanted) return;
+          if (this.wsPromise === promise) this.wsPromise = null;
+          if (error?.status === 401 || error?.status === 403) {
+            this.reconnectWanted = false; this.connectionNote(T('chat_connection_denied')); return;
+          }
+          this.scheduleReconnect();
         });
         return promise;
       },
       disconnect() {
+        // 显式停止、登出、新对话或销毁不得被后台重连计时器重新打开。
+        this.reconnectWanted = false;
+        this.reconnectAttempt = 0;
+        if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = 0;
         const ws = this.ws;
         if (this.connectionAbort) this.connectionAbort.abort();
         this.connectionAbort = null;

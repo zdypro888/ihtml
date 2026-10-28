@@ -1263,3 +1263,80 @@ test('pending cancellation keeps its authoritative wait across the confirmation 
  assert.equal(await page.locator('#a .t-refresh').count(),0);
  assert.equal(await page.evaluate(()=>sockets.flatMap(s=>s.sent).filter(m=>m.type==='cancel_tool').length),1);
 });
+
+test('unexpected disconnect reconnects with a fresh ticket and same conversation without replaying messages or confirmations',async(t)=>{
+ const page=await fixture(t);await page.clock.install();
+ await page.evaluate(async()=>{
+  window.ticketCount=0;window.confirmationScope='connection';
+  window.a=ihtml.mountChat('#a',{connectionAuth:()=>Promise.resolve('ticket-'+(++ticketCount))});await a.ready();await a.chat.send('original');
+  sockets[0].emit({type:'turn_start',run_id:'interrupted',seq:1});
+  sockets[0].emit({type:'confirmation_required',run_id:'interrupted',seq:2,tool_call:{id:'old',name:'write',approval_resume:'manual_tool_only',confirmation_nonce:'nonce',confirmation_token:'SIGNED',confirmation_expires:Math.floor(Date.now()/1000)+600}});
+  sockets[0].close();
+ });
+ await page.clock.runFor(1100);
+ await page.waitForFunction(()=>sockets.length===2&&sockets[1].readyState===1);
+ const result=await page.evaluate(()=>({tickets:ticketCount,first:new URL(sockets[0].url).searchParams.get('csid'),second:new URL(sockets[1].url).searchParams.get('csid'),sent:sockets[1].sent,busy:a.chat.busy}));
+ assert.equal(result.tickets,2);assert.equal(result.first,result.second);assert.deepEqual(result.sent,[]);assert.equal(result.busy,false);
+ assert.equal(await page.locator('#a .t-actions .ok').count(),0);
+ assert.match(await page.locator('#a').innerText(),/Connection restored|连接已恢复/);
+});
+
+test('reconnect backs off after ticket failure and stops on revoked authorization',async(t)=>{
+ const page=await fixture(t);await page.clock.install();
+ await page.evaluate(async()=>{
+  window.ticketCount=0;window.a=ihtml.mountChat('#a',{connectionAuth:async()=>{ticketCount++;if(ticketCount===2)throw new Error('temporary');return 'ticket-'+ticketCount;}});await a.ready();await a.chat.send('original');sockets[0].close();
+ });
+ await page.clock.runFor(1100);assert.equal(await page.evaluate(()=>ticketCount),2);
+ await page.clock.runFor(1900);await page.waitForFunction(()=>sockets.length===2);
+ await page.evaluate(()=>{sockets[1].readyState=3;sockets[1].onclose({code:1008});});
+ await page.clock.fastForward(60000);
+ assert.equal(await page.evaluate(()=>ticketCount),3);
+ assert.equal(await page.evaluate(()=>sockets.length),2);
+ assert.match(await page.locator('#a').innerText(),/authorization expired|授权已失效/);
+});
+
+test('offline and background pauses reconnect; returning online and visible wakes it without sending a request',async(t)=>{
+ const page=await fixture(t);await page.clock.install();
+ await page.evaluate(async()=>{
+  window.isOnline=false;window.isVisible=false;
+  Object.defineProperty(navigator,'onLine',{configurable:true,get:()=>isOnline});
+  Object.defineProperty(document,'visibilityState',{configurable:true,get:()=>isVisible?'visible':'hidden'});
+  window.a=ihtml.mountChat('#a');await a.ready();await a.chat.send('original');sockets[0].close();
+ });
+ await page.clock.fastForward(30000);assert.equal(await page.evaluate(()=>sockets.length),1);
+ await page.evaluate(()=>{isOnline=true;window.dispatchEvent(new Event('online'));});
+ await page.clock.runFor(10);assert.equal(await page.evaluate(()=>sockets.length),1);
+ await page.evaluate(()=>{isVisible=true;document.dispatchEvent(new Event('visibilitychange'));});
+ await page.clock.runFor(10);await page.waitForFunction(()=>sockets.length===2);
+ assert.deepEqual(await page.evaluate(()=>sockets[1].sent),[]);
+});
+
+test('clear, destroy and authorization failure cancel pending reconnects',async(t)=>{
+ const page=await fixture(t);await page.clock.install();
+ await page.evaluate(async()=>{window.a=ihtml.mountChat('#a');await a.ready();await a.chat.send('original');sockets[0].close();a.chat.clear();});
+ await page.clock.fastForward(60000);assert.equal(await page.evaluate(()=>sockets.length),1);
+ await page.evaluate(async()=>{await a.chat.send('second');sockets[1].close();a.destroy();window.dispatchEvent(new Event('online'));});
+ await page.clock.fastForward(60000);assert.equal(await page.evaluate(()=>sockets.length),2);
+});
+
+test('connection ticket authorization rejection is not retried automatically',async(t)=>{
+ const page=await fixture(t);await page.clock.install();
+ await page.evaluate(async()=>{window.ticketCount=0;window.a=ihtml.mountChat('#a',{connectionAuth:async()=>{ticketCount++;throw Object.assign(new Error('private auth error'),{status:403});}});await a.ready();await a.chat.send('original');});
+ await page.clock.fastForward(60000);
+ assert.equal(await page.evaluate(()=>ticketCount),1);
+ assert.equal(await page.evaluate(()=>sockets.length),0);
+ assert.doesNotMatch(await page.locator('#a').innerText(),/private auth error/);
+});
+
+test('a stalled reconnect handshake times out and backs off without replay',async(t)=>{
+ const page=await fixture(t);await page.clock.install();
+ await page.evaluate(async()=>{
+  window.a=ihtml.mountChat('#a');await a.ready();await a.chat.send('original');
+  window.WebSocket=class {static OPEN=1;constructor(url){this.url=url;this.sent=[];this.readyState=0;sockets.push(this);}close(){this.readyState=3;this.onclose?.({code:1006});}};
+  sockets[0].close();
+ });
+ await page.clock.runFor(1100);assert.equal(await page.evaluate(()=>sockets.length),2);
+ await page.clock.runFor(10000);assert.equal(await page.evaluate(()=>sockets[1].readyState),3);
+ await page.clock.runFor(2100);assert.equal(await page.evaluate(()=>sockets.length),3);
+ assert.deepEqual(await page.evaluate(()=>sockets.slice(1).flatMap(s=>s.sent)),[]);
+});
