@@ -6543,8 +6543,10 @@
         const elapsed = t.elapsedMS + (t.clockStartedAt == null ? 0 : performance.now() - t.clockStartedAt);
         const parts = [];
         if (t.toolCount) parts.push(T('trace_tool_count', {n: t.toolCount}));
-        parts.push(T('trace_elapsed', {n: Math.max(0, Math.floor(elapsed / 1000))}));
+        const seconds = Math.max(0, Math.floor(elapsed / 1000));
+        if (!t.elapsedUnknown) parts.push(seconds >= 3600 ? T('trace_elapsed_hours', {h:Math.floor(seconds/3600),m:Math.floor(seconds/60)%60}) : seconds >= 60 ? T('trace_elapsed_minutes', {m:Math.floor(seconds/60),s:seconds%60}) : T('trace_elapsed', {n:seconds}));
         t.note.textContent = parts.join(' · ');
+        t.note.hidden = parts.length === 0;
       },
       syncProcessClock(t) {
         // 等待人工确认不计入执行耗时；恢复执行时接着累计，销毁时统一回收。
@@ -7487,6 +7489,8 @@
         if (ev.type === 'cancel_tool_result') { this.handleCancellationResult(ev); this.notifyEvent(ev); return; }
         const t = this.eventTurn(ev);
         if (!t) return;
+        // 回放没有权威耗时字段，不能把重新连接后的计时冒充原流程耗时。
+        if (ev.background_replay) t.elapsedUnknown = true;
         if (ev.agent || ev.budget || ev.type === 'assistant_plan' || ev.tool_call && ['manual_tool_only', 'checkpoint'].includes(ev.tool_call.approval_resume)) {
           this.projectAgentEvent(ev, t);
         }

@@ -1687,3 +1687,19 @@ test('readable confirmation metadata renders exact targets and clear action on m
  if(process.env.IHTML_REVIEW_SCREENSHOT) { await page.waitForTimeout(250); await page.screenshot({path:process.env.IHTML_REVIEW_SCREENSHOT}); }
  await page.evaluate(()=>a.destroy());
 });
+
+for(const viewport of [{width:393,height:852},{width:1100,height:852}]) test('narrow host prioritizes live progress and keeps accepted receipts compact: '+viewport.width,async(t)=>{
+ const page=await fixture(t,viewport);
+ await page.evaluate(async()=>{document.querySelector('#a').style.width='min(100%,390px)';window.a=ihtml.mountChat('#a',{locale:'zh-CN'});await a.ready();await a.chat.send('执行原计划');const s=sockets[0];s.emit({type:'turn_start',run_id:'narrow',seq:1});s.emit({type:'confirmation_required',run_id:'narrow',seq:2,tool_call:{id:'accepted',title:'执行所选项目',name:'fixture_execute',method:'POST',path:'/operations',confirmation_nonce:'signed',confirmation_token:'fixture'}});s.emit({type:'tool_result',run_id:'narrow',seq:3,tool_status:'accepted',tool_summary:'本次提交已受理，最新进度见原任务。',tool_call:{id:'accepted',confirmation_nonce:'signed'}});[...document.querySelectorAll('#a .ihtml-msg.assistant')].at(-1)._turn.elapsedMS=3600000;s.emit({type:'assistant_status',run_id:'narrow',seq:4,status:'正在处理：已完成 11/30 项，处理中 1 项，异常 1 项，已确认 48069 条记录'});});
+ const box=await page.locator('#a .ihtml-process').boundingBox(),label=await page.locator('#a .p-title').boundingBox(),meta=await page.locator('#a .p-meta').boundingBox();
+ assert.ok(label.width>box.width*.75,'progress receives the available width');assert.ok(meta.y>=label.y+label.height,'secondary metadata has its own line');assert.ok((await page.locator('#a .p-meta').textContent()).includes('1小时0分'));
+ const receipt=page.locator('#a .ihtml-tool[data-status="accepted"]');assert.equal(await receipt.locator('.t-summary').isVisible(),false);await receipt.locator('summary.t-head').click();assert.ok((await receipt.locator('.tbody').innerText()).includes('本次提交已受理'));assert.equal(await receipt.getAttribute('data-status'),'accepted');
+ if(process.env.IHTML_PROGRESS_SCREENSHOT&&viewport.width===393){await receipt.locator('summary.t-head').click();await aScreenshot(page);}
+ await page.evaluate(()=>a.destroy());
+});
+async function aScreenshot(page){await page.waitForTimeout(200);await page.locator('#a').screenshot({path:process.env.IHTML_PROGRESS_SCREENSHOT});}
+
+test('restored progress does not invent elapsed time from the reconnect clock',async(t)=>{
+ const page=await fixture(t);await page.evaluate(async()=>{window.a=ihtml.mountChat('#a',{locale:'zh-CN'});await a.ready();await a.chat.send('连接以接收原记录');sockets[0].emit({type:'turn_start',run_id:'old-run',seq:1,background_replay:true});sockets[0].emit({type:'tool_result',run_id:'old-run',seq:2,background_replay:true,tool_call:{id:'query',title:'查询原任务'},tool_status:'success'});sockets[0].emit({type:'assistant_status',run_id:'old-run',seq:3,background_replay:true,status:'已处理 12/30，后台继续执行'});});
+ assert.equal(await page.locator('#a .p-title').last().textContent(),'已处理 12/30，后台继续执行');assert.ok(!(await page.locator('#a .p-meta').last().textContent()).includes('秒'));assert.ok((await page.locator('#a .p-meta').last().textContent()).includes('1 条工具记录'));await page.evaluate(()=>a.destroy());
+});
