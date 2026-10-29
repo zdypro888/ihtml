@@ -218,7 +218,13 @@ func (s *session) handleToolEvent(ctx context.Context, ev *ihtml.ChatClientEvent
 	}
 	// Bound rejected confirmations separately. They are drained serially after
 	// the active task, not projected as an error onto the active model turn.
-	if len(s.queue) >= s.backend.cfg.MaxPendingTurns {
+	// 已签发确认卡本来就占用 MaxPendingTools 的有界预算，不能再与普通提问共享 16 项排队额度。
+	// 同一 nonce 的 queued 标记保证最多入队一次；未知请求仍使用普通队列和拒绝预算。
+	queueLimit := s.backend.cfg.MaxPendingTurns
+	if item != nil {
+		queueLimit += s.backend.cfg.Confirmation.MaxPendingTools
+	}
+	if len(s.queue) >= queueLimit {
 		if len(s.rejections) >= s.backend.cfg.Confirmation.MaxPendingTools {
 			// Reserve the bounded rejection budget for real issued cards. Unknown
 			// or malformed client requests must not starve a legitimate card ACK.

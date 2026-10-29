@@ -295,6 +295,13 @@ func TestConfirmationQueueFullAndCancelReleasesQueuedFlags(t *testing.T) {
 			} else {
 				close(release)
 			}
+			if scenario == "full" {
+				r.wait(t, ihtml.ChatStreamAssistantDone, 4)
+				if calls.Load() != 1 {
+					t.Fatal("issued confirmation starved behind ordinary turn", calls.Load())
+				}
+				return
+			}
 			r.wait(t, ihtml.ChatStreamTurnError, 1)
 			if calls.Load() != 0 {
 				t.Fatal("dropped/rejected confirmation executed")
@@ -588,5 +595,63 @@ func TestConfirmedResultExplanationIsToolFreeAndFallsBackWithoutRepeatingAction(
 				t.Fatal("authoritative receipt lost")
 			}
 		})
+	}
+}
+
+// 一轮产生的合法卡片不受普通提问队列影响；批量确认仍按 nonce 去重、逐项执行。
+func TestIssuedConfirmationBatchUsesItsOwnBoundedQueue(t *testing.T) {
+	r := newRecorder()
+	var calls atomic.Int32
+	entered, release := make(chan struct{}), make(chan struct{})
+	cfg := approvalConfig(t, func(ctx context.Context, _ json.RawMessage) (string, error) {
+		if calls.Add(1) == 1 {
+			close(entered)
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return "", ctx.Err()
+			}
+		}
+		return "ok", nil
+	})
+	cfg.MaxPendingTurns = 1
+	cfg.Confirmation.MaxPendingTools = 64
+	cfg.Confirmation.ToolTimeout = 5 * time.Second
+	cfg.Engine = &fakeEngine{run: func(ctx context.Context, req *agent.TurnRequest) (*agent.TurnResult, error) {
+		for i := 0; i < 41; i++ {
+			args, _ := json.Marshal(map[string]int{"item": i})
+			if _, err := req.Tools[0].Handler(ctx, args); err != nil {
+				return nil, err
+			}
+		}
+		return &agent.TurnResult{Text: "pending"}, nil
+	}}
+	s := openSession(t, cfg, "alice", r)
+	send(s, "propose")
+	events := r.wait(t, ihtml.ChatStreamAssistantDone, 1)
+	var cards []ihtml.ProposedToolCall
+	for _, e := range events {
+		if e.Type == ihtml.ChatStreamConfirmationRequired {
+			cards = append(cards, *e.ToolCall)
+		}
+	}
+	if len(cards) != 41 {
+		t.Fatal("lost proposals", len(cards))
+	}
+	confirmCard(s, cards[0])
+	waitSignal(t, entered)
+	for _, card := range cards[1:] {
+		confirmCard(s, card)
+		confirmCard(s, card)
+	}
+	close(release)
+	events = r.wait(t, ihtml.ChatStreamAssistantDone, 42)
+	if calls.Load() != 41 {
+		t.Fatal("dropped or replayed approved action", calls.Load())
+	}
+	for _, e := range events {
+		if e.Type == ihtml.ChatStreamToolResult && (e.ToolStatus == ihtml.ChatToolError || e.ToolStatus == ihtml.ChatToolUnknown) {
+			t.Fatal("issued approval incorrectly rejected", e.ToolSummary)
+		}
 	}
 }
