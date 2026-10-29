@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"time"
 
 	"github.com/zdypro888/ihtml"
@@ -220,11 +221,12 @@ func (s *session) handleToolEvent(ctx context.Context, ev *ihtml.ChatClientEvent
 	// the active task, not projected as an error onto the active model turn.
 	// 已签发确认卡本来就占用 MaxPendingTools 的有界预算，不能再与普通提问共享 16 项排队额度。
 	// 同一 nonce 的 queued 标记保证最多入队一次；未知请求仍使用普通队列和拒绝预算。
-	queueLimit := s.backend.cfg.MaxPendingTurns
+	full := s.queuedOrdinaryTurnsLocked() >= s.backend.cfg.MaxPendingTurns
 	if item != nil {
-		queueLimit += s.backend.cfg.Confirmation.MaxPendingTools
+		full = len(s.queue)-s.queuedOrdinaryTurnsLocked() >= s.backend.cfg.Confirmation.MaxPendingTools
 	}
-	if len(s.queue) >= queueLimit {
+	next.issuedApproval = item != nil
+	if full {
 		if len(s.rejections) >= s.backend.cfg.Confirmation.MaxPendingTools {
 			// Reserve the bounded rejection budget for real issued cards. Unknown
 			// or malformed client requests must not starve a legitimate card ACK.
@@ -421,12 +423,9 @@ func (s *session) runConfirmedTool(ctx context.Context, cancel context.CancelFun
 				reply = s.explainToolResult(replyParent, p, pending, status, view, summary)
 			}
 			p.mu.Lock()
-			p.continuationPending = next != nil
+			p.continuationPending = next != nil && replyParent.Err() == nil && s.enqueueContinuation(replyParent, next)
 			p.mu.Unlock()
 			p.end(reply, nil)
-			if next != nil && replyParent.Err() == nil {
-				s.enqueueContinuation(replyParent, next)
-			}
 		}
 	}()
 	models, err := s.backend.Models(ctx)
@@ -499,27 +498,37 @@ func (s *session) runConfirmedTool(ctx context.Context, cancel context.CancelFun
 }
 
 // 排队与用户停止共用同一把锁；不能借用即将收尾的上一轮 context，也不能在停止后重新排队。
-func (s *session) enqueueContinuation(parent context.Context, event *ihtml.ChatClientEvent) {
+func (s *session) enqueueContinuation(parent context.Context, event *ihtml.ChatClientEvent) bool {
 	cleaned, err := cleanEvent(event)
 	if err != nil {
-		return
+		return false
 	}
 	s.mu.Lock()
 	if s.closed || parent.Err() != nil || s.ctx.Err() != nil {
 		s.mu.Unlock()
-		return
+		return false
 	}
-	if len(s.queue) >= s.backend.cfg.MaxPendingTurns {
+	// 批量回执的相同续办事件合并为一次重新规划；不同宿主事件保持各自语义。
+	// 普通轮次会重新读取权威回执，不需要为同一提示重复调用模型。
+	for _, queued := range s.queue {
+		if queued.continuation && reflect.DeepEqual(queued.event, cleaned) {
+			s.mu.Unlock()
+			return true
+		}
+	}
+	if s.queuedOrdinaryTurnsLocked() >= s.backend.cfg.MaxPendingTurns {
 		s.queueRejected = true
 		s.mu.Unlock()
-		return
+		return false
 	}
-	s.queue = append(s.queue, pendingTurn{parent: s.ctx, event: cleaned})
+	s.queue = append(s.queue, pendingTurn{parent: s.ctx, event: cleaned, continuation: true})
 	s.mu.Unlock()
 	select {
 	case s.wake <- struct{}{}:
 	default:
 	}
+
+	return true
 }
 
 func (s *session) releaseQueued(call ihtml.ProposedToolCall) {

@@ -601,7 +601,7 @@ func TestConfirmedResultExplanationIsToolFreeAndFallsBackWithoutRepeatingAction(
 // 一轮产生的合法卡片不受普通提问队列影响；批量确认仍按 nonce 去重、逐项执行。
 func TestIssuedConfirmationBatchUsesItsOwnBoundedQueue(t *testing.T) {
 	r := newRecorder()
-	var calls atomic.Int32
+	var calls, continuations atomic.Int32
 	entered, release := make(chan struct{}), make(chan struct{})
 	cfg := approvalConfig(t, func(ctx context.Context, _ json.RawMessage) (string, error) {
 		if calls.Add(1) == 1 {
@@ -617,7 +617,14 @@ func TestIssuedConfirmationBatchUsesItsOwnBoundedQueue(t *testing.T) {
 	cfg.MaxPendingTurns = 1
 	cfg.Confirmation.MaxPendingTools = 64
 	cfg.Confirmation.ToolTimeout = 5 * time.Second
+	cfg.ContinueAfterTool = func(ctx context.Context, _ *ihtml.ChatSessionContext, result *ConfirmedToolResult) (*ihtml.ChatClientEvent, error) {
+		return NewToolContinuation(ctx, result), nil
+	}
 	cfg.Engine = &fakeEngine{run: func(ctx context.Context, req *agent.TurnRequest) (*agent.TurnResult, error) {
+		if req.UserText != "propose" {
+			continuations.Add(1)
+			return &agent.TurnResult{Text: "all saved receipts checked"}, nil
+		}
 		for i := 0; i < 41; i++ {
 			args, _ := json.Marshal(map[string]int{"item": i})
 			if _, err := req.Tools[0].Handler(ctx, args); err != nil {
@@ -645,7 +652,10 @@ func TestIssuedConfirmationBatchUsesItsOwnBoundedQueue(t *testing.T) {
 		confirmCard(s, card)
 	}
 	close(release)
-	events = r.wait(t, ihtml.ChatStreamAssistantDone, 42)
+	events = r.wait(t, ihtml.ChatStreamAssistantDone, 43)
+	if continuations.Load() != 1 {
+		t.Fatal("batch continuation dropped or redundantly replanned", continuations.Load())
+	}
 	if calls.Load() != 41 {
 		t.Fatal("dropped or replayed approved action", calls.Load())
 	}

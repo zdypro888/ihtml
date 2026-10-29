@@ -254,9 +254,11 @@ func (b *Backend) NewSession(ctx context.Context, sctx *ihtml.ChatSessionContext
 }
 
 type pendingTurn struct {
-	parent context.Context
-	event  ihtml.ChatClientEvent
-	reject bool
+	parent         context.Context
+	event          ihtml.ChatClientEvent
+	reject         bool
+	issuedApproval bool
+	continuation   bool
 }
 
 type session struct {
@@ -365,7 +367,7 @@ func (s *session) HandleEvent(ctx context.Context, ev *ihtml.ChatClientEvent) {
 		s.mu.Unlock()
 		return
 	}
-	if len(s.queue) >= s.backend.cfg.MaxPendingTurns {
+	if s.queuedOrdinaryTurnsLocked() >= s.backend.cfg.MaxPendingTurns {
 		output := s.activeOutput
 		if output == nil {
 			s.queueRejected = true
@@ -382,6 +384,17 @@ func (s *session) HandleEvent(ctx context.Context, ev *ihtml.ChatClientEvent) {
 	case s.wake <- struct{}{}:
 	default:
 	}
+}
+
+// 普通消息预算不含已经签发并占用确认额度的卡片；调用方持有 mu。
+func (s *session) queuedOrdinaryTurnsLocked() int {
+	count := 0
+	for _, next := range s.queue {
+		if !next.issuedApproval {
+			count++
+		}
+	}
+	return count
 }
 
 func cleanEvent(ev *ihtml.ChatClientEvent) (ihtml.ChatClientEvent, error) {

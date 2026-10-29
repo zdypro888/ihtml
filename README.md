@@ -525,7 +525,7 @@ type ScopedPagePublicationService interface { … } // 对 ScopedService 做类�
 
 ### 确认后继续多步业务（可选）
 
-已签发确认卡的排队容量使用 `Confirmation.MaxPendingTools` 的独立有界额度，不与 `MaxPendingTurns` 的普通消息队列争用；普通消息满载时，已展示给用户的合法确认仍可排队。重复点击同一 nonce 只执行一次，取消会释放原卡排队状态。此规则不延长卡片期限、不扩大工具权限，也不会自动重放执行结果未知的工具。
+已签发确认卡的排队容量使用 `Confirmation.MaxPendingTools` 的独立有界额度，不与 `MaxPendingTurns` 的普通消息队列争用；普通消息满载时，已展示给用户的合法确认仍可排队。重复点击同一 nonce 只执行一次，取消会释放原卡排队状态。已确认卡也不占用普通消息或续办的额度；排队中的相同宿主续办事件会合并为一次重新读取权威回执，避免批量确认引起重复模型规划。不同事件不合并，续办未受理时不向页面标记 continuation_pending。此规则不延长卡片期限、不扩大工具权限，也不会自动重放执行结果未知的工具。
 
 `assistant.Config.ContinueAfterTool` 可在已确认动作执行并经 `CompleteTool` 保存后，返回一个新的 `ChatClientUserMessage` 事件。框架将其送回普通轮次队列，重新调用宿主 `PrepareTurn`、实时鉴权和工具治理；新的写动作仍生成新确认卡，不继承上一张卡的权限。错误、unknown、公开回执标为 error 时不续跑。未配置时保持原有无工具结果总结；配置并返回事件时跳过重复总结。返回 nil 可结束原计划。宿主应从服务端对话和原任务回执决定剩余范围，不能扩展原名单或重放未知动作；后台作业仍由宿主持久化。
 
