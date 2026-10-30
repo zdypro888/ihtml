@@ -527,7 +527,7 @@ type ScopedPagePublicationService interface { … } // 对 ScopedService 做类�
 
 已签发确认卡的排队容量使用 `Confirmation.MaxPendingTools` 的独立有界额度，不与 `MaxPendingTurns` 的普通消息队列争用；普通消息满载时，已展示给用户的合法确认仍可排队。重复点击同一 nonce 只执行一次，取消会释放原卡排队状态。已确认卡也不占用普通消息或续办的额度；排队中的相同宿主续办事件会合并为一次重新读取权威回执，避免批量确认引起重复模型规划。不同事件不合并，续办未受理时不向页面标记 continuation_pending。此规则不延长卡片期限、不扩大工具权限，也不会自动重放执行结果未知的工具。
 
-`assistant.Config.ContinueAfterTool` 可在已确认动作执行并经 `CompleteTool` 保存后，返回一个新的 `ChatClientUserMessage` 事件。框架将其送回普通轮次队列，重新调用宿主 `PrepareTurn`、实时鉴权和工具治理；新的写动作仍生成新确认卡，不继承上一张卡的权限。错误、unknown、公开回执标为 error 时不续跑。未配置时保持原有无工具结果总结；配置并返回事件时跳过重复总结。返回 nil 可结束原计划。宿主应从服务端对话和原任务回执决定剩余范围，不能扩展原名单或重放未知动作；后台作业仍由宿主持久化。
+`assistant.Config.ContinueAfterTool` 可在已确认动作执行并经 `CompleteTool` 保存后，返回一个新的 `ChatClientUserMessage` 事件。框架将其送回普通轮次队列，重新调用宿主 `PrepareTurn`、实时鉴权和工具治理；新的写动作仍生成新确认卡，不继承上一张卡的权限。执行异常或 unknown 不续跑；已保存的明确业务拒绝回执可以继续核查并生成新卡。未配置时保持原有无工具结果总结；配置并返回事件时跳过重复总结。返回 nil 可结束原计划。宿主应从服务端对话和原任务回执决定剩余范围，不能扩展原名单或重放未知动作；后台作业仍由宿主持久化。
 
 `PublicTurnError` 可把内部错误映射为固定公开文案，切勿返回供应商错误原文、令牌或调用参数。历史、错误分类和后台进度仍由宿主存储。
 
@@ -598,3 +598,9 @@ GPT-6.1 Terra 的工具调用必须使用 `OpenAIAPI:"responses"`；SDK 在发�
 `assistant_status` 表示当前执行进度，折叠摘要直接显示。流式正文和思考不会覆盖它；下一工具阶段、暂停、完成或失败会结束原进度阶段。业务无需自行展开工具面板或解析自然语言来控制进度展示。
 
 窄聊天区域会把工具数和耗时放到进度下方，桌面侧栏与手机使用同一容器宽度规则。受理回执折叠时只显示状态与标题，展开仍保留原始说明，不把提交已受理等同于业务完成。实时耗时按秒、分、小时显示；原生历史回放尚无权威耗时字段时不显示重新连接后的计时，避免把新连接的 0 秒冒充原流程耗时。
+
+### 手动确认与持久回执恢复
+
+`agent.Tool.RecoverResult` 同时用于普通引擎和手动确认桥接。确认后的 Handler 报错或超时时，桥接层只核对原 invocation 的持久回执一次，重新经过实时权限校验，使用独立的短期限；不会再次调用 Handler。只有宿主返回 `recovered=true` 及非空确切回执，且 `CompleteTool` 保存成功，才可经 `ContinueAfterTool` 进入下一轮。未落库、执行中、结果未知、核对失败或权限撤销均不能被当成成功。用户停止或会话关闭不触发自动核对续办。
+
+请求格式或领域组合无效时，宿主可从执行前的 Preview/ToolExecutionGuard 返回 `assistant.ErrInvalidToolArguments`（支持包装）。桥接返回固定的 `invalid_arguments / not_started / correct_arguments` 结果，供模型修正参数；不签发确认卡，不透传错误原文。该标记不能用于权限错误、网络错误、数据库错误或可能已有副作用的操作。HTTP 非 2xx 本身不证明未执行。

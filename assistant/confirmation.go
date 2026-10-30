@@ -19,6 +19,12 @@ import (
 // 桥接层仅公开固定结构，不透传普通错误正文，也不把此结果当成用户批准。
 var ErrPreviewRefreshRequired = errors.New("assistant: refresh the original preview before confirmation")
 
+// ErrInvalidToolArguments 仅表示执行前的参数校验失败；不适用于权限错误或已有副作用的失败。
+// 桥接层返回固定结构让模型修正提案，不透传原始错误或签发无效确认卡。
+var ErrInvalidToolArguments = errors.New("assistant: invalid tool arguments; not executed")
+
+const invalidToolArgumentsResult = `{"status":"invalid_arguments","execution":"not_started","next_action":"correct_arguments","message":"Check the tool schema and original resource identifiers, correct the arguments, then propose again. No operation was executed."}`
+
 type ConfirmationConfig struct {
 	Signer          *confirmation.Signer
 	Scope           func(context.Context, *ihtml.ChatSessionContext, *agent.TurnRequest) (confirmation.Scope, error)
@@ -71,6 +77,9 @@ func (s *session) prepareTool(ctx context.Context, tool agent.Tool, args json.Ra
 	}
 	host = s.sctx
 	call, err := cfg.Preview(ctx, &host, tool, append(json.RawMessage(nil), args...))
+	if errors.Is(err, ErrInvalidToolArguments) {
+		return invalidToolArgumentsResult, nil
+	}
 	if errors.Is(err, ErrPreviewRefreshRequired) {
 		return `{"status":"preview_refresh_required","execution":"not_started","next_action":"refresh_preview"}`, nil
 	}
@@ -342,11 +351,16 @@ func (s *session) runConfirmedTool(ctx context.Context, cancel context.CancelFun
 	var pending *pendingTool
 	var runErr error
 	started := false
+	recovered := false
+	var finishRecovery func()
 	defer func() {
+		if finishRecovery != nil {
+			defer finishRecovery()
+		}
 		if recover() != nil {
 			runErr = errors.New("assistant: confirmed tool panicked; execution state unknown")
 		}
-		if ctx.Err() != nil {
+		if ctx.Err() != nil && !recovered {
 			runErr = ctx.Err()
 		}
 		if evidence != nil {
@@ -358,7 +372,7 @@ func (s *session) runConfirmedTool(ctx context.Context, cancel context.CancelFun
 				}
 			}
 		}
-		if ctx.Err() != nil {
+		if ctx.Err() != nil && !recovered {
 			runErr = ctx.Err()
 		}
 		status, summary := ihtml.ChatToolSuccess, "Invocation returned; no public result details were provided. Check the source record to verify the business outcome."
@@ -494,6 +508,22 @@ func (s *session) runConfirmedTool(ctx context.Context, cancel context.CancelFun
 	evidence.Result, runErr = item.tool.Handler(callCtx, append(json.RawMessage(nil), item.args...))
 	if callCtx.Err() != nil {
 		runErr = callCtx.Err()
+	}
+	// 确认桥接与普通引擎共用工具的只读回执恢复协议；绝不再次调用 Handler。
+	// 请求超时后只核对同一 invocation，用户停止/会话关闭则不发起恢复或续办。
+	if runErr != nil && item.tool.RecoverResult != nil && replyParent.Err() == nil && s.ctx.Err() == nil {
+		reconcile, finish := context.WithTimeout(item.invocation, min(s.backend.cfg.Confirmation.ToolTimeout, 5*time.Second))
+		stopReply := context.AfterFunc(replyParent, finish)
+		finishRecovery = func() { stopReply(); finish() }
+		host := s.sctx
+		if err := s.backend.cfg.ToolExecutionGuard(reconcile, &host, item.tool, append(json.RawMessage(nil), item.args...)); err == nil {
+			value, ok, err := item.tool.RecoverResult(reconcile, append(json.RawMessage(nil), item.args...))
+			if err == nil && ok && value != "" && reconcile.Err() == nil {
+				evidence.Result, runErr, recovered = value, nil, true
+				// 回执保存/展示也使用独立核对预算，不能继续使用已超时的执行 context。
+				ctx = reconcile
+			}
+		}
 	}
 }
 

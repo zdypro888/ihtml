@@ -694,6 +694,9 @@ func (s *session) governTools(tools []agent.Tool, ev *ihtml.ChatClientEvent, p *
 			if guard != nil {
 				hostContext := s.sctx
 				if err := guard(ctx, &hostContext, original, args); err != nil {
+					if errors.Is(err, ErrInvalidToolArguments) {
+						return invalidToolArgumentsResult, nil
+					}
 					return "", ihtml.ErrAccessDenied
 				}
 			}
