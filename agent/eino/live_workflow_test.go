@@ -55,32 +55,8 @@ func TestLiveResponsesAgentWorkflow(t *testing.T) {
 	if os.Getenv("IHTML_LIVE_AGENT_TEST") != "1" {
 		t.Skip("explicit live model test opt-in required")
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatal("home directory unavailable")
-	}
-	raw, err := os.ReadFile(filepath.Join(home, ".config/credentials"))
-	if err != nil {
-		t.Fatal("unified credentials unavailable")
-	}
-	var credentials struct {
-		Services map[string]json.RawMessage `json:"services"`
-	}
-	if json.Unmarshal(raw, &credentials) != nil {
-		t.Fatal("unified credentials invalid")
-	}
-	var service struct {
-		Credentials struct {
-			APIKey string `json:"api_key"`
-		} `json:"credentials"`
-	}
-	if json.Unmarshal(credentials.Services["iclouder_ai"], &service) != nil {
-		t.Fatal("iclouder_ai configuration invalid")
-	}
-	key := service.Credentials.APIKey
-	if key == "" {
-		t.Fatal("iclouder_ai credential unavailable")
-	}
+	key := liveModelAPIKey(t)
+
 	for _, model := range []string{"gpt-6.1-sol", "gpt-6.1-terra"} {
 		t.Run(model, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
@@ -188,4 +164,36 @@ func TestLiveResponsesAgentWorkflow(t *testing.T) {
 			t.Logf("model=%s: deferred search, ordered tools, native compaction, checkpoint pause/resume, replay rejection, managed follow-up passed; model_calls=%d/%d/%d compactions=%d", model, first.ToolExposure.ModelCalls, second.ToolExposure.ModelCalls, third.ToolExposure.ModelCalls, compactions)
 		})
 	}
+}
+
+// 实际模型验收共用同一凭据入口；从不把密钥写到测试文件或日志。
+func liveModelAPIKey(t *testing.T) string {
+	t.Helper()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal("home directory unavailable")
+	}
+	raw, err := os.ReadFile(filepath.Join(home, ".config/credentials"))
+	if err != nil {
+		t.Fatal("unified credentials unavailable")
+	}
+	var credentials struct {
+		Services map[string]json.RawMessage `json:"services"`
+	}
+	if json.Unmarshal(raw, &credentials) != nil {
+		t.Fatal("unified credentials invalid")
+	}
+	var service struct {
+		Credentials struct {
+			APIKey string `json:"api_key"`
+		} `json:"credentials"`
+	}
+	if json.Unmarshal(credentials.Services["iclouder_ai"], &service) != nil {
+		t.Fatal("iclouder_ai configuration invalid")
+	}
+	key := service.Credentials.APIKey
+	if key == "" {
+		t.Fatal("iclouder_ai credential unavailable")
+	}
+	return key
 }

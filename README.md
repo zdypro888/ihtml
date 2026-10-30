@@ -541,6 +541,10 @@ type ScopedPagePublicationService interface { … } // 对 ScopedService 做类�
 
 同轮互不依赖的工具调用由 Eino `ToolsNode` 原生并行执行；引擎提示模型合并独立查询，依赖前一步结果或操作相同资源的步骤继续串行。工具 Handler 必须支持并发，资源锁、配额和后台任务内部的有界并发属于宿主职责。单会话执行锁只防止两个轮次同时改写同一对话，不会把该轮的所有工具串行化。每个写调用仍单独绑定确认；同轮其他调用不能共享一次授权。任务受理后查询原编号，不能为加速重复提交。回归 `TestDeepAgentRunsIndependentToolsConcurrently` 验证实际 Handler 重叠执行及乱序完成后的调用关联，确认隔离由 `TestNativeApprovalUntargetedCallRemainsPaused` 验证。
 
+引擎通过两层信息让模型知道如何安排并发：共享调度指引说明“先识别依赖、同轮执行独立查询、等待依赖后再继续”；每个工具的模型说明则根据现有 `Tool.Effect`、`ApprovalRequired`、`Completion` 自动补充“执行约定”，立即工具和 `tool_search` 发现的工具一致。宿主只需把具体前置条件放在原 `Description` 中（例如标识/游标/版本必须来自哪个结果），不需要新增并发工具、额外调度开关或复制一份系统提示。
+
+例如 A、B 的状态查询参数都已知时，同轮查询；两者都完成后，再生成依赖它们结果的预览；后台任务已受理时，先完成其他独立查询，再对原任务保留一个等待调用。批量接口仍提交一份原范围，让服务端执行内部并发。工具说明是模型的调度依据，不能代替宿主资源锁、幂等、权限和真实完成校验；未声明影响的工具不会被描述为只读或并发安全。
+
 需要保留工具轨迹时，通过 `einoengine.WithRuntimeStore` 注入宿主存储，并保存 `EngineSession`；`DisableSession:true` 明确关闭此能力。产品历史与引擎工作记忆分开，不能把原始 checkpoint 或推理轨迹当作历史对话返回。`agent/eino/sqlstore` 提供 PostgreSQL 适配器；数据库迁移、租户隔离、执行锁及保留策略仍由宿主负责。
 
 需要原生确认中断时，使用 `assistant.Config.NativeConfirmation` 的 Pause/PrepareResume/Pending 与 `RequireApproval`、`ResumeRequest`，让 Eino checkpoint 继续原轨迹；它与手动 Confirmation 互斥。已有业务确认宿主可以选择 `ContinueAfterTool`，确认后进入新的受管轮次，不应把这种方式宣传为跨进程恢复原模型轨迹。独立业务作业的恢复以宿主原任务回执为准。工具未知结果不重放，人工取消不能被后台续跑重新排队覆盖。
@@ -548,6 +552,8 @@ type ScopedPagePublicationService interface { … } // 对 ScopedService 做类�
 GPT-6.1 Terra 的工具调用必须使用 `OpenAIAPI:"responses"`；SDK 在发送错误协议请求前拒绝，普通无工具文本请求不受该规则影响。模型可用性以实际账户的模型列表和代表性流程验收为准。
 
 显式真实模型验收：`IHTML_LIVE_AGENT_TEST=1 GOWORK=off go test ./agent/eino -run TestLiveResponsesAgentWorkflow -v`。只读取统一 `~/.config/credentials` 内 `iclouder_ai` 凭据；Sol/Terra 对同一组十个合成身份执行只读工具、本机计数回执、原生压缩、checkpoint 暂停/恢复、重复恢复拒绝和后续会话核对。默认测试跳过网络调用；测试不清空真实云盘、不转移真实身份。测试 Store 为内存存储，只证明重建 Engine 后使用同一 Store 恢复，不能据此声称某个宿主已经接好持久数据库。
+
+实际并发决策可用 `IHTML_LIVE_PARALLEL_TEST=1 GOWORK=off go test ./agent/eino -run TestLiveResponsesParallelScheduling -v` 验收：用户只要求查询 A、B 状态，不提示并发，两个 Handler 必须真实重叠且各查询一次。测试读取统一凭据，使用只读合成状态，不进入生产对话或操作真实文件；2026-10-30 Sol/Terra 两个模型均通过。它证明该场景的并发调度，不是所有业务流程或生产迁移完成的证明。
 
 实现依据：[Eino Runner](https://www.cloudwego.io/docs/eino/core_modules/eino_adk/agent_extension/)、[Eino 中断恢复](https://www.cloudwego.io/docs/eino/quick_start/chapter_07_interrupt_resume/)、[Codex harness](https://developers.openai.com/blog/codex-as-a-platform)、[Claude tool runner](https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-runner)、[Terra 模型](https://developers.openai.com/api/docs/models/gpt-6.1-terra)。
 

@@ -636,9 +636,6 @@ func (e *Engine) newDeepAgent(
 	return agent, toolScope, nil
 }
 
-// 通用调度指引只说明依赖关系，不替宿主扩大权限或重复提交后台作业。
-const parallelToolInstruction = "工具调度：参数已知且互不依赖的查询，可在同一轮发出多个工具调用并行执行；不要仅为等待一个独立查询而把其余查询拆成串行轮次。依赖前一步结果的操作，必须等待结果后再调用。写入仍遵守宿主的逐项授权和确认，涉及相同资源或顺序约束时串行执行。后台作业已受理后沿用原任务查询或续办，不以并行调用重复提交；工具报告需要等待时遵守等待约定。"
-
 func deepMaxIterations(configured, requested int) int {
 	if requested > 0 && requested < configured {
 		return requested
@@ -1172,13 +1169,9 @@ func (e *einoTool) Info(context.Context) (*schema.ToolInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("工具 %s schema: %w", e.t.Name, err)
 	}
-	description := e.t.Description
-	if e.t.Completion == ai.ToolCompletionAsynchronous {
-		description += " 成功返回表示任务已持久化并被异步受理，不表示任务已经执行完成；后续进度和最终结果以任务状态为准。"
-	}
 	return &schema.ToolInfo{
 		Name:        e.t.Name,
-		Desc:        description,
+		Desc:        modelToolDescription(e.t),
 		ParamsOneOf: schema.NewParamsOneOfByJSONSchema(js),
 	}, nil
 }
