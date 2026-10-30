@@ -610,7 +610,7 @@ func (e *Engine) newDeepAgent(
 		// Deep Agent's loop, middleware and lifecycle remain native Eino. Its
 		// bundled prompt targets a coding CLI, so nbco supplies the product
 		// instruction through the framework's supported configuration point.
-		Instruction:  req.System,
+		Instruction:  req.System + "\n\n" + parallelToolInstruction,
 		ChatModel:    model,
 		MaxIteration: maxIterations,
 		// nbco has durable tasks, goals and workflows. Deep's ephemeral coding
@@ -619,7 +619,9 @@ func (e *Engine) newDeepAgent(
 		WithoutWriteTodos:      !e.cfg.EnableWriteTodos,
 		WithoutGeneralSubAgent: !e.cfg.EnableGeneralSubAgent,
 		ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{
-			Tools: immediateTools,
+			// 同轮工具使用 Eino 原生并发；确认中间件仍逐调用绑定授权。
+			Tools:               immediateTools,
+			ExecuteSequentially: false,
 			ToolCallMiddlewares: []compose.ToolMiddleware{approvalMiddleware(req.Tools, req.RequireApproval, toolScope), {
 				Name:      "ihtml_deferred_tool_scope",
 				Invokable: toolScope.guardInvokable,
@@ -633,6 +635,9 @@ func (e *Engine) newDeepAgent(
 	}
 	return agent, toolScope, nil
 }
+
+// 通用调度指引只说明依赖关系，不替宿主扩大权限或重复提交后台作业。
+const parallelToolInstruction = "工具调度：参数已知且互不依赖的查询，可在同一轮发出多个工具调用并行执行；不要仅为等待一个独立查询而把其余查询拆成串行轮次。依赖前一步结果的操作，必须等待结果后再调用。写入仍遵守宿主的逐项授权和确认，涉及相同资源或顺序约束时串行执行。后台作业已受理后沿用原任务查询或续办，不以并行调用重复提交；工具报告需要等待时遵守等待约定。"
 
 func deepMaxIterations(configured, requested int) int {
 	if requested > 0 && requested < configured {

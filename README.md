@@ -539,6 +539,8 @@ type ScopedPagePublicationService interface { … } // 对 ScopedService 做类�
 
 `agent/eino` 使用 Eino `deep.New` 与 `adk.Runner` 执行多轮工具调用，不在宿主重新实现推理循环。工具目录较大时，只把常用入口标为 `ToolLoadImmediate`，其余保留 `ToolLoadDeferred`，交给原生 `tool_search`；延迟加载不会赋予新权限。工具作用域在压缩前记录真实检索结果，避免已加载工具被摘要隐藏。摘要使用原生 summarization middleware 的任务摘要配置，禁止摘要请求调用工具，Responses 摘要降低推理开销；Finalize 保留最近两组完整工具往返（合计不超过64 KiB，不截断 JSON 或加密元数据），准确保留任务编号及预览指纹。公开进度只发送压缩阶段名称，`TurnResult.ToolExposure.ContextCompactions` 记录实际压缩次数。
 
+同轮互不依赖的工具调用由 Eino `ToolsNode` 原生并行执行；引擎提示模型合并独立查询，依赖前一步结果或操作相同资源的步骤继续串行。工具 Handler 必须支持并发，资源锁、配额和后台任务内部的有界并发属于宿主职责。单会话执行锁只防止两个轮次同时改写同一对话，不会把该轮的所有工具串行化。每个写调用仍单独绑定确认；同轮其他调用不能共享一次授权。任务受理后查询原编号，不能为加速重复提交。回归 `TestDeepAgentRunsIndependentToolsConcurrently` 验证实际 Handler 重叠执行及乱序完成后的调用关联，确认隔离由 `TestNativeApprovalUntargetedCallRemainsPaused` 验证。
+
 需要保留工具轨迹时，通过 `einoengine.WithRuntimeStore` 注入宿主存储，并保存 `EngineSession`；`DisableSession:true` 明确关闭此能力。产品历史与引擎工作记忆分开，不能把原始 checkpoint 或推理轨迹当作历史对话返回。`agent/eino/sqlstore` 提供 PostgreSQL 适配器；数据库迁移、租户隔离、执行锁及保留策略仍由宿主负责。
 
 需要原生确认中断时，使用 `assistant.Config.NativeConfirmation` 的 Pause/PrepareResume/Pending 与 `RequireApproval`、`ResumeRequest`，让 Eino checkpoint 继续原轨迹；它与手动 Confirmation 互斥。已有业务确认宿主可以选择 `ContinueAfterTool`，确认后进入新的受管轮次，不应把这种方式宣传为跨进程恢复原模型轨迹。独立业务作业的恢复以宿主原任务回执为准。工具未知结果不重放，人工取消不能被后台续跑重新排队覆盖。

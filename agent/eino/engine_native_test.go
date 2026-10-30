@@ -410,7 +410,7 @@ func TestDeepAgentBlocksUnloadedDeferredToolExecution(t *testing.T) {
 
 func TestDeepAgentUsesProductInstruction(t *testing.T) {
 	state := &scriptedModelState{fn: func(input []*schema.Message, _ []*schema.ToolInfo) (*schema.Message, error) {
-		if got := strings.TrimSpace(input[0].Content); got != "PRODUCT_CONTEXT_MARKER" {
+		if got := strings.TrimSpace(input[0].Content); !strings.HasPrefix(got, "PRODUCT_CONTEXT_MARKER\n\n") || !strings.Contains(got, parallelToolInstruction) {
 			return nil, fmt.Errorf("deep agent did not use the product instruction directly: %q", got)
 		}
 		return finalResponse("product-final", "产品提示正常"), nil
