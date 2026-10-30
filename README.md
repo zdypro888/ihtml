@@ -445,7 +445,7 @@ Template 只定义可复用结构。新业务 Item 通过 `Item.Meta["slot"] == 
 
 ## AI 对话
 
-- 传输：WebSocket 上的可扩展流式事件协议（`user_message` / `confirm_tool` / `cancel_tool` / `cancel_tool_result` / `assistant_delta` / `tool_start` / `confirmation_required` / `assistant_done` …），第三方 `ChatBackend` 可以沿用同一套通用前端。所有服务端输出（包括第三方 Backend）在写线前统一受限：单个编码后事件 ≤ 1 MiB - 1 byte (`MaxChatOutboundFrameBytes`)，每个已接受用户轮次 ≤ 4096 个事件且 ≤ 4 MiB，每条连接累计 ≤ 65536 个事件且 ≤ 64 MiB；越界会发送固定错误并以 WebSocket 1009 关闭连接。`confirm_tool` 与 `cancel_tool` 进入同一有界 FIFO，按帧顺序争用一次性 nonce；前端以携带工具 ID + nonce 的真实回执为准，连接断开时会先重连，只有成功回执才显示“已撤销、未执行”，失败或状态未知绝不伪装成取消成功
+- 传输：WebSocket 上的可扩展流式事件协议（`user_message` / `confirm_tool` / `cancel_tool` / `cancel_tool_result` / `assistant_delta` / `tool_start` / `confirmation_required` / `assistant_done` …），第三方 `ChatBackend` 可以沿用同一套通用前端。所有服务端输出（包括第三方 Backend）在写线前统一受限：单个编码后事件 ≤ 1 MiB - 1 byte (`MaxChatOutboundFrameBytes`)，每个真实输出段 ≤ 4096 个事件且 ≤ 4 MiB（确认执行、自动续办、后台恢复各自以已结束后的 `turn_start` 开始新段，活动段不能靠更换 RunID 或重复 start 重置）；每条连接的一分钟窗口 ≤ 65536 个事件且 ≤ 64 MiB，不累计连接终身输出。单帧、JSON 深度/节点以及突发输出越界仍会发送固定错误并以 WebSocket 1009 关闭连接，服务端仅记录边界原因和计数，不记录正文或确认签名。`confirm_tool` 与 `cancel_tool` 进入同一有界 FIFO，按帧顺序争用一次性 nonce；前端以携带工具 ID + nonce 的真实回执为准，连接断开时会先重连，只有成功回执才显示“已撤销、未执行”，失败或状态未知绝不伪装成取消成功
 - 通用助手：普通问答、解释和业务数据查询直接在对话中回答；只有用户明确要求创建或修改界面时才调用 UI 写工具。多记录、时间序列和横向对比优先使用语义表格，但不硬编码业务字段或固定模板
 - 执行模式：未指定 `agent_mode` 或指定 `fast` 时走单 Agent 低延迟路径；只有服务端设置 `EnableDeepAgent=true` 后，客户端才可对复杂任务发送 `agent_mode:"deep"`。因此开放 Deep 不会改变普通对话的默认行为
 - DeepAgent 边界：使用 eino ADK DeepAgent 做规划与委派，内置 `ui_inspector` / `ui_reviewer` 子 Agent 只能读取（含 `ui_template_get`，不会获得模板写工具）；所有 UI/Template 写入仍集中在根 Agent，且没有文件系统、Shell 或任意网络工具

@@ -429,16 +429,15 @@ const (
 	chatWSPongWait  = 70 * time.Second
 	chatWSPingEvery = 25 * time.Second
 
-	// Keep every server frame strictly below the inbound one-MiB ceiling. The
-	// remaining quotas bound a third-party backend for both one logical turn and
-	// the lifetime of a connection. Turn boundaries are advanced only by the
-	// handler after it accepts a client user_message; backend-provided IDs are
-	// deliberately not trusted for accounting.
+	// Keep every server frame strictly below the inbound one-MiB ceiling.
+	// 单轮按真实开始/终止事件计数，覆盖确认执行和自动续办；不能用 RunID 换额度。
+	// 连接累计额约束一分钟内的突发输出，不限制长连接一生能完成多少轮。
 	chatWSMaxFrameBytes       = MaxChatOutboundFrameBytes
 	chatWSMaxTurnEvents       = 4096
 	chatWSMaxTurnBytes        = 4 << 20
 	chatWSMaxConnectionEvents = 65536
 	chatWSMaxConnectionBytes  = 64 << 20
+	chatWSConnectionWindow    = time.Minute
 	chatWSMaxJSONDepth        = 32
 	chatWSMaxJSONNodes        = 65536
 )
@@ -493,15 +492,16 @@ type chatWSEgressGuard struct {
 	writeMu *sync.Mutex
 	limits  chatWSEgressLimits
 
-	closed           atomic.Bool
-	terminalWritten  bool
-	activeTurnKey    uint64
-	turnActive       bool
-	pendingTurns     uint64
-	turnEvents       uint64
-	turnBytes        uint64
-	connectionEvents uint64
-	connectionBytes  uint64
+	closed                atomic.Bool
+	terminalWritten       bool
+	activeTurnKey         uint64
+	turnActive            bool
+	pendingTurns          uint64
+	turnEvents            uint64
+	turnBytes             uint64
+	connectionEvents      uint64
+	connectionBytes       uint64
+	connectionWindowStart time.Time
 }
 
 func newChatWSEgressGuard(writer chatWSWriter, writeMu *sync.Mutex) *chatWSEgressGuard {
@@ -592,6 +592,18 @@ func (g *chatWSEgressGuard) emitEvent(event ChatStreamEvent, backendEvent bool) 
 	if g.closed.Load() {
 		return errChatWSOutputClosed
 	}
+	// 自动续办没有客户端 beginTurn；只有上一段已终止时才接受新的开始事件。
+	// 活动段内重复 turn_start 或更换 RunID 均不能清零额度。
+	if backendEvent && event.Type == ChatStreamTurnStart && !g.turnActive {
+		g.activateTurnLocked()
+	}
+	// 已成功写出的历史数据不占服务端内存，不能累积成会话终身配额。
+	// 连接级窗口仍约束用大量短轮次绕过单轮额度的输出洪泛。
+	now := time.Now()
+	if g.connectionWindowStart.IsZero() || now.Sub(g.connectionWindowStart) >= chatWSConnectionWindow {
+		g.connectionWindowStart = now
+		g.connectionEvents, g.connectionBytes = 0, 0
+	}
 	if g.turnEvents >= g.limits.maxTurnEvents || g.connectionEvents >= g.limits.maxConnectionEvents {
 		return g.rejectLimitLocked("event count")
 	}
@@ -673,7 +685,9 @@ func (g *chatWSEgressGuard) rejectLimitLocked(reason string) error {
 			websocket.FormatCloseMessage(websocket.CloseMessageTooBig, "chat output limit"), deadline)
 	}
 	_ = g.writer.Close()
-	return fmt.Errorf("%w: %s", errChatWSOutputLimit, reason)
+	// 只报告计数和边界原因，不把工具参数、签名卡或正文写入诊断日志。
+	return fmt.Errorf("%w: %s (turn_events=%d turn_bytes=%d window_events=%d window_bytes=%d)",
+		errChatWSOutputLimit, reason, g.turnEvents, g.turnBytes, g.connectionEvents, g.connectionBytes)
 }
 
 type chatWSJSONBudget struct {
@@ -1241,7 +1255,13 @@ func (h *Handler) handleChatWS(w http.ResponseWriter, r *http.Request, user stri
 	allowClientModel := h.clientModelSelectionAllowed(ctx)
 	var writeMu sync.Mutex
 	egress := newChatWSEgressGuard(conn, &writeMu)
-	emit := egress.emit
+	emit := func(event ChatStreamEvent) error {
+		err := egress.emit(event)
+		if errors.Is(err, errChatWSOutputLimit) {
+			h.opts.logger.Warn("ihtml: chat output rejected", "event_type", event.Type, "err", err)
+		}
+		return err
+	}
 	governed := &governedService{h: h, request: r, user: user, source: "chat", requireChat: true}
 	scoped, scopeErr := ScopeService(governed, user)
 	if scopeErr != nil {
@@ -1329,8 +1349,7 @@ func (h *Handler) handleChatWS(w http.ResponseWriter, r *http.Request, user stri
 				_ = egress.emitInternal(ChatStreamEvent{Type: "turn_error", Error: "对话过于频繁, 请稍后再试。", ModelReady: true})
 				continue
 			}
-			// Only this accepted client event advances the server-owned turn
-			// bucket. A backend cannot evade quotas with missing or forged IDs.
+			// 用户输入入队不会重置仍在输出的段；确认续办由服务端真实段边界接续。
 			if err := egress.beginTurn(); err != nil {
 				return
 			}

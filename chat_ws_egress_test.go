@@ -371,7 +371,68 @@ func TestChatWSEgressBackendIDsCannotResetTurnQuota(t *testing.T) {
 	}
 }
 
+// 确认执行、自动续办和后台恢复都可能没有新的 user_message。
+// 只允许已结束段后的 turn_start 开新额度，活动段内伪造 start/ID 不能重置。
+func TestChatWSEgressAutonomousTurns(t *testing.T) {
+	for _, terminal := range []string{ChatStreamAssistantDone, ChatStreamTurnPaused, ChatStreamTurnError} {
+		t.Run(terminal, func(t *testing.T) {
+			limits := testChatWSEgressLimits()
+			limits.maxTurnEvents = 3
+			guard := newChatWSEgressGuardWithLimits(&recordingChatWSWriter{}, &sync.Mutex{}, limits)
+			if err := guard.beginTurn(); err != nil {
+				t.Fatal(err)
+			}
+			for turn := 0; turn < 20; turn++ {
+				for _, event := range []ChatStreamEvent{{Type: ChatStreamTurnStart}, {Type: ChatStreamAssistantDelta, Delta: "ok"}, {Type: terminal}} {
+					if err := guard.emit(event); err != nil {
+						t.Fatalf("autonomous turn %d: %v", turn, err)
+					}
+				}
+			}
+			if guard.connectionEvents != 60 {
+				t.Fatalf("lost connection accounting: %d", guard.connectionEvents)
+			}
+		})
+	}
+	t.Run("active_start_cannot_reset", func(t *testing.T) {
+		limits := testChatWSEgressLimits()
+		limits.maxTurnEvents = 3
+		guard := newChatWSEgressGuardWithLimits(&recordingChatWSWriter{}, &sync.Mutex{}, limits)
+		for i := 0; i < 3; i++ {
+			if err := guard.emit(ChatStreamEvent{Type: ChatStreamTurnStart, RunID: strings.Repeat("x", i)}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := guard.emit(ChatStreamEvent{Type: ChatStreamTurnStart}); !errors.Is(err, errChatWSOutputLimit) {
+			t.Fatalf("active starts bypassed quota: %v", err)
+		}
+	})
+}
+
 func TestChatWSEgressTurnAndConnectionBudgets(t *testing.T) {
+	t.Run("long_lived_connection_renews_only_connection_window", func(t *testing.T) {
+		limits := testChatWSEgressLimits()
+		limits.maxTurnEvents, limits.maxConnectionEvents = 3, 3
+		guard := newChatWSEgressGuardWithLimits(&recordingChatWSWriter{}, &sync.Mutex{}, limits)
+		for i := 0; i < 20; i++ {
+			for _, kind := range []string{ChatStreamTurnStart, ChatStreamAssistantDelta, ChatStreamAssistantDone} {
+				if err := guard.emit(ChatStreamEvent{Type: kind}); err != nil {
+					t.Fatalf("window %d: %v", i, err)
+				}
+			}
+			guard.connectionWindowStart = time.Now().Add(-chatWSConnectionWindow)
+		}
+		// 长轮次跨窗口也不会重置其自身额度。
+		for i := 0; i < 3; i++ {
+			if err := guard.emit(ChatStreamEvent{Type: ChatStreamTurnStart}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		guard.connectionWindowStart = time.Now().Add(-chatWSConnectionWindow)
+		if err := guard.emit(ChatStreamEvent{Type: ChatStreamAssistantDelta}); !errors.Is(err, errChatWSOutputLimit) {
+			t.Fatalf("window reset active turn: %v", err)
+		}
+	})
 	t.Run("queued_turn_activates_only_at_backend_terminal", func(t *testing.T) {
 		writer := &recordingChatWSWriter{}
 		guard := newChatWSEgressGuardWithLimits(writer, &sync.Mutex{}, testChatWSEgressLimits())
