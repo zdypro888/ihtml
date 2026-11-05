@@ -34,6 +34,11 @@ func (s *session) scheduleConfirmedTask(ctx context.Context, event *ihtml.ChatCl
 			return s.runConfirmedTool(callCtx, func() {}, &copied, false)
 		}
 		parent := context.WithValue(item.invocation, batchIntermediateContextKey{}, ctx.Value(batchIntermediateContextKey{}))
+		parent, bindErr := s.tasks.BindContext(parent, item.taskScope)
+		if bindErr != nil {
+			s.runConfirmedTool(ctx, func() {}, &copied, true)
+			return true
+		}
 		_, err := s.tasks.Call(parent, item.taskScope, "confirmed/"+item.invocationScope, card.ConfirmationNonce+"/"+rand.Text(), tool, item.args)
 		if err != nil && !started.Load() {
 			s.runConfirmedTool(ctx, func() {}, &copied, true)
@@ -57,6 +62,12 @@ func (s *session) scheduleConfirmedTask(ctx context.Context, event *ihtml.ChatCl
 	}
 	// 原提案的可信上下文保留父调用句柄及 invocation；会话关闭、显式停止和执行期限由执行器处理。
 	parent := context.WithValue(item.invocation, batchIntermediateContextKey{}, ctx.Value(batchIntermediateContextKey{}))
+	parent, bindErr := s.tasks.BindContext(parent, item.taskScope)
+	if bindErr != nil {
+		finish()
+		s.runConfirmedTool(ctx, func() {}, &copied, true)
+		return true
+	}
 	tool := item.tool
 	tool.Handler = func(callCtx context.Context, _ json.RawMessage) (string, error) {
 		return s.runConfirmedTool(callCtx, func() {}, &copied, false)

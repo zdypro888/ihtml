@@ -15,7 +15,7 @@ import (
 const taskStartTool = "task_start"
 
 func taskKernelName(name string) bool {
-	return name == taskStartTool || name == "task_read" || name == "task_wait" || name == "task_cancel" || name == "task_suspend"
+	return name == taskStartTool || name == "task_read" || name == "task_result" || name == "task_budget" || name == "task_wait" || name == "task_cancel" || name == "task_suspend"
 }
 
 type taskStartInput struct {
@@ -55,6 +55,16 @@ func taskTools(req *ai.TurnRequest) ([]ai.Tool, error) {
 	scope := ai.TaskScope(req)
 	handles := map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "maxItems": 8}
 	tools := []ai.Tool{
+		{Name: "task_budget", Effect: ai.ToolEffectRead, Description: "查询宿主为当前身份绑定的共享任务额度与剩余量。全局、租户、用户资源同时约束接纳和执行；剩余量是快照，不是预留。你决定并发、顺序、短等或挂起，不能修改额度。", InputSchema: taskSchema(map[string]any{}), Handler: func(ctx context.Context, raw json.RawMessage) (string, error) {
+			if err := decodeTaskInput(string(raw), &struct{}{}); err != nil {
+				return "", err
+			}
+			rows, err := req.Tasks.Budget(ctx)
+			if err != nil {
+				return "", err
+			}
+			return taskJSON(map[string]any{"resources": rows})
+		}},
 		{Name: taskStartTool, Effect: ai.ToolEffectUnknown, Completion: ai.ToolCompletionAsynchronous, Description: "将一个已发现的原工具调用放入受管后台执行，即使原接口同步也立即返回调用句柄。由你根据目标和依赖决定是否使用。仍走原工具的确认、权限和防重放；启动不代表调用或业务完成。arguments 必须符合原工具协议。", InputSchema: taskSchema(map[string]any{"tool": map[string]any{"type": "string"}, "arguments": map[string]any{"type": "object"}}, "tool", "arguments"), Handler: func(context.Context, json.RawMessage) (string, error) {
 			return "", errors.New("task dispatch middleware required")
 		}},
@@ -89,6 +99,21 @@ func taskTools(req *ai.TurnRequest) ([]ai.Tool, error) {
 				return "", err
 			}
 			return taskJSON(map[string]any{"tasks": rows})
+		}},
+		{Name: "task_result", Effect: ai.ToolEffectRead, Description: "按调用句柄分段读取完整结果，不重新执行原调用。offset 和 next_offset 是正文的字节偏移；limit 为1至65536字节，UTF-8页尾最多延长3字节以保持字符完整。text为UTF-8正文，非UTF-8时data为base64。可用性、总字节数、SHA256和保留期限见result元数据；由你决定需要读取哪些片段。", InputSchema: taskSchema(map[string]any{"id": map[string]any{"type": "string"}, "offset": map[string]any{"type": "integer", "minimum": 0}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 65536}}, "id", "offset", "limit"), Handler: func(ctx context.Context, raw json.RawMessage) (string, error) {
+			var in struct {
+				ID     string `json:"id"`
+				Offset int64  `json:"offset"`
+				Limit  int    `json:"limit"`
+			}
+			if err := decodeTaskInput(string(raw), &in); err != nil {
+				return "", err
+			}
+			page, err := req.Tasks.ReadResult(ctx, scope, in.ID, in.Offset, in.Limit, allowed)
+			if err != nil {
+				return "", err
+			}
+			return taskJSON(page)
 		}},
 		{Name: "task_wait", Effect: ai.ToolEffectRead, Description: "通过完成通道等待指定后台调用，all=false 等任意一个、true 等全部。timeout_ms 为0至30000，只结束本次等待，不取消任务；超时返回当前真实状态。由你决定等待时机及是否继续等待。", InputSchema: taskSchema(map[string]any{"ids": handles, "all": map[string]any{"type": "boolean"}, "timeout_ms": map[string]any{"type": "integer", "minimum": 0, "maximum": 30000}}, "ids", "timeout_ms"), Handler: func(ctx context.Context, raw json.RawMessage) (string, error) {
 			var in struct {
@@ -139,6 +164,9 @@ func taskTools(req *ai.TurnRequest) ([]ai.Tool, error) {
 			spec := ai.TaskWaitSpec{IDs: in.IDs, All: in.All, Timeout: time.Duration(in.Timeout) * time.Millisecond, Checkpoint: in.Checkpoint}
 			wait, err := req.Tasks.Suspend(ctx, scope, req.InvocationScope, "suspend", spec, allowed)
 			if err != nil {
+				if result, ok := taskAdmissionFailure(err); ok {
+					return result, nil
+				}
 				return "", err
 			}
 			payload, _ := json.Marshal(struct {
@@ -188,6 +216,9 @@ func (m *turnToolMiddleware) startTask(ctx context.Context, input *compose.ToolI
 		}
 		row, err := m.tasks.Start(callCtx, m.taskScope, m.sessionID, key, t, json.RawMessage(original.Arguments))
 		if err != nil {
+			if result, ok := taskAdmissionFailure(err); ok {
+				return &compose.ToolOutput{Result: result}, nil
+			}
 			return nil, err
 		}
 		result, err := taskJSON(row)
@@ -234,5 +265,22 @@ func (m *turnToolMiddleware) recordInvocation(ctx context.Context, input *compos
 		return output.Result, err
 	}
 	result, err := m.tasks.Call(ctx, m.taskScope, m.sessionID, key, original, json.RawMessage(input.Arguments))
+	if resultText, ok := taskAdmissionFailure(err); ok {
+		return &compose.ToolOutput{Result: resultText}, nil
+	}
 	return &compose.ToolOutput{Result: result}, err
+}
+
+// 资源拒绝是未受理事实，不伪装成已执行失败；模型可依据明确额度选择下一步。
+func taskAdmissionFailure(err error) (string, bool) {
+	var budget *ai.TaskBudgetError
+	if errors.As(err, &budget) {
+		result, _ := taskJSON(map[string]any{"status": "not_admitted", "execution_state": "not_started", "code": "budget_exhausted", "resource": budget.Resource, "kind": budget.Kind, "retry_after_ms": budget.RetryAfterMS})
+		return result, true
+	}
+	if errors.Is(err, ai.ErrTaskStopped) {
+		result, _ := taskJSON(map[string]any{"status": "not_admitted", "execution_state": "not_started", "code": "scope_stopped", "message": "原轮次所属代次已停止；新的执行须来自新的明确请求或批准。"})
+		return result, true
+	}
+	return "", false
 }

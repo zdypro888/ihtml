@@ -15,9 +15,17 @@ import (
 type TaskConfig struct {
 	MaxConcurrent, MaxTasks, MaxResultBytes, MaxWakeAttempts, MaxWakeDepth int
 	Timeout, LeaseDuration, ResultRetention, LedgerRetention, PollInterval time.Duration
-	Store                                                                  TaskStore
-	Scope                                                                  string
-	OnComplete                                                             func(TaskInfo)
+	// Results 保存完整回执；MaxResultBytes 只限制向模型内联的正文，不决定执行成败。
+	Results              TaskResultStore
+	MaxStoredResultBytes int
+	ResultSaveTimeout    time.Duration
+	Store                TaskStore
+	Scope                string
+	OnComplete           func(TaskInfo)
+	ControlStore         TaskControlStore
+	ControlNamespace     string
+	BudgetPool           string
+	Budgets              []TaskBudgetLimit
 }
 
 // TaskInfo 的 completed 表示 Handler 已返回，不能代替原异步业务的完成状态。
@@ -33,6 +41,7 @@ type TaskInfo struct {
 	Error         string          `json:"error,omitempty" bson:"error,omitempty"`
 	Input         json.RawMessage `json:"arguments,omitempty" bson:"-"`
 	ResultExpired bool            `json:"result_expired,omitempty" bson:"resultExpired,omitempty"`
+	ResultRef     *TaskResultRef  `json:"result_ref,omitempty" bson:"resultRef,omitempty"`
 }
 
 type toolTask struct {
@@ -41,6 +50,7 @@ type toolTask struct {
 	unlink          func() bool
 	done            chan struct{}
 	background      bool
+	epoch           string
 }
 
 // TaskRuntime 只保留在途 goroutine；已完成调用由账本查询，不再占用执行容量。
@@ -65,7 +75,7 @@ type TaskRuntime struct {
 
 // NewTaskRuntime 默认使用内存账本；宿主接入持久 TaskStore 后具备跨实例/重启记录恢复能力。
 func NewTaskRuntime(ctx context.Context, cfg TaskConfig) (*TaskRuntime, error) {
-	if ctx == nil || ctx.Err() != nil || cfg.MaxConcurrent < 0 || cfg.MaxConcurrent > 256 || cfg.MaxTasks < 0 || cfg.MaxTasks > 4096 || cfg.MaxResultBytes < 0 || cfg.MaxResultBytes > 1<<20 || cfg.Timeout < 0 || cfg.Timeout > 24*time.Hour || cfg.LeaseDuration < 0 || cfg.ResultRetention < 0 || cfg.LedgerRetention < 0 || cfg.PollInterval < 0 {
+	if ctx == nil || ctx.Err() != nil || cfg.MaxConcurrent < 0 || cfg.MaxConcurrent > 256 || cfg.MaxTasks < 0 || cfg.MaxTasks > 4096 || cfg.MaxResultBytes < 0 || cfg.MaxResultBytes > 1<<20 || cfg.Timeout < 0 || cfg.Timeout > 24*time.Hour || cfg.LeaseDuration < 0 || cfg.ResultRetention < 0 || cfg.LedgerRetention < 0 || cfg.PollInterval < 0 || len(cfg.Scope) > 256 {
 		return nil, errors.New("agent: invalid task configuration")
 	}
 	if cfg.MaxWakeAttempts == 0 {
@@ -85,6 +95,15 @@ func NewTaskRuntime(ctx context.Context, cfg TaskConfig) (*TaskRuntime, error) {
 	}
 	if cfg.MaxResultBytes == 0 {
 		cfg.MaxResultBytes = 64 << 10
+	}
+	if cfg.MaxStoredResultBytes == 0 {
+		cfg.MaxStoredResultBytes = 16 << 20
+	}
+	if cfg.ResultSaveTimeout == 0 {
+		cfg.ResultSaveTimeout = 30 * time.Second
+	}
+	if cfg.MaxStoredResultBytes < cfg.MaxResultBytes || cfg.MaxStoredResultBytes > 256<<20 || cfg.ResultSaveTimeout < time.Millisecond || cfg.ResultSaveTimeout > time.Hour {
+		return nil, errors.New("agent: invalid result storage configuration")
 	}
 	if cfg.Timeout == 0 {
 		cfg.Timeout = 10 * time.Minute
@@ -106,6 +125,34 @@ func NewTaskRuntime(ctx context.Context, cfg TaskConfig) (*TaskRuntime, error) {
 	}
 	if cfg.Store == nil {
 		cfg.Store = NewMemoryTaskStore()
+	}
+	if cfg.ControlStore == nil {
+		if memory, ok := cfg.Store.(*MemoryTaskStore); ok {
+			cfg.ControlStore = memory.control
+		} else {
+			cfg.ControlStore = NewMemoryTaskControlStore()
+		}
+	}
+	if len(cfg.Budgets) > 8 || len(cfg.BudgetPool) > 256 || len(cfg.ControlNamespace) > 1024 {
+		return nil, errors.New("agent: invalid shared task budgets")
+	}
+	seenBudgets := map[string]bool{}
+	for _, limit := range cfg.Budgets {
+		if limit.Key == "" || len(limit.Key) > 256 || seenBudgets[limit.Key] || limit.MaxActive < 1 || limit.MaxActive > 4096 || limit.MaxConcurrent < 1 || limit.MaxConcurrent > limit.MaxActive || limit.MaxWaiting < 1 || limit.MaxWaiting > 4096 {
+			return nil, errors.New("agent: invalid shared task budget limit")
+		}
+		seenBudgets[limit.Key] = true
+	}
+	cfg.Budgets = append([]TaskBudgetLimit(nil), cfg.Budgets...)
+	if cfg.Results == nil {
+		// 显式持久宿主应同时提供结果存储；内存默认仅适用于会话内使用。
+		if memory, ok := cfg.Store.(*MemoryTaskStore); ok {
+			cfg.Results = memory.results
+		} else if results, ok := cfg.Store.(TaskResultStore); ok {
+			cfg.Results = results
+		} else {
+			cfg.Results = NewMemoryTaskResultStore()
+		}
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	r := &TaskRuntime{cfg: cfg, ctx: ctx, cancel: cancel, owner: rand.Text(), tasks: map[string]*toolTask{}, seenScopes: map[string]bool{}, slots: make(chan struct{}, cfg.MaxConcurrent), changed: make(chan struct{}), completed: make(chan TaskInfo, cfg.MaxTasks), maintenanceDone: make(chan struct{})}
@@ -132,7 +179,7 @@ func (r *TaskRuntime) PollInterval() time.Duration { return r.cfg.PollInterval }
 
 // Start 在创建 goroutine 前原子保存调用键与冻结参数；重复调用只读原记录。
 func (r *TaskRuntime) Start(ctx context.Context, scope, turn, key string, tool Tool, args json.RawMessage) (TaskInfo, error) {
-	if ctx == nil || ctx.Err() != nil || scope == "" || r.cfg.Scope != "" && r.cfg.Scope != scope || turn == "" || key == "" || tool.Name == "" || tool.Handler == nil || len(args) > 64<<10 || !json.Valid(args) {
+	if ctx == nil || ctx.Err() != nil || scope == "" || len(scope) > 256 || r.cfg.Scope != "" && r.cfg.Scope != scope || turn == "" || key == "" || tool.Name == "" || tool.Handler == nil || len(args) > 64<<10 || !json.Valid(args) {
 		return TaskInfo{}, errors.New("agent: invalid task invocation")
 	}
 	r.mu.Lock()
@@ -143,6 +190,13 @@ func (r *TaskRuntime) Start(ctx context.Context, scope, turn, key string, tool T
 	digest := taskHash([]any{tool.Name, json.RawMessage(args)})
 	op, stop := r.operation()
 	defer stop()
+	epoch, epochErr := r.scopeEpoch(ctx, scope)
+	if epochErr != nil {
+		return TaskInfo{}, epochErr
+	}
+	if epochErr = r.checkEpoch(op, scope, epoch, false); epochErr != nil {
+		return TaskInfo{}, epochErr
+	}
 	if old, err := r.cfg.Store.FindTask(op, scope, compound); err == nil {
 		if old.Digest != digest {
 			return TaskInfo{}, errors.New("agent: task invocation changed")
@@ -179,7 +233,15 @@ func (r *TaskRuntime) Start(ctx context.Context, scope, turn, key string, tool T
 	id := rand.Text()
 	deadline := now.Add(r.cfg.Timeout)
 	synchronous, _ := ctx.Value(synchronousInvocationKey{}).(bool)
-	record := TaskRecord{ID: id, Scope: scope, Key: compound, Digest: digest, Turn: turn, Args: args, Invocation: ToolInvocationKey(ctx), Effect: tool.Effect, Info: TaskInfo{ID: id, ParentID: TaskID(ctx), Tool: tool.Name, State: "queued", Completion: tool.Completion, Background: !synchronous}, Owner: r.owner, Revision: 1, CreatedAt: now, UpdatedAt: now, Deadline: deadline, LeaseUntil: minTaskTime(now.Add(r.cfg.LeaseDuration), deadline)}
+	if err := r.acquireBudget(op, scope, epoch, id, "task", minTaskTime(now.Add(r.cfg.LeaseDuration), deadline)); err != nil {
+		return TaskInfo{}, err
+	}
+	defer func() {
+		if !launched {
+			r.releaseBudget(id)
+		}
+	}()
+	record := TaskRecord{ID: id, Scope: scope, Epoch: epoch, Key: compound, Digest: digest, Turn: turn, Args: args, Invocation: ToolInvocationKey(ctx), Effect: tool.Effect, Info: TaskInfo{ID: id, ParentID: TaskID(ctx), Tool: tool.Name, State: "queued", Completion: tool.Completion, Background: !synchronous}, Owner: r.owner, Revision: 1, CreatedAt: now, UpdatedAt: now, Deadline: deadline, LeaseUntil: minTaskTime(now.Add(r.cfg.LeaseDuration), deadline)}
 	saved, created, err := r.cfg.Store.CreateTask(op, record)
 	if err != nil {
 		return TaskInfo{}, err
@@ -190,9 +252,10 @@ func (r *TaskRuntime) Start(ctx context.Context, scope, turn, key string, tool T
 		}
 		return r.visible(saved), nil
 	}
+	ctx = context.WithValue(ctx, taskEpochKey{}, taskEpochContext{r.scopeControlKey(scope), epoch})
 	taskCtx, cancel := context.WithDeadline(context.WithoutCancel(ctx), deadline)
 	unlinkRoot := context.AfterFunc(r.ctx, cancel)
-	t := &toolTask{scope: scope, turn: turn, id: id, cancel: cancel, done: make(chan struct{}), background: !synchronous}
+	t := &toolTask{scope: scope, turn: turn, id: id, epoch: epoch, cancel: cancel, done: make(chan struct{}), background: !synchronous}
 	t.unlink = context.AfterFunc(ctx, cancel)
 	r.mu.Lock()
 	if r.closed {
@@ -212,9 +275,16 @@ func minTaskTime(a, b time.Time) time.Time {
 }
 func (r *TaskRuntime) visible(rec TaskRecord) TaskInfo {
 	info := rec.Info
+	if info.ResultRef != nil {
+		ref := *info.ResultRef
+		info.ResultRef = &ref
+	}
 	if !rec.ResultExpiresAt.IsZero() && !rec.ResultExpiresAt.After(time.Now()) {
 		info.Result = ""
 		info.ResultExpired = true
+		if info.ResultRef != nil {
+			info.ResultRef.Availability = "expired"
+		}
 	}
 	return info
 }
@@ -261,6 +331,11 @@ func (r *TaskRuntime) run(ctx context.Context, t *toolTask, tool Tool, args json
 				return
 			case <-ticker.C:
 				op, stop := r.operation()
+				if r.checkEpoch(op, t.scope, t.epoch, false) != nil || r.updateBudget(op, t.id, "renew", minTaskTime(time.Now().Add(r.cfg.LeaseDuration), deadlineFromContext(ctx))) != nil {
+					stop()
+					t.cancel()
+					return
+				}
 				rec, err := r.ownedUpdate(op, t, func(rec *TaskRecord) { rec.LeaseUntil = minTaskTime(time.Now().Add(r.cfg.LeaseDuration), rec.Deadline) })
 				stop()
 				if err != nil || rec.CancelRequested {
@@ -290,6 +365,30 @@ func (r *TaskRuntime) run(ctx context.Context, t *toolTask, tool Tool, args json
 			callErr = ctx.Err()
 			return
 		}
+		// 共享并发不足时由受管队列等待，不重复调用模型，也不把同步接口改成业务异步接口。
+		for {
+			err := r.updateBudget(ctx, t.id, "run", minTaskTime(time.Now().Add(r.cfg.LeaseDuration), deadlineFromContext(ctx)))
+			if err == nil {
+				break
+			}
+			var budgetErr *TaskBudgetError
+			if !errors.As(err, &budgetErr) {
+				callErr = err
+				return
+			}
+			select {
+			case <-ctx.Done():
+				callErr = ctx.Err()
+				return
+			case <-time.After(r.cfg.PollInterval):
+			}
+		}
+		// 此 CAS 是停止屏障的执行准入点；受理后才落库的旧代次不能越过它。
+		if err := r.checkEpoch(ctx, t.scope, t.epoch, true); err != nil {
+			t.cancel()
+			callErr = err
+			return
+		}
 		op, stop := r.operation()
 		rec, err := r.ownedUpdate(op, t, func(rec *TaskRecord) {
 			if !rec.CancelRequested {
@@ -310,43 +409,19 @@ func (r *TaskRuntime) run(ctx context.Context, t *toolTask, tool Tool, args json
 		r.signal()
 		result, callErr = tool.Handler(context.WithValue(ctx, backgroundInvocationKey{}, taskInvocation{ID: t.id, Background: t.background}), args)
 	}()
+	// Handler 只调用一次；后续阶段只重试不可变回执提交和账本补写。
+	outcome := r.makeResult(t, tool, result, callErr, started, ctx.Err() != nil, taskHash([]any{tool.Name, json.RawMessage(args)}))
+	rec, saveErr := r.persistTaskResult(t, outcome)
 	close(renewStop)
 	<-renewDone
-	op, stop := r.operation()
-	rec, saveErr := r.ownedUpdate(op, t, func(rec *TaskRecord) {
-		rec.Info.State = "completed"
-		if callErr != nil {
-			rec.Info.State = "failed"
-			if ctx.Err() != nil {
-				rec.Info.State = "cancelled"
-			}
-			if started && tool.Effect != ToolEffectRead {
-				rec.Info.State = "unknown"
-			}
-		}
-		if len(result) > r.cfg.MaxResultBytes {
-			result = ""
-			rec.Info.State = "failed"
-			if started && tool.Effect != ToolEffectRead {
-				rec.Info.State = "unknown"
-			}
-			callErr = errors.New("result exceeds limit")
-		}
-		rec.Info.Result = result
-		if callErr != nil {
-			rec.Info.Error = "工具调用未取得完整结果；请查询原业务记录，不自动重放。"
-		}
-		rec.ResultExpiresAt = time.Now().Add(r.cfg.ResultRetention)
-		rec.ExpiresAt = time.Now().Add(r.cfg.LedgerRetention)
-		rec.LeaseUntil = time.Time{}
-	})
-	stop()
 	if saveErr != nil {
-		op, stop = r.operation()
+		op, stop := r.operation()
 		rec, _ = r.cfg.Store.GetTask(op, t.scope, t.id)
 		rec, _ = r.refresh(op, rec)
 		stop()
 	}
+	// 名额释放先于本地Done，顺序调用不会因前项已完成却尚占共享额度而被误拒。
+	r.releaseBudget(t.id)
 	t.unlink()
 	r.mu.Lock()
 	delete(r.tasks, t.id)
@@ -382,6 +457,14 @@ func (r *TaskRuntime) signalLocked() { close(r.changed); r.changed = make(chan s
 func (r *TaskRuntime) refresh(ctx context.Context, rec TaskRecord) (TaskRecord, error) {
 	if rec.ID == "" {
 		return rec, ErrTaskNotFound
+	}
+	// 已持久的不可变回执优先于租约推断；覆盖“正文已提交，账本尚未补写”的崩溃窗口。
+	if rec.Info.ResultRef == nil {
+		if outcome, err := r.cfg.Results.GetResult(ctx, rec.Scope, rec.ID); err == nil {
+			return r.commitTaskResult(ctx, rec.Scope, rec.ID, outcome)
+		} else if !errors.Is(err, ErrTaskNotFound) {
+			return rec, err
+		}
 	}
 	if taskTerminal(rec.Info.State) || rec.LeaseUntil.After(time.Now()) {
 		return rec, nil
@@ -422,6 +505,9 @@ func (r *TaskRuntime) refresh(ctx context.Context, rec TaskRecord) (TaskRecord, 
 
 // Collect 先将失联调用转成可核对的终态，再执行宿主存储的分层保留策略。
 func (r *TaskRuntime) Collect(ctx context.Context) error {
+	if err := r.reconcileBudget(ctx); err != nil {
+		return err
+	}
 	after := ""
 	for {
 		rows, err := r.cfg.Store.ListTasks(ctx, "", TaskScan{After: after, Limit: 128, ActiveOnly: true})
@@ -438,7 +524,11 @@ func (r *TaskRuntime) Collect(ctx context.Context) error {
 		}
 		after = rows[len(rows)-1].ID
 	}
-	return r.cfg.Store.Collect(ctx, time.Now().UTC())
+	now := time.Now().UTC()
+	if err := r.cfg.Results.CollectResults(ctx, now); err != nil {
+		return err
+	}
+	return r.cfg.Store.Collect(ctx, now)
 }
 func (r *TaskRuntime) maintain() {
 	defer close(r.maintenanceDone)
@@ -576,6 +666,9 @@ func (r *TaskRuntime) Wait(ctx context.Context, scope string, ids []string, allo
 					case <-local.done:
 					case <-ctx.Done():
 						return nil, ctx.Err()
+					case <-timer.C:
+						// 回执已可见而原执行器仍在补写收尾时，短等期限仍须生效。
+						return rows, nil
 					}
 				}
 			}
@@ -662,6 +755,10 @@ func (r *TaskRuntime) CancelAll() error {
 	ctx, stop := r.operation()
 	defer stop()
 	for _, scope := range scopes {
+		// 先持久推进代次，再扫描旧账本；晚到的旧受理即使不在本次扫描中也无法开始执行。
+		if err := r.stopScope(ctx, scope); err != nil {
+			return err
+		}
 		after := ""
 		for {
 			rows, err := r.cfg.Store.ListTasks(ctx, scope, TaskScan{After: after, Limit: 128, ActiveOnly: true})
@@ -778,6 +875,9 @@ func (r *TaskRuntime) Call(ctx context.Context, scope, turn, key string, tool To
 				raw, _ := json.Marshal(map[string]any{"status": "result_expired", "execution": "handler_returned", "task_id": info.ID, "message": "原调用已返回，正文已按保留策略回收；请查询原业务回执，不要重放。"})
 				return string(raw), nil
 			}
+			if info.ResultRef != nil && (info.ResultRef.Size > int64(r.cfg.MaxResultBytes) || info.ResultRef.Availability != "available" || info.ResultRef.Encoding != "utf-8") {
+				return resultResponse(info), nil
+			}
 			return info.Result, nil
 		}
 		return "", errors.New("agent: original invocation is " + info.State + "; inspect its receipt, do not replay")
@@ -852,6 +952,7 @@ func (r *TaskRuntime) cancelWait(ctx context.Context, scope, id string) (TaskInf
 		}
 		if ok {
 			r.signal()
+			r.releaseBudget(w.ID)
 			return waitTaskInfo(w), nil
 		}
 	}

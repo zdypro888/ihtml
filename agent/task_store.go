@@ -17,6 +17,7 @@ var ErrTaskWakeBudget = errors.New("agent: task wake budget exhausted")
 // TaskRecord 是持久调用账本；参数只存于宿主受控存储，不向浏览器或任务列表透传。
 // Revision 与 Owner/LeaseUntil 形成 fencing，失去租约的执行器不能覆盖恢复后的状态。
 type TaskRecord struct {
+	Epoch           string    `bson:"epoch,omitempty"`
 	ID              string    `bson:"_id"`
 	Scope           string    `bson:"scope"`
 	Key             string    `bson:"key"`
@@ -49,6 +50,7 @@ type TaskWaitSpec struct {
 
 // TaskWaitRecord 保存条件、交付租约与处理状态；delivered 不表示原业务全部完成。
 type TaskWaitRecord struct {
+	Epoch      string       `bson:"epoch,omitempty" json:"-"`
 	Attempts   int          `bson:"attempts" json:"-"`
 	Depth      int          `bson:"depth" json:"-"`
 	ID         string       `bson:"_id" json:"id"`
@@ -84,6 +86,7 @@ type TaskStore interface {
 	ReplaceTask(context.Context, TaskRecord, int64) (bool, error)
 	ListTasks(context.Context, string, TaskScan) ([]TaskRecord, error)
 	GetWait(context.Context, string, string) (TaskWaitRecord, error)
+	FindWait(context.Context, string, string) (TaskWaitRecord, error)
 	CreateWait(context.Context, TaskWaitRecord) (TaskWaitRecord, bool, error)
 	ReplaceWait(context.Context, TaskWaitRecord, int64) (bool, error)
 	ListWaits(context.Context, string, TaskScan) ([]TaskWaitRecord, error)
@@ -92,18 +95,24 @@ type TaskStore interface {
 
 // MemoryTaskStore 供不需要重启恢复的宿主和测试使用；生产宿主可接入同一 CAS 存储协议。
 type MemoryTaskStore struct {
-	mu    sync.Mutex
-	tasks map[string]TaskRecord
-	waits map[string]TaskWaitRecord
+	control *MemoryTaskControlStore
+	results *MemoryTaskResultStore
+	mu      sync.Mutex
+	tasks   map[string]TaskRecord
+	waits   map[string]TaskWaitRecord
 }
 
 // NewMemoryTaskStore 创建独立内存账本，不宣称支持进程重启恢复。
 func NewMemoryTaskStore() *MemoryTaskStore {
-	return &MemoryTaskStore{tasks: map[string]TaskRecord{}, waits: map[string]TaskWaitRecord{}}
+	return &MemoryTaskStore{control: NewMemoryTaskControlStore(), results: NewMemoryTaskResultStore(), tasks: map[string]TaskRecord{}, waits: map[string]TaskWaitRecord{}}
 }
 func cloneTaskRecord(r TaskRecord) TaskRecord {
 	r.Args = append([]byte(nil), r.Args...)
 	r.Info.Input = append([]byte(nil), r.Info.Input...)
+	if r.Info.ResultRef != nil {
+		ref := *r.Info.ResultRef
+		r.Info.ResultRef = &ref
+	}
 	return r
 }
 func cloneWaitRecord(r TaskWaitRecord) TaskWaitRecord {
@@ -272,7 +281,7 @@ func (s *MemoryTaskStore) Collect(ctx context.Context, now time.Time) error {
 			delete(s.tasks, id)
 			continue
 		}
-		if !r.ResultExpiresAt.IsZero() && !r.ResultExpiresAt.After(now) && !r.Info.ResultExpired {
+		if !r.ResultExpiresAt.IsZero() && !r.ResultExpiresAt.After(now) && (!r.Info.ResultExpired || r.Info.Result != "" || r.Info.State != "unknown" && len(r.Args) > 0) {
 			r.Info.Result = ""
 			r.Info.ResultExpired = true
 			if r.Info.State != "unknown" {
@@ -302,4 +311,19 @@ func (s *MemoryTaskStore) GetWait(ctx context.Context, scope, id string) (TaskWa
 		return TaskWaitRecord{}, ErrTaskNotFound
 	}
 	return cloneWaitRecord(w), nil
+}
+
+// FindWait 在资源预留前查询同一逻辑登记；重复调用不重复消耗等待额度。
+func (s *MemoryTaskStore) FindWait(ctx context.Context, scope, key string) (TaskWaitRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return TaskWaitRecord{}, err
+	}
+	for _, row := range s.waits {
+		if row.Scope == scope && row.Key == key {
+			return cloneWaitRecord(row), nil
+		}
+	}
+	return TaskWaitRecord{}, ErrTaskNotFound
 }

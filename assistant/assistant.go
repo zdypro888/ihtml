@@ -765,6 +765,14 @@ func (s *session) run(ctx context.Context, cancel context.CancelFunc, ev *ihtml.
 	}
 	if len(req.Tools) > 0 && s.tasks != nil {
 		req.Tasks = s.tasks
+		if waking {
+			executionCtx, runErr = s.tasks.BindWaitContext(executionCtx, agent.TaskScope(req), wake.record.ID)
+		} else {
+			executionCtx, runErr = s.tasks.BindContext(executionCtx, agent.TaskScope(req))
+		}
+		if runErr != nil {
+			return
+		}
 		s.mu.Lock()
 		req.AllowTaskSuspend = s.tasks.Scope() != "" && !s.taskWakeStopped
 		s.mu.Unlock()
@@ -1013,9 +1021,17 @@ func (p *projection) step(step agent.Step, host func(agent.Step)) {
 			}
 		}
 		status, summary := ihtml.ChatToolSuccess, "Invocation returned; no public result details were provided."
+		var admission struct {
+			Status         string `json:"status"`
+			ExecutionState string `json:"execution_state"`
+		}
+		_ = json.Unmarshal([]byte(step.Result), &admission)
 		switch {
 		case step.Err != "":
 			status, summary = ihtml.ChatToolError, "Tool failed."
+		case admission.Status == "not_admitted" && admission.ExecutionState == "not_started":
+			// 通用接纳协议优先于工具异步声明，不能把共享预算拒绝展示成已受理。
+			status, summary = ihtml.ChatToolCancelled, "调用未受理，原工具未执行。"
 		case previewRefresh:
 			status, summary = ihtml.ChatToolCancelled, "Preview needs refreshing; nothing executed."
 		case step.ApprovalRejected:

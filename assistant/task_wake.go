@@ -159,7 +159,7 @@ func (s *session) stopTaskWakes() {
 	s.taskWakes = map[string]taskWakeState{}
 	s.mu.Unlock()
 	if err := s.tasks.CancelAll(); err != nil {
-		_ = s.emit(ihtml.ChatStreamEvent{Type: ihtml.ChatStreamTurnError, Error: "本地停止已请求，但等待登记的取消尚未持久确认；请核对原记录。"})
+		_ = s.emit(ihtml.ChatStreamEvent{Type: ihtml.ChatStreamTurnError, Error: "本地停止已请求，但共享停止状态尚未持久确认；请核对原记录。"})
 	}
 }
 func (s *session) restartTaskWakes(ctx context.Context) {

@@ -17,8 +17,15 @@ func (r *TaskRuntime) Suspend(ctx context.Context, scope, turn, key string, spec
 		spec.Deadline = time.Now().UTC().Add(spec.Timeout)
 		requested.Deadline = time.Time{}
 	}
-	if scope == "" || r.cfg.Scope != "" && r.cfg.Scope != scope || turn == "" || key == "" || len(spec.IDs) > 128 || len(spec.Checkpoint) == 0 || len(spec.Checkpoint) > 8192 || !spec.Deadline.After(time.Now()) || spec.Deadline.After(time.Now().Add(24*time.Hour+time.Second)) {
+	if scope == "" || len(scope) > 256 || r.cfg.Scope != "" && r.cfg.Scope != scope || turn == "" || key == "" || len(spec.IDs) > 128 || len(spec.Checkpoint) == 0 || len(spec.Checkpoint) > 8192 || !spec.Deadline.After(time.Now()) || spec.Deadline.After(time.Now().Add(24*time.Hour+time.Second)) {
 		return TaskWaitRecord{}, errors.New("agent: invalid suspension")
+	}
+	epoch, err := r.scopeEpoch(ctx, scope)
+	if err != nil {
+		return TaskWaitRecord{}, err
+	}
+	if err = r.checkEpoch(ctx, scope, epoch, true); err != nil {
+		return TaskWaitRecord{}, err
 	}
 	r.mu.Lock()
 	r.seenScopes[scope] = true
@@ -36,12 +43,32 @@ func (r *TaskRuntime) Suspend(ctx context.Context, scope, turn, key string, spec
 	}
 	// 事件注册原子去重；同一工具调用改变条件不能复用旧注册。
 	record := TaskWaitRecord{ID: rand.Text(), Scope: scope, Turn: turn, Key: taskHash([]string{scope, turn, key}), Digest: taskHash([]any{requested.IDs, requested.All, requested.Timeout, requested.Deadline, requested.Checkpoint}), Spec: spec, State: "waiting", Depth: TaskWakeDepth(ctx) + 1, Revision: 1, CreatedAt: time.Now().UTC(), ExpiresAt: spec.Deadline.Add(r.cfg.LedgerRetention)}
-	old, _, err := r.cfg.Store.CreateWait(ctx, record)
+	record.Epoch = epoch
+	if prior, err := r.cfg.Store.FindWait(ctx, scope, record.Key); err == nil {
+		if prior.Digest != record.Digest {
+			return prior, ErrTaskConflict
+		}
+		return prior, nil
+	} else if !errors.Is(err, ErrTaskNotFound) {
+		return TaskWaitRecord{}, err
+	}
+	// 未交付的到期事件仍占等待额度；只有终态释放或账本保留期结束才可回收。
+	if err = r.acquireBudget(ctx, scope, epoch, record.ID, "wait", record.ExpiresAt); err != nil {
+		return TaskWaitRecord{}, err
+	}
+	old, created, err := r.cfg.Store.CreateWait(ctx, record)
+	if err != nil || !created {
+		r.releaseBudget(record.ID)
+	}
 	if err != nil {
 		return old, err
 	}
 	if old.Digest != record.Digest {
 		return old, ErrTaskConflict
+	}
+	if err = r.checkEpoch(ctx, scope, epoch, false); err != nil {
+		_, _ = r.cancelWait(ctx, scope, old.ID)
+		return old, err
 	}
 	return old, nil
 }
@@ -60,6 +87,15 @@ func (r *TaskRuntime) ClaimWake(ctx context.Context, scope, consumer string) (*T
 			return nil, err
 		}
 		for _, w := range rows {
+			if err := r.checkEpoch(ctx, scope, w.Epoch, false); err != nil {
+				if !errors.Is(err, ErrTaskStopped) {
+					return nil, err
+				}
+				if _, err = r.cancelWait(ctx, scope, w.ID); err != nil {
+					return nil, err
+				}
+				continue
+			}
 			if w.State != "waiting" && !(w.State == "delivering" && !w.LeaseUntil.After(now)) {
 				continue
 			}
@@ -120,6 +156,9 @@ func (r *TaskRuntime) ClaimWake(ctx context.Context, scope, consumer string) (*T
 
 // UpdateWake 对交付租约做 CAS；只有持有者可续租/确认。失败重投仍使用同一个 RequestID。
 func (r *TaskRuntime) UpdateWake(ctx context.Context, scope, id, consumer, action string) error {
+	if scope == "" || r.cfg.Scope != "" && r.cfg.Scope != scope {
+		return ErrTaskNotFound
+	}
 	w, err := r.cfg.Store.GetWait(ctx, scope, id)
 	if err != nil {
 		return err
@@ -129,6 +168,11 @@ func (r *TaskRuntime) UpdateWake(ctx context.Context, scope, id, consumer, actio
 	}
 	if w.State != "delivering" || w.Owner != consumer || !w.LeaseUntil.After(time.Now()) {
 		return ErrTaskConflict
+	}
+	if action == "renew" || action == "admit" {
+		if err := r.checkEpoch(ctx, scope, w.Epoch, action == "admit"); err != nil {
+			return err
+		}
 	}
 	rev := w.Revision
 	budgetExhausted := false
@@ -163,6 +207,9 @@ func (r *TaskRuntime) UpdateWake(ctx context.Context, scope, id, consumer, actio
 	}
 	if !ok {
 		return ErrTaskConflict
+	}
+	if w.State == "delivered" || w.State == "cancelled" || w.State == "failed" {
+		r.releaseBudget(w.ID)
 	}
 	if budgetExhausted {
 		return ErrTaskWakeBudget

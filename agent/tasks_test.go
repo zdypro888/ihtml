@@ -170,11 +170,8 @@ func TestTaskRuntimeBoundsFailuresAndNeverReplays(t *testing.T) {
 			if err != nil || rows[0].Result != "" {
 				t.Fatal(rows, err)
 			}
-			wanted := "failed"
-			if effect == ToolEffectWrite {
-				wanted = "unknown"
-			}
-			if rows[0].State != wanted {
+			// 内联额度只决定读取形式，完整结果通过引用保留，不改变实际执行事实。
+			if rows[0].State != "completed" || rows[0].ResultRef == nil || rows[0].ResultRef.Size != 9 {
 				t.Fatal(rows)
 			}
 			again, err := r.Start(t.Context(), "owner", "turn", "same", tool, json.RawMessage(`{}`))
