@@ -250,6 +250,9 @@ type TurnRequest struct {
 	UserText string
 	// Model 是本轮使用的模型名覆盖；空值表示使用引擎默认配置。
 	Model string
+	// Tasks 是宿主会话持有的通用后台执行器；nil 不暴露后台调度工具。
+	// 不能由浏览器参数构造，不与其他用户或权限会话共用。
+	Tasks *TaskRuntime
 	// Tools 本轮可用工具集（已按用户权限裁剪）。
 	Tools []Tool
 	// Skills 是已按语义相关性和用户/渠道作用域裁剪的候选执行方法。

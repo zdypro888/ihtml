@@ -32,6 +32,9 @@ type ToolResultView struct {
 // be safe across connections. Engine.RunTurn must stop when its context ends.
 type Config struct {
 	Engine agent.Engine
+	// Tasks 启用本会话的通用后台工具调用；不会改变原工具的授权和业务完成语义。
+	// OnComplete/Completed 提供完成通知，回调不得关闭自身会话。
+	Tasks *agent.TaskConfig
 	// PrepareTurn receives only the newest client user message, not the browser's
 	// transcript. The host owns identity, permissions, model selection, History,
 	// SessionID, EngineSession and InvocationScope. Return a fresh request.
@@ -102,6 +105,10 @@ func NewChecked(cfg Config) (*Backend, error) {
 	case ihtml.ChatContentFormatText, ihtml.ChatContentFormatMarkdown, ihtml.ChatContentFormatHTML:
 	default:
 		return nil, errors.New("assistant: unsupported ContentFormat")
+	}
+	if cfg.Tasks != nil {
+		copied := *cfg.Tasks
+		cfg.Tasks = &copied
 	}
 	if cfg.Models != nil {
 		models := cloneModels(*cfg.Models)
@@ -220,6 +227,23 @@ func (b *Backend) NewSession(ctx context.Context, sctx *ihtml.ChatSessionContext
 	ctx, cancel := context.WithCancel(ctx)
 	s := &session{backend: b, sctx: copyContext, ctx: ctx, cancel: cancel,
 		wake: make(chan struct{}, 1), done: make(chan struct{}), pendingTools: make(map[string]*pendingTool)}
+	if b.cfg.Tasks != nil {
+		var err error
+		taskConfig := *b.cfg.Tasks
+		onComplete := taskConfig.OnComplete
+		taskConfig.OnComplete = func(info agent.TaskInfo) {
+			// 通知只发送句柄与调用状态；模型按需读取真实回执，不自动编排新的动作。
+			_ = s.emit(ihtml.ChatStreamEvent{Type: ihtml.ChatStreamTaskComplete, TaskID: info.ID, TaskState: info.State, ToolName: info.Tool})
+			if onComplete != nil {
+				onComplete(info)
+			}
+		}
+		s.tasks, err = agent.NewTaskRuntime(ctx, taskConfig)
+		if err != nil {
+			cancel()
+			return nil, err
+		}
+	}
 	// The ordinary host bridge uses the same public lifecycle runner as
 	// custom product backends. Confirmation schedulers retain their extra
 	// rejection and asynchronous cancellation lanes below.
@@ -241,6 +265,9 @@ func (b *Backend) NewSession(ctx context.Context, sctx *ihtml.ChatSessionContext
 		})
 		if err != nil {
 			cancel()
+			if s.tasks != nil {
+				s.tasks.Close()
+			}
 			return nil, err
 		}
 		s.runner = runner
@@ -265,26 +292,29 @@ type pendingTurn struct {
 }
 
 type session struct {
-	backend         *Backend
-	sctx            ihtml.ChatSessionContext
-	ctx             context.Context
-	cancel          context.CancelFunc
-	runner          *SessionRunner
-	wake            chan struct{}
-	done            chan struct{}
-	mu              sync.Mutex
-	emitMu          sync.Mutex
-	queue           []pendingTurn
-	rejections      []pendingTurn
-	pendingMu       sync.Mutex
-	pendingTools    map[string]*pendingTool
-	pendingReserved int
-	cancelTools     chan pendingTurn
-	cancelDone      chan struct{}
-	active          context.CancelFunc
-	activeOutput    *projection
-	queueRejected   bool
-	closed          bool
+	backend            *Backend
+	tasks              *agent.TaskRuntime
+	asyncConfirmations int
+	confirmationTasks  sync.WaitGroup
+	sctx               ihtml.ChatSessionContext
+	ctx                context.Context
+	cancel             context.CancelFunc
+	runner             *SessionRunner
+	wake               chan struct{}
+	done               chan struct{}
+	mu                 sync.Mutex
+	emitMu             sync.Mutex
+	queue              []pendingTurn
+	rejections         []pendingTurn
+	pendingMu          sync.Mutex
+	pendingTools       map[string]*pendingTool
+	pendingReserved    int
+	cancelTools        chan pendingTurn
+	cancelDone         chan struct{}
+	active             context.CancelFunc
+	activeOutput       *projection
+	queueRejected      bool
+	closed             bool
 }
 
 // Close cancels active and queued work and waits for all host work to unwind.
@@ -293,6 +323,9 @@ func (s *session) Close() {
 	if s.runner != nil {
 		s.cancel()
 		s.runner.Close()
+		if s.tasks != nil {
+			s.tasks.Close()
+		}
 		return
 	}
 	s.mu.Lock()
@@ -312,6 +345,9 @@ func (s *session) HandleEvent(ctx context.Context, ev *ihtml.ChatClientEvent) {
 	}
 	if s.runner != nil {
 		if ev.Type == ihtml.ChatClientCancel {
+			if s.tasks != nil {
+				s.tasks.CancelAll()
+			}
 			s.runner.Stop()
 			s.mu.Lock()
 			s.queueRejected = false
@@ -333,6 +369,9 @@ func (s *session) HandleEvent(ctx context.Context, ev *ihtml.ChatClientEvent) {
 		return
 	}
 	if ev.Type == ihtml.ChatClientCancel {
+		if s.tasks != nil {
+			s.tasks.CancelAll()
+		}
 		s.mu.Lock()
 		s.releaseDroppedConfirmationsLocked()
 		s.queue = nil
@@ -441,6 +480,9 @@ func (s *session) queueFull() {
 
 func (s *session) loop() {
 	defer close(s.done)
+	if s.tasks != nil {
+		defer func() { s.tasks.Close(); s.confirmationTasks.Wait() }()
+	}
 	defer s.cleanupPendingTools()
 	s.restoreApprovals()
 	for {
@@ -454,6 +496,16 @@ func (s *session) loop() {
 			s.mu.Unlock()
 			select {
 			case <-s.ctx.Done():
+			case <-s.wake:
+			}
+			continue
+		}
+		// 保留原批量确认的收尾屏障；异步确认未保存回执前，不提前续办同一轮请求。
+		if len(s.rejections) == 0 && len(s.queue) > 0 && s.queue[0].continuation && s.asyncConfirmations > 0 {
+			s.mu.Unlock()
+			select {
+			case <-s.ctx.Done():
+				return
 			case <-s.wake:
 			}
 			continue
@@ -474,7 +526,9 @@ func (s *session) loop() {
 		} else if next.event.Type == ihtml.ChatClientCancelTool {
 			s.cancelToolAck(*next.event.ToolCall, false)
 		} else if next.event.Type == ihtml.ChatClientConfirmTool {
-			s.runConfirmedTool(ctx, cancel, &next.event, next.reject)
+			if !s.scheduleConfirmedTask(ctx, &next.event, next.reject) {
+				s.runConfirmedTool(ctx, cancel, &next.event, next.reject)
+			}
 		} else {
 			s.run(ctx, cancel, &next.event)
 		}
@@ -637,6 +691,15 @@ func (s *session) run(ctx context.Context, cancel context.CancelFunc, ev *ihtml.
 	if runErr != nil {
 		return
 	}
+	if len(req.Tools) > 0 && s.tasks != nil {
+		req.Tasks = s.tasks
+		if req.InvocationScope == "" {
+			req.InvocationScope = p.id
+		}
+		defer func() {
+			req.Tasks.EndTurn(agent.TaskScope(req), req.InvocationScope, runErr == nil && executionCtx.Err() == nil)
+		}()
+	}
 	if ev.ToolsEnabled != nil && !*ev.ToolsEnabled {
 		req.Skills = nil
 	}
@@ -694,7 +757,7 @@ func (s *session) governTools(tools []agent.Tool, ev *ihtml.ChatClientEvent, p *
 					result, err = "", errors.New("assistant: tool panicked")
 				}
 			}()
-			if ctx.Err() != nil || p.ctx.Err() != nil {
+			if ctx.Err() != nil || !agent.IsBackgroundTask(ctx) && p.ctx.Err() != nil {
 				return "", context.Canceled
 			}
 			if original.ApprovalRequired && s.backend.cfg.Confirmation != nil {

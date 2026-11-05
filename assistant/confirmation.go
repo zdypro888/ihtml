@@ -59,6 +59,8 @@ type pendingTool struct {
 	invocationScope string
 	userText        string
 	model           string
+	background      bool
+	taskScope       string
 	queued          bool // guarded by pendingMu; one confirm attempt per pending card
 }
 
@@ -135,7 +137,7 @@ func (s *session) prepareTool(ctx context.Context, tool agent.Tool, args json.Ra
 	}
 	s.pendingMu.Lock()
 	s.pendingTools[call.ConfirmationNonce] = &pendingTool{call: call, scope: scope, tool: tool, args: args,
-		invocation: context.WithoutCancel(ctx), invocationScope: req.InvocationScope, userText: req.UserText, model: req.Model}
+		background: agent.IsBackgroundTask(ctx), taskScope: agent.TaskScope(req), invocation: context.WithoutCancel(ctx), invocationScope: req.InvocationScope, userText: req.UserText, model: req.Model}
 	s.pendingReserved--
 	reserved = false
 	s.pendingMu.Unlock()
@@ -399,7 +401,7 @@ func (s *session) cleanupPendingTools() {
 	}
 }
 
-func (s *session) runConfirmedTool(ctx context.Context, cancel context.CancelFunc, ev *ihtml.ChatClientEvent, rejected bool) {
+func (s *session) runConfirmedTool(ctx context.Context, cancel context.CancelFunc, ev *ihtml.ChatClientEvent, rejected bool) (returnedResult string, returnedErr error) {
 	replyParent := ctx
 	ctx, timeoutCancel := context.WithTimeout(ctx, s.backend.cfg.Confirmation.ToolTimeout)
 	defer timeoutCancel()
@@ -415,6 +417,12 @@ func (s *session) runConfirmedTool(ctx context.Context, cancel context.CancelFun
 	recovered := false
 	var finishRecovery func()
 	defer func() {
+		defer func() {
+			if evidence != nil {
+				returnedResult = evidence.Result
+			}
+			returnedErr = runErr
+		}()
 		if finishRecovery != nil {
 			defer finishRecovery()
 		}
@@ -586,6 +594,7 @@ func (s *session) runConfirmedTool(ctx context.Context, cancel context.CancelFun
 			}
 		}
 	}
+	return
 }
 
 // 排队与用户停止共用同一把锁；不能借用即将收尾的上一轮 context，也不能在停止后重新排队。

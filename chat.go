@@ -44,8 +44,10 @@ const (
 	// 携带 inspect_id 与实时页面渲染状态(不可信数据)。
 	ChatClientInspectResult = "inspect_result"
 
-	ChatStreamTurnStart         = "turn_start"
-	ChatStreamAssistantStatus   = "assistant_status"
+	ChatStreamTurnStart       = "turn_start"
+	ChatStreamAssistantStatus = "assistant_status"
+	// ChatStreamTaskComplete 是会话级调用终态通知，不代表业务成功或自动开启模型轮次。
+	ChatStreamTaskComplete      = "task_complete"
 	ChatStreamAssistantThinking = "assistant_thinking"
 	ChatStreamAssistantDelta    = "assistant_delta"
 	// ChatStreamAssistantSnapshot 是后台重连的完整文本快照，替换该轮已有文本，不是追加。
@@ -254,6 +256,8 @@ type ChatStreamEvent struct {
 	BackgroundSeq     uint64 `json:"background_seq,omitempty"`
 	BackgroundReplay  bool   `json:"background_replay,omitempty"`
 	Type              string `json:"type"`
+	TaskID            string `json:"task_id,omitempty"`
+	TaskState         string `json:"task_state,omitempty"`
 	RunID             string `json:"run_id,omitempty"`
 	TurnID            string `json:"turn_id,omitempty"`
 	Seq               int64  `json:"seq,omitempty"`

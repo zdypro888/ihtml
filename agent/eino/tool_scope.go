@@ -23,7 +23,7 @@ import (
 const (
 	// Bump when the durable Deep Agent's tool or lifecycle contract changes so
 	// managed sessions cannot replay traces produced by an incompatible runtime.
-	deepAgentRuntimeVersion = "native-deep-toolsearch-v9"
+	deepAgentRuntimeVersion = "native-deep-toolsearch-v10"
 
 	toolSearchToolName = "tool_search"
 )
@@ -39,6 +39,9 @@ type turnToolMiddleware struct {
 	tools        map[string]ai.Tool
 	exposure     *ai.ToolExposure
 	sessionID    string
+	tasks        *ai.TaskRuntime
+	taskScope    string
+	taskApproval bool
 
 	mu            sync.Mutex
 	selected      map[string]struct{}
@@ -263,6 +266,9 @@ func (m *turnToolMiddleware) guardInvokable(next compose.InvokableToolEndpoint) 
 	return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
 		if input == nil {
 			return next(ctx, input)
+		}
+		if m.tasks != nil && input.Name == taskStartTool {
+			return m.startTask(ctx, input)
 		}
 		if !m.callable(input.Name) {
 			m.mu.Lock()

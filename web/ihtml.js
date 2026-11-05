@@ -7581,6 +7581,14 @@
           }
           return;
         }
+        // 后台调用完成属于会话通知，不开启/结束模型轮次，也不把调用返回宣称为业务成功。
+        if (ev.type === 'task_complete') {
+          const text = T('background_call_returned', { id: String(ev.task_id || '') });
+          if (!this.taskNotice || !this.taskNotice.isConnected) {
+            this.taskNotice = el('div', 'ihtml-pline'); this.taskNotice.setAttribute('role', 'status'); this.log.appendChild(this.taskNotice);
+          }
+          this.taskNotice.textContent = text; this.announce(text); this.notifyEvent(ev); return;
+        }
         // inspect_request 是服务端的带外请求, 不依赖轮次归属与序号去重:
         // 即使本地轮次已收尾也应答, 否则服务端工具只能等到超时。
         if (ev.type === 'inspect_request') { this.sendInspectResult(ev); this.notifyEvent(ev); return; }

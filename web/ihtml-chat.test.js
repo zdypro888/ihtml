@@ -1769,3 +1769,19 @@ test('batch grouping is shared by unrelated tools and keeps each tool scope sepa
  assert.ok(frame.tool_calls.every(call=>call.name==='rename_folder'));
  assert.equal(await page.locator('.ihtml-tool[data-status="pending"]').count(),4);
 });
+
+// 会话级完成通知不伪造新轮次、不重发调用，也不把业务受理显示为业务完成。
+test('background call completion notifies without starting or finishing a model turn',async(t)=>{
+ const page=await fixture(t);
+ await page.evaluate(async()=>{
+  window.a=ihtml.mountChat('#a',{onChatEvent:event=>events.push(event)});await a.ready();await a.chat.send('query');
+  sockets[0].emit({type:'turn_start',run_id:'task-owner',seq:1});
+  sockets[0].emit({type:'assistant_done',run_id:'task-owner',seq:2,message:'Call continues in the background'});
+  window.framesBefore=sockets[0].sent.length;window.cardsBefore=a.root.querySelectorAll(".ihtml-msg.assistant").length;
+  sockets[0].emit({type:'task_complete',task_id:'opaque-task',task_state:'completed',tool_name:'arbitrary_tool'});
+ });
+ assert.equal(await page.evaluate(()=>sockets[0].sent.length),await page.evaluate(()=>framesBefore));
+ assert.equal(await page.evaluate(()=>events.filter(event=>event.type==='task_complete').length),1);
+ assert.match(await page.locator('#a').innerText(),/opaque-task/);
+ assert.equal(await page.locator('#a .ihtml-msg.assistant').count(),await page.evaluate(()=>cardsBefore));
+});

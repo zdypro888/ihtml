@@ -4,6 +4,7 @@ package einoengine
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -162,7 +163,7 @@ func (e *Engine) SupportsNativeApproval() bool { return e != nil && e.runtime !=
 
 // RunTurn selects an explicit Eino execution profile. Product conversations use
 // DeepAgent; bounded internal transformations use a plain ChatModelAgent.
-func (e *Engine) RunTurn(ctx context.Context, req *ai.TurnRequest) (*ai.TurnResult, error) {
+func (e *Engine) RunTurn(ctx context.Context, req *ai.TurnRequest) (turnResult *ai.TurnResult, turnErr error) {
 	if req == nil {
 		return nil, errors.New("turn request is nil")
 	}
@@ -174,6 +175,14 @@ func (e *Engine) RunTurn(ctx context.Context, req *ai.TurnRequest) (*ai.TurnResu
 		if err := validateOneShotRequest(req); err != nil {
 			return nil, err
 		}
+	}
+	copyRequest := *req
+	req = &copyRequest
+	if mode == ai.TurnModeDeep && req.Tasks != nil {
+		if req.InvocationScope == "" {
+			req.InvocationScope = rand.Text()
+		}
+		defer func() { req.Tasks.EndTurn(ai.TaskScope(req), req.InvocationScope, turnErr == nil && ctx.Err() == nil) }()
 	}
 	// Terra 的 Chat Completions 仅供普通文本；带工具的 Agent 必须显式走 Responses。
 	// 提前拒绝错误配置，不能等到第一个工具调用时才以不透明的供应商错误中断。
@@ -502,10 +511,18 @@ func (e *Engine) newDeepAgent(
 	if invocationScope == "" {
 		invocationScope = req.SessionID
 	}
+	if req.Tasks != nil && len(req.Tools) > 0 {
+		kernel, err := taskTools(req)
+		if err != nil {
+			return nil, nil, err
+		}
+		req.Tools = append(append([]ai.Tool(nil), req.Tools...), kernel...)
+	}
 	toolScope, err := newTurnToolMiddleware(ctx, invocationScope, req.Tools, toolExposure)
 	if err != nil {
 		return nil, nil, err
 	}
+	toolScope.tasks, toolScope.taskScope, toolScope.taskApproval = req.Tasks, ai.TaskScope(req), req.RequireApproval
 	dynamicTools := make([]tool.BaseTool, 0, len(req.Tools))
 	immediateTools := make([]tool.BaseTool, 0, 2)
 	for _, t := range req.Tools {
