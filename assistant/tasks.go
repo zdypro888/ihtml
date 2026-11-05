@@ -34,7 +34,10 @@ func (s *session) scheduleConfirmedTask(ctx context.Context, event *ihtml.ChatCl
 			return s.runConfirmedTool(callCtx, func() {}, &copied, false)
 		}
 		var parent context.Context = sessionParentValues{Context: ctx, parent: item.invocation}
-		parent, bindErr := s.tasks.UseContext(parent, item.taskScope)
+		parent, bindErr := s.tasks.ContinueGoal(parent, item.taskScope, item.invocation)
+		if bindErr == nil {
+			parent, bindErr = s.tasks.UseContext(parent, item.taskScope)
+		}
 		if bindErr != nil {
 			s.runConfirmedTool(ctx, func() {}, &copied, true)
 			return true
@@ -63,7 +66,10 @@ func (s *session) scheduleConfirmedTask(ctx context.Context, event *ihtml.ChatCl
 	// 原提案的可信上下文保留父调用句柄及 invocation；会话关闭、显式停止和执行期限由执行器处理。
 	// 保留批准事件的代次和追踪值，后台生命周期不跟随短暂的确认调度轮次。
 	var parent context.Context = sessionParentValues{Context: context.WithoutCancel(ctx), parent: item.invocation}
-	parent, bindErr := s.tasks.UseContext(parent, item.taskScope)
+	parent, bindErr := s.tasks.ContinueGoal(parent, item.taskScope, item.invocation)
+	if bindErr == nil {
+		parent, bindErr = s.tasks.UseContext(parent, item.taskScope)
+	}
 	if bindErr != nil {
 		finish()
 		s.runConfirmedTool(ctx, func() {}, &copied, true)

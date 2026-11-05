@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"sync"
 	"time"
@@ -22,14 +23,16 @@ type TaskBudgetLimit struct {
 
 // TaskBudgetLease 是共享池中的有期限预留；同一池的全部资源在一次 CAS 中接纳。
 type TaskBudgetLease struct {
-	ID        string    `bson:"id"`
-	Scope     string    `bson:"scope"`
-	Epoch     string    `bson:"epoch"`
-	Owner     string    `bson:"owner"`
-	Kind      string    `bson:"kind"`
-	Resources []string  `bson:"resources"`
-	ExpiresAt time.Time `bson:"expiresAt"`
-	Running   bool      `bson:"running"`
+	ID        string                `bson:"id"`
+	Scope     string                `bson:"scope"`
+	Epoch     string                `bson:"epoch"`
+	Owner     string                `bson:"owner"`
+	Kind      string                `bson:"kind"`
+	Resources []string              `bson:"resources"`
+	Claims    []TaskResourceRequest `bson:"claims,omitempty"`
+	Grants    []TaskResourceGrant   `bson:"grants,omitempty"`
+	ExpiresAt time.Time             `bson:"expiresAt"`
+	Running   bool                  `bson:"running"`
 }
 
 // TaskControlState 用同一 CAS 协议保存独立的停止代次文档和共享预算池文档。
@@ -40,6 +43,9 @@ type TaskControlState struct {
 	Epoch     string            `bson:"epoch,omitempty"`
 	Leases    []TaskBudgetLease `bson:"leases,omitempty"`
 	UpdatedAt time.Time         `bson:"updatedAt"`
+	// Payload 供通用协调协议保存有界状态，不允许模型直接读写。
+	Payload   []byte    `bson:"payload,omitempty"`
+	ExpiresAt time.Time `bson:"expiresAt,omitempty"`
 }
 
 // TaskControlStore 的 expected=0 表示原子创建；其他值必须与当前 Revision 匹配。
@@ -60,8 +66,11 @@ func NewMemoryTaskControlStore() *MemoryTaskControlStore {
 	return &MemoryTaskControlStore{rows: map[string]TaskControlState{}}
 }
 func cloneControl(s TaskControlState) TaskControlState {
+	s.Payload = append([]byte(nil), s.Payload...)
 	s.Leases = append([]TaskBudgetLease(nil), s.Leases...)
 	for i := range s.Leases {
+		s.Leases[i].Claims = append([]TaskResourceRequest(nil), s.Leases[i].Claims...)
+		s.Leases[i].Grants = append([]TaskResourceGrant(nil), s.Leases[i].Grants...)
 		s.Leases[i].Resources = append([]string(nil), s.Leases[i].Resources...)
 	}
 	return s
@@ -120,6 +129,14 @@ func (r *TaskRuntime) editControl(ctx context.Context, key string, change func(*
 		revision := row.Revision
 		if err = change(&row); err != nil {
 			return row, WrapTaskStorage(err)
+		}
+		// 同一共享池可能包含资源声明，按总字节数限制，防止合法数量但超大租约突破 Mongo 文档上限。
+		encoded, marshalErr := json.Marshal(row)
+		if marshalErr != nil {
+			return row, ErrTaskConflict
+		}
+		if len(encoded) > 8<<20 {
+			return row, &TaskBudgetError{Kind: "control_capacity"}
 		}
 		row.Revision++
 		row.UpdatedAt = time.Now().UTC()
@@ -235,10 +252,7 @@ func budgetCounts(row TaskControlState, key string) (active, running, waiting in
 	}
 	return
 }
-func (r *TaskRuntime) acquireBudget(ctx context.Context, scope, epoch, id, kind string, until time.Time) error {
-	if len(r.cfg.Budgets) == 0 {
-		return nil
-	}
+func (r *TaskRuntime) acquireBudget(ctx context.Context, scope, epoch, id, kind string, until time.Time, claims ...TaskResourceRequest) error {
 	_, err := r.editControl(ctx, r.poolControlKey(), func(row *TaskControlState) error {
 		liveBudget(row)
 		for _, lease := range row.Leases {
@@ -252,6 +266,9 @@ func (r *TaskRuntime) acquireBudget(ctx context.Context, scope, epoch, id, kind 
 		if len(row.Leases) >= MaxTaskBudgetLeases {
 			return &TaskBudgetError{Resource: "pool", Kind: "pool_capacity", RetryAfterMS: r.cfg.PollInterval.Milliseconds()}
 		}
+		if err := r.configureQoS(row); err != nil {
+			return err
+		}
 		resources := make([]string, 0, len(r.cfg.Budgets))
 		for _, limit := range r.cfg.Budgets {
 			a, _, w := budgetCounts(*row, limit.Key)
@@ -260,15 +277,17 @@ func (r *TaskRuntime) acquireBudget(ctx context.Context, scope, epoch, id, kind 
 			}
 			resources = append(resources, limit.Key)
 		}
-		row.Leases = append(row.Leases, TaskBudgetLease{ID: id, Scope: scope, Epoch: epoch, Owner: r.owner, Kind: kind, Resources: resources, ExpiresAt: until})
+		for _, policy := range r.cfg.QoS.Policies {
+			if !seenResource(resources, policy.Key) {
+				resources = append(resources, policy.Key)
+			}
+		}
+		row.Leases = append(row.Leases, TaskBudgetLease{ID: id, Scope: scope, Epoch: epoch, Owner: r.owner, Kind: kind, Resources: resources, Claims: append([]TaskResourceRequest(nil), claims...), ExpiresAt: until})
 		return nil
 	})
 	return err
 }
 func (r *TaskRuntime) updateBudget(ctx context.Context, id, action string, until time.Time) error {
-	if len(r.cfg.Budgets) == 0 && r.cfg.BudgetPool == "" {
-		return nil
-	}
 	_, err := r.editControl(ctx, r.poolControlKey(), func(row *TaskControlState) error {
 		liveBudget(row)
 		found := -1
@@ -297,6 +316,9 @@ func (r *TaskRuntime) updateBudget(ctx context.Context, id, action string, until
 				if count >= limit.MaxConcurrent {
 					return &TaskBudgetError{Resource: limit.Key, Kind: "concurrent", RetryAfterMS: r.cfg.PollInterval.Milliseconds()}
 				}
+			}
+			if err := r.checkQoS(row, lease); err != nil {
+				return err
 			}
 			lease.Running = true
 		}
@@ -356,7 +378,14 @@ func (r *TaskRuntime) BindWaitContext(ctx context.Context, scope, id string) (co
 	if wait.TraceID != "" {
 		ctx = context.WithValue(ctx, taskTraceContextKey{}, wait.TraceID)
 	}
-	return context.WithValue(ctx, taskEpochKey{}, taskEpochContext{r.scopeControlKey(scope), epoch}), nil
+	if wait.Goal.ID != "" {
+		if wait.Goal.Scope != r.scopeControlKey(scope) || !wait.Goal.Deadline.After(time.Now()) {
+			return nil, &TaskBudgetError{Kind: "goal_deadline"}
+		}
+		ctx = context.WithValue(ctx, taskGoalKey{}, wait.Goal)
+	}
+	ctx = context.WithValue(ctx, taskEpochKey{}, taskEpochContext{r.scopeControlKey(scope), epoch})
+	return r.newGoal(ctx, scope, taskHash([]string{scope, wait.Turn, wait.Epoch}))
 }
 
 // reconcileBudget 修复“终态已提交、释放共享预留时断线”的窗口；不根据缺失记录释放尚在接纳的预留。
@@ -409,6 +438,21 @@ func (r *TaskRuntime) reconcileBudget(ctx context.Context) error {
 			if err := r.updateBudget(ctx, lease.ID, "release", time.Time{}); err != nil {
 				return err
 			}
+		}
+	}
+	return nil
+}
+
+// CollectControls 回收已超过目标期限和账本保留期的内存账户，停止代次与共享策略不随之清除。
+func (s *MemoryTaskControlStore) CollectControls(ctx context.Context, now time.Time) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, row := range s.rows {
+		if !row.ExpiresAt.IsZero() && !row.ExpiresAt.After(now) {
+			delete(s.rows, key)
 		}
 	}
 	return nil

@@ -40,6 +40,13 @@ func (s *session) explainToolResult(parent context.Context, p *projection, item 
 	if !p.modelReady || (view.Summary == "" && len(view.Result) == 0) || parent.Err() != nil {
 		return reply
 	}
+	if s.tasks != nil {
+		var err error
+		parent, err = s.tasks.ContinueGoal(parent, item.taskScope, item.invocation)
+		if err != nil {
+			return reply
+		}
+	}
 	ctx, cancel := context.WithTimeout(parent, cfg.Timeout)
 	defer cancel()
 	if cfg.Begin != nil {
@@ -73,6 +80,12 @@ func (s *session) explainToolResult(parent context.Context, p *projection, item 
 	p.mu.Unlock()
 	req := &agent.TurnRequest{Mode: agent.TurnModeOneShot, SessionID: p.id, InvocationScope: p.id + ":result-reply", DisableSession: true, Model: item.model,
 		System: resultReplySystem, UserText: string(payload), MaxOutputTokens: cfg.MaxOutputTokens, MaxIterations: 1, Reasoning: agent.ReasoningDisabled}
+	if s.tasks != nil && item.sessionID != "" {
+		req.Tasks = s.tasks
+		req.DisableTools = true
+		req.SessionID = item.sessionID
+		req.SessionCapability = item.sessionCapability
+	}
 	// 流式正文只来自无工具总结；最终快照覆盖草稿，失败时恢复已知回执。
 	req.OnDelta = func(text string) {
 		if len(text) <= 32768 {

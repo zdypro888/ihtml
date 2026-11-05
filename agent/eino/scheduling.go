@@ -1,6 +1,7 @@
 package einoengine
 
 import (
+	"encoding/json"
 	"strings"
 
 	ai "github.com/zdypro888/ihtml/agent"
@@ -28,6 +29,9 @@ func modelToolDescription(t ai.Tool) string {
 	}
 	if t.Completion == ai.ToolCompletionAsynchronous {
 		parts = append(parts, "成功返回表示任务已持久化并被异步受理，不表示任务已经执行完成；后续进度和最终结果以任务状态为准。沿原任务查询或等待，依赖结果的步骤须等真实完成；不要重复提交。")
+	}
+	if contract, err := json.Marshal(t.Contract); err == nil && string(contract) != "{}" {
+		parts = append(parts, "机器能力契约（未声明不代表支持）："+string(contract))
 	}
 	return strings.TrimSpace(strings.Join(parts, " "))
 }

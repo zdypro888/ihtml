@@ -51,17 +51,18 @@ type ConfirmedToolResult struct {
 }
 
 type pendingTool struct {
-	call            ihtml.ProposedToolCall
-	scope           confirmation.Scope
-	tool            agent.Tool
-	args            json.RawMessage
-	invocation      context.Context
-	invocationScope string
-	userText        string
-	model           string
-	background      bool
-	taskScope       string
-	queued          bool // guarded by pendingMu; one confirm attempt per pending card
+	call                         ihtml.ProposedToolCall
+	scope                        confirmation.Scope
+	tool                         agent.Tool
+	args                         json.RawMessage
+	invocation                   context.Context
+	invocationScope              string
+	userText                     string
+	model                        string
+	background                   bool
+	taskScope                    string
+	sessionID, sessionCapability string
+	queued                       bool // guarded by pendingMu; one confirm attempt per pending card
 }
 
 func (s *session) prepareTool(ctx context.Context, tool agent.Tool, args json.RawMessage, p *projection, req *agent.TurnRequest) (string, error) {
@@ -137,7 +138,7 @@ func (s *session) prepareTool(ctx context.Context, tool agent.Tool, args json.Ra
 	}
 	s.pendingMu.Lock()
 	s.pendingTools[call.ConfirmationNonce] = &pendingTool{call: call, scope: scope, tool: tool, args: args,
-		background: agent.IsBackgroundTask(ctx), taskScope: agent.TaskScope(req), invocation: context.WithoutCancel(ctx), invocationScope: req.InvocationScope, userText: req.UserText, model: req.Model}
+		sessionID: req.SessionID, sessionCapability: req.SessionCapability, background: agent.IsBackgroundTask(ctx), taskScope: agent.TaskScope(req), invocation: context.WithoutCancel(ctx), invocationScope: req.InvocationScope, userText: req.UserText, model: req.Model}
 	s.pendingReserved--
 	reserved = false
 	s.pendingMu.Unlock()

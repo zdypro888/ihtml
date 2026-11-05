@@ -23,7 +23,7 @@ import (
 const (
 	// Bump when the durable Deep Agent's tool or lifecycle contract changes so
 	// managed sessions cannot replay traces produced by an incompatible runtime.
-	deepAgentRuntimeVersion = "native-deep-toolsearch-v11"
+	deepAgentRuntimeVersion = "native-deep-toolsearch-v12"
 
 	toolSearchToolName = "tool_search"
 )
@@ -296,6 +296,15 @@ func (m *turnToolMiddleware) guardInvokable(next compose.InvokableToolEndpoint) 
 		}
 		if input == nil {
 			return next(ctx, input)
+		}
+		if m.tasks != nil && input.Name != "task_budget" && input.Name != "task_cancel" {
+			_, business := m.tools[input.Name]
+			if taskKernelName(input.Name) || !business {
+				if err := m.tasks.ChargeGoal(ctx, ai.TaskGoalCharge{ToolCalls: 1}); err != nil {
+					text, _ := ai.TaskFailureJSON(err, "not_started", false, "", nil)
+					return &compose.ToolOutput{Result: text}, nil
+				}
+			}
 		}
 		if input.Name == "task_suspend" {
 			m.mu.Lock()

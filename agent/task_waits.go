@@ -68,6 +68,12 @@ func (r *TaskRuntime) Suspend(ctx context.Context, scope, turn, key string, spec
 	}
 	// 事件注册原子去重；同一工具调用改变条件不能复用旧注册。
 	record := TaskWaitRecord{ID: rand.Text(), Scope: scope, Turn: turn, Key: taskHash([]string{scope, turn, key}), Digest: taskHash([]any{requested.IDs, requested.Events, requested.All, requested.Timeout, requested.Deadline, requested.Checkpoint, requested.Contexts}), Spec: spec, State: "waiting", Depth: TaskWakeDepth(ctx) + 1, Revision: 1, CreatedAt: time.Now().UTC(), ExpiresAt: spec.Deadline.Add(r.cfg.LedgerRetention)}
+	var goalErr error
+	ctx, goalErr = r.newGoal(ctx, scope, taskHash([]string{scope, turn, epoch}))
+	if goalErr != nil {
+		return TaskWaitRecord{}, goalErr
+	}
+	record.Goal = goalBinding(ctx)
 	record.Epoch = epoch
 	record.TraceID = TaskTraceID(ctx)
 	if prior, err := r.cfg.Store.FindWait(ctx, scope, record.Key); err == nil {

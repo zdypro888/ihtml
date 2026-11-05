@@ -52,6 +52,7 @@ type TaskWaitSpec struct {
 
 // TaskWaitRecord 保存条件、交付租约与处理状态；delivered 不表示原业务全部完成。
 type TaskWaitRecord struct {
+	Goal           TaskGoalBinding    `bson:"goal,omitempty" json:"-"`
 	ContextMatches []TaskContextMatch `bson:"contextMatches,omitempty" json:"context_matches,omitempty"`
 	TraceID        string             `bson:"traceID,omitempty" json:"trace_id,omitempty"`
 	EventMatches   []TaskEventMatch   `bson:"eventMatches,omitempty" json:"event_matches,omitempty"`

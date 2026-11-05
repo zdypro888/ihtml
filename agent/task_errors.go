@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 )
 
 // TaskFailure 是可公开的失败事实；它不授予重试、业务执行或新的工具权限。
@@ -99,6 +100,12 @@ func TaskFailureFrom(err error, execution string, admitted bool, receipt string,
 		f.Message = "持久存储当前无法确认，请按原记录核对；不自动重放业务。"
 	case errors.As(err, &budget):
 		f.Code = "budget_exhausted"
+		if strings.HasPrefix(budget.Kind, "goal_") {
+			f.Code = "goal_budget_exhausted"
+		}
+		if budget.Kind == "goal_quote_required" {
+			f.Code = "model_quote_required"
+		}
 		f.RetryAfterMS = budget.RetryAfterMS
 		f.Message = "当前共享资源不足，调用尚未受理。"
 	case errors.Is(err, ErrTaskContextCapacity), errors.Is(err, ErrTaskEventCapacity):
@@ -119,6 +126,8 @@ func TaskFailureFrom(err error, execution string, admitted bool, receipt string,
 	case errors.Is(err, ErrTaskNotFound):
 		f.Code = "record_unavailable"
 		f.Message = "当前授权范围内无法取得该记录；这不证明原业务未执行。"
+	case errors.Is(err, ErrTaskPolicyConflict):
+		f.Code = "policy_conflict"
 	case errors.Is(err, ErrTaskConflict):
 		f.Code = "revision_conflict"
 		f.Message = "记录已并发更新；请读取当前版本后再判断。"
@@ -191,6 +200,9 @@ func normalizedTaskFailure(f *TaskFailure) *TaskFailure {
 		return nil
 	}
 	messages := map[string]string{
+		"goal_budget_exhausted": "原目标累计额度或总期限已用完；已提交事实保留，不自动重执行业务。",
+		"model_quote_required":  "宿主未提供可靠的模型费用/token上界，受硬额度约束的调用未开始。",
+		"policy_conflict":       "共享资源策略版本不一致，需要宿主更新配置，不能由模型扩大额度。",
 		"budget_exhausted":      "当前共享资源不足，调用尚未受理。",
 		"capacity_exhausted":    "当前持久资源容量不足，新的登记尚未受理。",
 		"invalid_context":       "长期任务上下文不符合通用保存协议。",
@@ -237,6 +249,9 @@ func normalizedTaskFailure(f *TaskFailure) *TaskFailure {
 	} else if out.Admitted && out.ExecutionState == "handler_returned" && (out.Code == "budget_exhausted" || out.Code == "capacity_exhausted") {
 		out.Message = "原工具已返回资源拒绝；原调用已受理，业务状态请按回执核对。"
 	}
+	if out.Admitted && out.ExecutionState == "not_started" && (out.Code == "budget_exhausted" || out.Code == "capacity_exhausted") {
+		out.Message = "调用已登记，但资源准入未通过，Handler尚未开始；请按原记录核对。"
+	}
 	out.RetryAfterMS = max(0, min(out.RetryAfterMS, int64(86400000)))
 	return out
 }
@@ -274,7 +289,7 @@ func WrapTaskStorage(err error) error {
 	if errors.As(err, &budget) || errors.As(err, &failure) || errors.Is(err, ErrTaskWakeBudget) {
 		return err
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrTaskStorageUnavailable) || errors.Is(err, ErrTaskNotFound) || errors.Is(err, ErrTaskConflict) || errors.Is(err, ErrTaskResultExpired) || errors.Is(err, ErrTaskResultRange) || errors.Is(err, ErrTaskResultUnavailable) || errors.Is(err, ErrTaskContextCapacity) || errors.Is(err, ErrTaskContextInvalid) || errors.Is(err, ErrTaskEventCapacity) || errors.Is(err, ErrTaskEventCursor) || errors.Is(err, ErrTaskStopped) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrTaskStorageUnavailable) || errors.Is(err, ErrTaskNotFound) || errors.Is(err, ErrTaskConflict) || errors.Is(err, ErrTaskPolicyConflict) || errors.Is(err, ErrTaskResultExpired) || errors.Is(err, ErrTaskResultRange) || errors.Is(err, ErrTaskResultUnavailable) || errors.Is(err, ErrTaskContextCapacity) || errors.Is(err, ErrTaskContextInvalid) || errors.Is(err, ErrTaskEventCapacity) || errors.Is(err, ErrTaskEventCursor) || errors.Is(err, ErrTaskStopped) {
 		return err
 	}
 	return &taskStorageError{err}

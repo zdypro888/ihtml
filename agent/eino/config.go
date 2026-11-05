@@ -10,6 +10,7 @@ import (
 	"github.com/cloudwego/eino/adk"
 	einomodel "github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
+	ai "github.com/zdypro888/ihtml/agent"
 )
 
 const (
@@ -22,6 +23,9 @@ const (
 // Config belongs to the runtime, not to a host's database or secret loader.
 // Credentials must be resolved explicitly by the host before construction.
 type Config struct {
+	// QuoteModel 由可信宿主实现可靠的调用消耗上界；没有报价时 token/费用硬额度拒绝调用。
+	QuoteModel func(context.Context, ModelBudgetRequest) (ai.TaskGoalCharge, error) `json:"-"`
+
 	AgentName             string  `json:"agent_name,omitempty"`
 	AgentDescription      string  `json:"agent_description,omitempty"`
 	EnableWriteTodos      bool    `json:"enable_write_todos,omitempty"`

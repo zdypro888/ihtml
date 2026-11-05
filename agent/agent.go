@@ -18,6 +18,10 @@ import (
 type Tool struct {
 	Name        string
 	Description string
+	// Contract 是宿主声明的能力语义，参与持久会话与调用身份绑定。
+	Contract ToolContract
+	// ResolveResources 从可信实现计算资源身份，不能由模型指定任意锁名。
+	ResolveResources func(context.Context, json.RawMessage) ([]TaskResourceRequest, error)
 	// Maturity is explicit governance metadata. The zero value is stable;
 	// experimental tools remain usable but are surfaced separately in the
 	// capability catalog so operators can review adoption and failures.

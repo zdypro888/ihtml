@@ -34,16 +34,21 @@ type TaskConfig struct {
 	MaxContexts, MaxContextBytes, MaxContextMutations int
 	Events                                            TaskEventStore
 	MaxEventRecords                                   int
+	Outbox                                            TaskOutboxStore
+	GoalLimits                                        TaskGoalLimits
+	QoS                                               TaskQoSConfig
+	BudgetPolicyVersion                               int64
 }
 
 // TaskInfo 的 completed 表示 Handler 已返回，不能代替原异步业务的完成状态。
 type TaskInfo struct {
-	ID         string         `json:"id" bson:"id"`
-	ParentID   string         `json:"parent_id,omitempty" bson:"parentID,omitempty"`
-	Tool       string         `json:"tool" bson:"tool"`
-	State      string         `json:"state" bson:"state"`
-	Completion ToolCompletion `json:"completion,omitempty" bson:"completion,omitempty"`
-	TraceID    string         `json:"trace_id,omitempty" bson:"traceID,omitempty"`
+	ID              string         `json:"id" bson:"id"`
+	ContractVersion string         `json:"contract_version,omitempty" bson:"contractVersion,omitempty"`
+	ParentID        string         `json:"parent_id,omitempty" bson:"parentID,omitempty"`
+	Tool            string         `json:"tool" bson:"tool"`
+	State           string         `json:"state" bson:"state"`
+	Completion      ToolCompletion `json:"completion,omitempty" bson:"completion,omitempty"`
+	TraceID         string         `json:"trace_id,omitempty" bson:"traceID,omitempty"`
 	// Background 是调用方选择的执行方式，与原业务是否异步完成无关。
 	Background    bool            `json:"background" bson:"background"`
 	Result        string          `json:"result,omitempty" bson:"result,omitempty"`
@@ -97,6 +102,9 @@ func NewTaskRuntime(ctx context.Context, cfg TaskConfig) (*TaskRuntime, error) {
 	}
 	if cfg.MaxWakeAttempts < 1 || cfg.MaxWakeAttempts > 32 || cfg.MaxWakeDepth < 1 || cfg.MaxWakeDepth > 1024 {
 		return nil, errors.New("agent: invalid wake budget")
+	}
+	if err := ValidateTaskGoalLimits(cfg.GoalLimits); err != nil {
+		return nil, err
 	}
 	if cfg.MaxConcurrent == 0 {
 		cfg.MaxConcurrent = 8
@@ -154,6 +162,16 @@ func NewTaskRuntime(ctx context.Context, cfg TaskConfig) (*TaskRuntime, error) {
 		}
 		seenBudgets[limit.Key] = true
 	}
+	if cfg.BudgetPolicyVersion == 0 {
+		cfg.BudgetPolicyVersion = 1
+	}
+	if cfg.BudgetPolicyVersion < 1 {
+		return nil, ErrTaskPolicyConflict
+	}
+	if err := ValidateTaskQoSConfig(cfg.QoS); err != nil {
+		return nil, err
+	}
+	cfg.QoS.Policies = append([]TaskResourcePolicy(nil), cfg.QoS.Policies...)
 	cfg.Budgets = append([]TaskBudgetLimit(nil), cfg.Budgets...)
 	if cfg.Results == nil {
 		// 显式持久宿主应同时提供结果存储；内存默认仅适用于会话内使用。
@@ -256,7 +274,7 @@ func (r *TaskRuntime) Start(ctx context.Context, scope, turn, key string, tool T
 	ctx = r.TraceContext(ctx, scope, turn)
 	args = append([]byte(nil), args...)
 	compound := taskHash([]string{scope, turn, key})
-	digest := taskHash([]any{tool.Name, json.RawMessage(args)})
+	digest := taskToolDigest(tool, args)
 	op, stop := r.operation()
 	defer stop()
 	epoch, epochErr := r.scopeEpoch(ctx, scope)
@@ -275,6 +293,12 @@ func (r *TaskRuntime) Start(ctx context.Context, scope, turn, key string, tool T
 	} else if !errors.Is(err, ErrTaskNotFound) {
 		return TaskInfo{}, WrapTaskStorage(err)
 	}
+	var goalErr error
+	ctx, goalErr = r.newGoal(ctx, scope, taskHash([]string{scope, turn}))
+	if goalErr != nil {
+		return TaskInfo{}, goalErr
+	}
+
 	r.mu.Lock()
 	if r.closed || r.ctx.Err() != nil {
 		r.mu.Unlock()
@@ -300,9 +324,27 @@ func (r *TaskRuntime) Start(ctx context.Context, scope, turn, key string, tool T
 	}()
 	now := time.Now().UTC()
 	id := rand.Text()
-	deadline := now.Add(r.cfg.Timeout)
+	var claims []TaskResourceRequest
+	if tool.ResolveResources != nil {
+		var err error
+		claims, err = tool.ResolveResources(ctx, args)
+		if err != nil {
+			return TaskInfo{}, err
+		}
+		if len(claims) > 32 {
+			return TaskInfo{}, ErrTaskConflict
+		}
+		seen := map[string]bool{}
+		for _, claim := range claims {
+			if claim.Key == "" || len(claim.Key) > 256 || len(claim.IfVersion) > 256 || seen[claim.Key] {
+				return TaskInfo{}, ErrTaskConflict
+			}
+			seen[claim.Key] = true
+		}
+	}
+	deadline := minTaskTime(now.Add(r.cfg.Timeout), goalBinding(ctx).Deadline)
 	synchronous, _ := ctx.Value(synchronousInvocationKey{}).(bool)
-	if err := r.acquireBudget(op, scope, epoch, id, "task", minTaskTime(now.Add(r.cfg.LeaseDuration), deadline)); err != nil {
+	if err := r.acquireBudget(op, scope, epoch, id, "task", minTaskTime(now.Add(r.cfg.LeaseDuration), deadline), claims...); err != nil {
 		f := TaskFailureFrom(err, "not_started", false, "", nil)
 		_ = r.RecordObservation(ctx, scope, TaskObservation{Kind: "admission_rejected", State: "not_started", Code: f.Code, TurnID: turn, TraceID: TaskTraceID(ctx)})
 		return TaskInfo{}, err
@@ -312,7 +354,7 @@ func (r *TaskRuntime) Start(ctx context.Context, scope, turn, key string, tool T
 			r.releaseBudget(id)
 		}
 	}()
-	record := TaskRecord{ID: id, Scope: scope, Epoch: epoch, Key: compound, Digest: digest, Turn: turn, Args: args, Invocation: ToolInvocationKey(ctx), Effect: tool.Effect, Info: TaskInfo{ID: id, ParentID: TaskID(ctx), Tool: tool.Name, State: "queued", Completion: tool.Completion, Background: !synchronous, TraceID: TaskTraceID(ctx)}, Owner: r.owner, Revision: 1, CreatedAt: now, UpdatedAt: now, Deadline: deadline, LeaseUntil: minTaskTime(now.Add(r.cfg.LeaseDuration), deadline)}
+	record := TaskRecord{ID: id, Scope: scope, Epoch: epoch, Key: compound, Digest: digest, Turn: turn, Args: args, Invocation: ToolInvocationKey(ctx), Effect: tool.Effect, Info: TaskInfo{ID: id, ContractVersion: tool.Contract.Version, ParentID: TaskID(ctx), Tool: tool.Name, State: "queued", Completion: tool.Completion, Background: !synchronous, TraceID: TaskTraceID(ctx)}, Owner: r.owner, Revision: 1, CreatedAt: now, UpdatedAt: now, Deadline: deadline, LeaseUntil: minTaskTime(now.Add(r.cfg.LeaseDuration), deadline)}
 	saved, created, err := r.cfg.Store.CreateTask(op, record)
 	if err != nil {
 		return TaskInfo{}, TaskStorageCommitFailure(err, "not_started", id, nil)
@@ -467,6 +509,10 @@ func (r *TaskRuntime) run(ctx context.Context, t *toolTask, tool Tool, args json
 			callErr = err
 			return
 		}
+		if err := r.ChargeGoal(ctx, TaskGoalCharge{ToolCalls: 1}); err != nil {
+			callErr = err
+			return
+		}
 		op, stop := r.operation()
 		rec, err := r.ownedUpdate(op, t, func(rec *TaskRecord) {
 			if !rec.CancelRequested {
@@ -490,10 +536,20 @@ func (r *TaskRuntime) run(ctx context.Context, t *toolTask, tool Tool, args json
 		r.observeRecord(ctx, rec, "task_started")
 		r.signal()
 		callCtx := context.WithValue(ctx, taskTraceContextKey{}, rec.Info.TraceID)
+		if len(r.cfg.Budgets) > 0 || tool.ResolveResources != nil || len(r.cfg.QoS.Policies) > 0 {
+			callCtx, err = r.resourceContext(callCtx, t.id)
+			if err != nil {
+				callErr = err
+				return
+			}
+		}
+		if !tool.Contract.ResultInputs {
+			callCtx = context.WithValue(callCtx, taskResultReaderKey{}, TaskResultInputReader(nil))
+		}
 		result, callErr = tool.Handler(context.WithValue(callCtx, backgroundInvocationKey{}, taskInvocation{ID: t.id, Background: t.background}), args)
 	}()
 	// Handler 只调用一次；后续阶段只重试不可变回执提交和账本补写。
-	outcome := r.makeResult(t, tool, result, callErr, started, ctx.Err() != nil || r.ctx.Err() != nil, taskHash([]any{tool.Name, json.RawMessage(args)}))
+	outcome := r.makeResult(t, tool, result, callErr, started, ctx.Err() != nil || r.ctx.Err() != nil, taskToolDigest(tool, args))
 	rec, saveErr := r.persistTaskResult(t, outcome)
 	close(renewStop)
 	<-renewDone
@@ -600,6 +656,13 @@ func (r *TaskRuntime) refresh(ctx context.Context, rec TaskRecord) (TaskRecord, 
 
 // Collect 先将失联调用转成可核对的终态，再执行宿主存储的分层保留策略。
 func (r *TaskRuntime) Collect(ctx context.Context) error {
+	if collector, ok := r.cfg.ControlStore.(interface {
+		CollectControls(context.Context, time.Time) error
+	}); ok {
+		if err := collector.CollectControls(ctx, time.Now().UTC()); err != nil {
+			return err
+		}
+	}
 	if err := r.cfg.Contexts.CollectContexts(ctx, time.Now().UTC()); err != nil {
 		return err
 	}
@@ -629,19 +692,41 @@ func (r *TaskRuntime) Collect(ctx context.Context) error {
 	if err := r.cfg.Results.CollectResults(ctx, now); err != nil {
 		return err
 	}
-	return r.cfg.Store.Collect(ctx, now)
+	if err := r.cfg.Store.Collect(ctx, now); err != nil {
+		return err
+	}
+	if r.cfg.Outbox != nil {
+		if _, err := DeliverTaskOutbox(ctx, r.cfg.Outbox, r.EventPublisher(), r.owner); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 func (r *TaskRuntime) maintain() {
 	defer close(r.maintenanceDone)
-	ticker := time.NewTicker(time.Minute)
+	interval := time.Minute
+	if r.cfg.Outbox != nil {
+		interval = r.cfg.PollInterval
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	lastCollect := time.Now()
 	for {
 		select {
 		case <-r.ctx.Done():
 			return
 		case <-ticker.C:
 			ctx, stop := r.operation()
-			_ = r.Collect(ctx)
+			if r.cfg.Outbox != nil {
+				_, err := DeliverTaskOutbox(ctx, r.cfg.Outbox, r.EventPublisher(), r.owner)
+				if err != nil && r.cfg.Scope != "" {
+					_ = r.RecordObservation(ctx, r.cfg.Scope, TaskObservation{Kind: "outbox_delivery", State: "pending", Code: TaskFailureFrom(err, "not_started", false, "", nil).Code})
+				}
+			}
+			if time.Since(lastCollect) >= time.Minute {
+				_ = r.Collect(ctx)
+				lastCollect = time.Now()
+			}
 			stop()
 		}
 	}

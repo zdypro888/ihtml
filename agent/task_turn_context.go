@@ -25,7 +25,7 @@ func (r *TaskRuntime) BindContext(ctx context.Context, scope string) (context.Co
 	if err != nil {
 		return nil, err
 	}
-	return context.WithValue(ctx, taskEpochKey{}, taskEpochContext{r.scopeControlKey(scope), row.Epoch}), nil
+	return r.newGoal(context.WithValue(ctx, taskEpochKey{}, taskEpochContext{r.scopeControlKey(scope), row.Epoch}), scope, "")
 }
 
 // UseContext 保留已经受理的代次并验证它仍有效；只有未绑定的可信调用才取得当前代次。
@@ -46,7 +46,7 @@ func (r *TaskRuntime) UseContext(ctx context.Context, scope string) (context.Con
 	r.mu.Lock()
 	r.seenScopes[scope] = true
 	r.mu.Unlock()
-	return ctx, nil
+	return r.newGoal(ctx, scope, "")
 }
 
 // WatchContext 将整轮推理绑定到停止代次，覆盖尚未调用工具的规划和排队后的执行。
@@ -57,7 +57,9 @@ func (r *TaskRuntime) WatchContext(ctx context.Context, scope string) (context.C
 		return nil, nil, err
 	}
 	binding := bound.Value(taskEpochKey{}).(taskEpochContext)
-	watched, cancel := context.WithCancelCause(bound)
+	goal := goalBinding(bound)
+	deadlineCtx, deadlineCancel := context.WithDeadline(bound, goal.Deadline)
+	watched, cancel := context.WithCancelCause(deadlineCtx)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -81,5 +83,5 @@ func (r *TaskRuntime) WatchContext(ctx context.Context, scope string) (context.C
 			}
 		}
 	}()
-	return watched, func() { cancel(context.Canceled); <-done }, nil
+	return watched, func() { cancel(context.Canceled); deadlineCancel(); <-done }, nil
 }

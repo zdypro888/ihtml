@@ -3,18 +3,21 @@ module github.com/zdypro888/ihtml
 go 1.26.9
 
 require (
+	github.com/SherClockHolmes/webpush-go v1.4.0
 	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/anthropics/anthropic-sdk-go v1.56.0
 	github.com/cloudwego/eino v0.10.0-alpha.12
 	github.com/cloudwego/eino-ext/components/model/claude v0.1.23
 	github.com/cloudwego/eino-ext/components/model/openai v0.1.13
 	github.com/eino-contrib/jsonschema v1.0.3
+	github.com/go-openapi/jsonpointer v1.0.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/lib/pq v1.12.3
 	github.com/openai/openai-go/v3 v3.77.0
 	github.com/redis/go-redis/v9 v9.21.0
 	github.com/wk8/go-ordered-map/v2 v2.1.8
 	golang.org/x/sys v0.48.0
+	golang.org/x/time v0.15.0
 	modernc.org/sqlite v1.53.0
 )
 
@@ -22,7 +25,6 @@ require (
 	cloud.google.com/go/auth v0.20.0 // indirect
 	cloud.google.com/go/auth/oauth2adapt v0.2.8 // indirect
 	cloud.google.com/go/compute/metadata v0.9.0 // indirect
-	github.com/SherClockHolmes/webpush-go v1.4.0 // indirect
 	github.com/aws/aws-sdk-go-v2 v1.47.0 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.8 // indirect
 	github.com/aws/aws-sdk-go-v2/config v1.33.4 // indirect
@@ -98,7 +100,6 @@ require (
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sync v0.23.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
-	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/api v0.278.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260706201446-f0a921348800 // indirect
 	google.golang.org/grpc v1.84.0 // indirect

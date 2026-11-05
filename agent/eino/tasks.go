@@ -15,7 +15,7 @@ import (
 const taskStartTool = "task_start"
 
 func taskKernelName(name string) bool {
-	return observationKernelName(name) || contextKernelName(name) || name == taskStartTool || name == "task_read" || name == "task_result" || name == "task_budget" || name == "task_wait" || name == "task_cancel" || name == "task_suspend" || name == "task_event_sources" || name == "task_event_read"
+	return observationKernelName(name) || contextKernelName(name) || name == "task_result_file" || name == taskStartTool || name == "task_read" || name == "task_result" || name == "task_budget" || name == "task_wait" || name == "task_cancel" || name == "task_suspend" || name == "task_event_sources" || name == "task_event_read"
 }
 
 type taskStartInput struct {
@@ -95,7 +95,15 @@ func taskTools(req *ai.TurnRequest) ([]ai.Tool, error) {
 			if err != nil {
 				return "", err
 			}
-			return taskJSON(map[string]any{"resources": rows})
+			goal, err := req.Tasks.GoalBudget(ctx)
+			if err != nil {
+				return "", err
+			}
+			scheduling, err := req.Tasks.SchedulingBudget(ctx)
+			if err != nil {
+				return "", err
+			}
+			return taskJSON(map[string]any{"resources": rows, "goal": goal, "scheduling": scheduling})
 		}},
 		{Name: taskStartTool, Effect: ai.ToolEffectUnknown, Completion: ai.ToolCompletionAsynchronous, Description: "将一个已发现的原工具调用放入受管后台执行，即使原接口同步也立即返回调用句柄。由你根据目标和依赖决定是否使用。仍走原工具的确认、权限和防重放；启动不代表调用或业务完成。arguments 必须符合原工具协议。", InputSchema: taskSchema(map[string]any{"tool": map[string]any{"type": "string"}, "arguments": map[string]any{"type": "object"}}, "tool", "arguments"), Handler: func(context.Context, json.RawMessage) (string, error) {
 			return "", errors.New("task dispatch middleware required")
