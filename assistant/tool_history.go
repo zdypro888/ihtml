@@ -21,18 +21,23 @@ type ToolHistoryRecord struct {
 	UpdatedAt        *time.Time             `json:"updatedAt,omitempty"`
 }
 
+// trackedToolHistoryEvent 区分“不属于历史”与“历史快照无效”，不能把保存失败当成可忽略事件。
+func trackedToolHistoryEvent(event ihtml.ChatStreamEvent) bool {
+	switch event.Type {
+	case ihtml.ChatStreamConfirmationRequired, ihtml.ChatStreamToolStart, ihtml.ChatStreamToolResult:
+		return true
+	case ihtml.ChatStreamCancelToolResult:
+		return event.ToolStatus == ihtml.ChatToolCancelled
+	default:
+		return false
+	}
+}
+
 // ToolHistoryEvent 仅接收框架已投影的公开事件；宿主可按 ID 合并并持久化，不依赖工具名称。
 // 执行引用不会覆盖原提案；返回的增量不包含授权，读取历史也不能代替重新校验待确认卡。
 func ToolHistoryEvent(event ihtml.ChatStreamEvent) (ToolHistoryRecord, bool) {
 	var out ToolHistoryRecord
-	switch event.Type {
-	case ihtml.ChatStreamCancelToolResult:
-		// 撤销失败只属于交互反馈，不能污染原操作状态，更不能凭客户端引用创建执行历史。
-		if event.ToolStatus != ihtml.ChatToolCancelled {
-			return out, false
-		}
-	case ihtml.ChatStreamConfirmationRequired, ihtml.ChatStreamToolStart, ihtml.ChatStreamToolResult:
-	default:
+	if !trackedToolHistoryEvent(event) {
 		return out, false
 	}
 	if event.ToolCall != nil {
@@ -93,6 +98,18 @@ func MergeToolHistory(previous, next ToolHistoryRecord) ToolHistoryRecord {
 	}
 	if (previous.Status == ihtml.ChatToolRunning && next.Status == ihtml.ChatToolPending) || ((previous.Status == ihtml.ChatToolAccepted || previous.Status == ihtml.ChatToolUnknown) && (next.Status == ihtml.ChatToolPending || next.Status == ihtml.ChatToolRunning)) {
 		return previous
+	}
+	// 同一终态的无正文重复通知只能补充信息，不能清掉已经保存的结果。
+	if previous.Status == next.Status {
+		if len(next.Result) == 0 {
+			next.Result = append(json.RawMessage(nil), previous.Result...)
+		}
+		if next.Summary == "" {
+			next.Summary = previous.Summary
+		}
+		if next.Call.Name == "" {
+			next.Call = previous.Call
+		}
 	}
 	if previous.ProposalRecorded {
 		next.Call, next.ProposalRecorded = previous.Call, true

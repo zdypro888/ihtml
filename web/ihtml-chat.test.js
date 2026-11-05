@@ -1893,3 +1893,11 @@ test('operation history pages join the original batch and retain per-item result
  await page.locator('.t-history-more').click();await page.waitForFunction(()=>!document.querySelector('.t-history-more'));
  assert.equal(await page.locator('.ihtml-operation-history').count(),1);assert.equal(await page.locator('.ihtml-tool-batch').count(),1);await page.locator('.t-batch-list > summary').click();assert.equal(await page.locator('.ihtml-tool').count(),2);assert.equal(await page.locator('.ihtml-operation-history button:visible').count(),0);
 });
+
+test('late proposals and duplicate terminal references preserve verified history scope and result',async(t)=>{
+ const page=await fixture(t);await page.evaluate(async()=>{
+  window.a=ihtml.mountChat('#a',{initialMessages:[{id:'u',role:'user',content:'original'}],initialOperations:[{id:'known',afterMessageId:'u',status:'success',proposalRecorded:true,summary:'verified original receipt',result:{saved:true},call:{name:'any_write',title:'Original range',method:'PUT',path:'/original',presentation:{facts:[{label:'Target',value:'original-target'}]}}}]});await a.ready();await a.chat.send('read status');
+  const s=sockets[0];s.emit({type:'turn_start',run_id:'replay',seq:1});s.emit({type:'confirmation_required',run_id:'replay',seq:2,tool_call:{id:'known',name:'any_write',title:'late proposal',confirmation_nonce:'old',confirmation_token:'OLD',body:{target:'different'}},tool_status:'pending'});s.emit({type:'tool_start',run_id:'replay',seq:3,tool_call:{id:'known'},tool_status:'running'});s.emit({type:'tool_result',run_id:'replay',seq:4,tool_call:{id:'known'},tool_status:'success'});s.emit({type:'assistant_done',run_id:'replay',seq:5,message:'done'});
+ });
+ assert.equal(await page.locator('.ihtml-tool').count(),1);await page.locator('.ihtml-tool > summary').click();const text=await page.locator('.ihtml-tool').innerText();assert.match(text,/original-target/);assert.match(text,/saved/);assert.match(text,/verified original receipt/);assert.ok(!text.includes('late proposal'));assert.equal(await page.locator('.ihtml-operation-history button:visible').count(),0);
+});

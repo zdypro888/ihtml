@@ -7385,6 +7385,10 @@
         // 实时权威事件按原操作 ID 更新历史卡。只有重新下发完整签名提案才开放批准入口。
         const archived = !ev.history_record && this.historyTools?.get(call.id || ev.tool_id);
         if (archived) {
+          // 旧提案/开始回放不能回退已核实的历史结果，也不能先替换其原始范围或授权。
+          if (['success','error','cancelled'].includes(archived.status) && status!==archived.status) return;
+          if (['accepted','unknown'].includes(archived.status) && ['pending','running'].includes(status)) return;
+          if (archived.status==='running' && status==='pending') return;
           archived.receivedLiveEvidence=true;
           if (ev.type === 'confirmation_required' && call.confirmation_token && nonce) {
             archived.historical = false;archived.call = call;this.historyTools.delete(archived.id);
@@ -7456,6 +7460,7 @@
         // 已签发卡是不可变提案；执行引用序列化出的空 method/path/risk/reason 也不能覆盖它。
         // 新授权使用新 nonce 单独建卡，执行结果只更新状态和结果投影。
         if (ev.tool_call && !rec.call.confirmation_nonce && !rec.historical) rec.call = Object.assign({}, rec.call, ev.tool_call);
+        const priorEvent=rec.lastEvent, duplicateSettled=ev.type==='tool_result'&&this.settledToolStatus(rec)===status;
         if (ev.type === 'tool_start' || ev.type === 'tool_result') {
           rec.interactionError = '';
           // 新执行证据替换上一阶段结果，不能继续展示撤销失败或旧回执的摘要。
@@ -7463,6 +7468,11 @@
         }
         const previous = rec.status;
         rec.lastEvent = Object.assign({}, rec.lastEvent, ev, { tool_call: rec.call });
+        // ACK/重连可能只重复终态标识；空引用不代表原结果被撤回。
+        if(duplicateSettled){
+          if(ev.tool_result==null)rec.lastEvent.tool_result=priorEvent.tool_result;
+          if(!ev.tool_summary)rec.lastEvent.tool_summary=priorEvent.tool_summary;
+        }
         if (ev.type === 'tool_start') {
           this.clearTransientStatus(t);
           this.finalizeThinking(t, t.activeThinkingID);

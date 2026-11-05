@@ -644,7 +644,11 @@ func (s *session) persistToolHistory(ev ihtml.ChatStreamEvent) (err error) {
 		}
 	}()
 	if s.backend != nil && s.backend.cfg.PersistToolHistory != nil {
-		if record, ok := ToolHistoryEvent(ev); ok {
+		if trackedToolHistoryEvent(ev) {
+			record, ok := ToolHistoryEvent(ev)
+			if !ok {
+				return errors.New("assistant: invalid or oversized public operation history")
+			}
 			host := s.sctx
 			ctx, stop := context.WithTimeout(context.WithoutCancel(s.ctx), 5*time.Second)
 			defer stop()

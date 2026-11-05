@@ -148,3 +148,23 @@ func TestToolHistoryIgnoresRejectedCancellationAndOmitsMissingTime(t *testing.T)
 		t.Fatal("missing timestamp was invented", string(raw), err)
 	}
 }
+
+func TestToolHistoryDuplicateTerminalCannotEraseReceipt(t *testing.T) {
+	previous := ToolHistoryRecord{ID: "same", Status: ihtml.ChatToolSuccess, Summary: "verified", Result: json.RawMessage(`{"saved":true}`)}
+	merged := MergeToolHistory(previous, ToolHistoryRecord{ID: "same", Status: ihtml.ChatToolSuccess})
+	if string(merged.Result) != string(previous.Result) || merged.Summary != previous.Summary {
+		t.Fatal("duplicate erased execution evidence", merged)
+	}
+}
+func TestToolHistoryOversizeCannotBypassPersistence(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	emitted := false
+	s := &session{ctx: ctx, cancel: cancel, backend: &Backend{cfg: Config{PersistToolHistory: func(context.Context, *ihtml.ChatSessionContext, ToolHistoryRecord) error {
+		t.Fatal("invalid snapshot reached storage")
+		return nil
+	}}}, sctx: ihtml.ChatSessionContext{Emit: func(ihtml.ChatStreamEvent) error { emitted = true; return nil }}}
+	if err := s.emit(ihtml.ChatStreamEvent{Type: ihtml.ChatStreamConfirmationRequired, ToolCall: &ihtml.ProposedToolCall{ID: "original", Body: strings.Repeat("x", 600<<10)}}); err == nil || emitted {
+		t.Fatal("oversized proposal bypassed durable history", err, emitted)
+	}
+}
