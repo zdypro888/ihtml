@@ -137,3 +137,14 @@ func TestToolHistoryTerminalRecordSurvivesCancelledTransport(t *testing.T) {
 		t.Fatal("terminal record lost after delivery stopped", calls)
 	}
 }
+
+func TestToolHistoryIgnoresRejectedCancellationAndOmitsMissingTime(t *testing.T) {
+	if _, ok := ToolHistoryEvent(ihtml.ChatStreamEvent{Type: ihtml.ChatStreamCancelToolResult, ToolID: "unverified-client-reference", ToolStatus: "rejected"}); ok {
+		t.Fatal("rejected interaction became execution evidence")
+	}
+	record := ToolHistoryRecord{ID: "legacy", ReceiptOnly: true}
+	raw, err := json.Marshal(record)
+	if err != nil || strings.Contains(string(raw), "updatedAt") || strings.Contains(string(raw), "0001-") {
+		t.Fatal("missing timestamp was invented", string(raw), err)
+	}
+}

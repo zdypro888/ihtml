@@ -26,7 +26,12 @@ type ToolHistoryRecord struct {
 func ToolHistoryEvent(event ihtml.ChatStreamEvent) (ToolHistoryRecord, bool) {
 	var out ToolHistoryRecord
 	switch event.Type {
-	case ihtml.ChatStreamConfirmationRequired, ihtml.ChatStreamToolStart, ihtml.ChatStreamToolResult, ihtml.ChatStreamCancelToolResult:
+	case ihtml.ChatStreamCancelToolResult:
+		// 撤销失败只属于交互反馈，不能污染原操作状态，更不能凭客户端引用创建执行历史。
+		if event.ToolStatus != ihtml.ChatToolCancelled {
+			return out, false
+		}
+	case ihtml.ChatStreamConfirmationRequired, ihtml.ChatStreamToolStart, ihtml.ChatStreamToolResult:
 	default:
 		return out, false
 	}
