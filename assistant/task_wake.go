@@ -100,7 +100,7 @@ func (s *session) pollTaskWake() {
 			return
 		}
 	}
-	data, _ := json.Marshal(map[string]any{"wait_id": wait.ID, "reason": wait.Reason, "task_ids": wait.Spec.IDs, "checkpoint": wait.Spec.Checkpoint})
+	data, _ := json.Marshal(map[string]any{"wait_id": wait.ID, "reason": wait.Reason, "task_ids": wait.Spec.IDs, "checkpoint": wait.Spec.Checkpoint, "event_matches": wait.EventMatches, "context_refs": wait.Spec.Contexts, "context_matches": wait.ContextMatches})
 	event := ihtml.ChatClientEvent{Type: ihtml.ChatClientUserMessage, RequestID: "task-wake/" + wait.ID, Messages: []ihtml.ChatMessage{{Role: "user", Content: "已登记的后台等待条件已触发。以下为原等待上下文与事件事实，请核对回执并继续原请求；不继承额外授权：\n" + string(data)}}}
 	s.mu.Lock()
 	if s.closed || s.ctx.Err() != nil || s.queuedOrdinaryTurnsLocked() >= s.backend.cfg.MaxPendingTurns {

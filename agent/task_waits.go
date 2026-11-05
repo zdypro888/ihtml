@@ -12,12 +12,13 @@ func (r *TaskRuntime) Suspend(ctx context.Context, scope, turn, key string, spec
 	if TaskWakeDepth(ctx) >= r.cfg.MaxWakeDepth {
 		return TaskWaitRecord{}, ErrTaskWakeBudget
 	}
+	ctx = r.TraceContext(ctx, scope, turn)
 	requested := spec
 	if spec.Timeout > 0 {
 		spec.Deadline = time.Now().UTC().Add(spec.Timeout)
 		requested.Deadline = time.Time{}
 	}
-	if scope == "" || len(scope) > 256 || r.cfg.Scope != "" && r.cfg.Scope != scope || turn == "" || key == "" || len(spec.IDs) > 128 || len(spec.Checkpoint) == 0 || len(spec.Checkpoint) > 8192 || !spec.Deadline.After(time.Now()) || spec.Deadline.After(time.Now().Add(24*time.Hour+time.Second)) {
+	if scope == "" || len(scope) > 256 || r.cfg.Scope != "" && r.cfg.Scope != scope || turn == "" || key == "" || len(spec.IDs)+len(spec.Events) > 128 || len(spec.Events) > 32 || (len(spec.Checkpoint) == 0 && len(spec.Contexts) == 0) || len(spec.Checkpoint) > 8192 || !spec.Deadline.After(time.Now()) || spec.Deadline.After(time.Now().Add(24*time.Hour+time.Second)) {
 		return TaskWaitRecord{}, errors.New("agent: invalid suspension")
 	}
 	epoch, err := r.scopeEpoch(ctx, scope)
@@ -30,6 +31,9 @@ func (r *TaskRuntime) Suspend(ctx context.Context, scope, turn, key string, spec
 	r.mu.Lock()
 	r.seenScopes[scope] = true
 	r.mu.Unlock()
+	if err := r.validateContextVersions(ctx, scope, spec.Contexts); err != nil {
+		return TaskWaitRecord{}, err
+	}
 	seen := map[string]bool{}
 	for _, id := range spec.IDs {
 		if seen[id] {
@@ -41,9 +45,31 @@ func (r *TaskRuntime) Suspend(ctx context.Context, scope, turn, key string, spec
 			return TaskWaitRecord{}, ErrTaskNotFound
 		}
 	}
+	seenSources := map[string]bool{}
+	for _, condition := range spec.Events {
+		if condition.SourceID == "" || len(condition.SourceID) > 128 || seenSources[condition.SourceID] || len(condition.Types) > 16 {
+			return TaskWaitRecord{}, errors.New("agent: invalid event condition")
+		}
+		seenSources[condition.SourceID] = true
+		source, err := r.cfg.Events.GetEventSource(ctx, scope, condition.SourceID)
+		if err != nil {
+			return TaskWaitRecord{}, WrapTaskStorage(err)
+		}
+		if condition.After > source.Head {
+			return TaskWaitRecord{}, ErrTaskEventCursor
+		}
+		types := map[string]bool{}
+		for _, kind := range condition.Types {
+			if kind == "" || len(kind) > 128 || types[kind] {
+				return TaskWaitRecord{}, errors.New("agent: invalid event type filter")
+			}
+			types[kind] = true
+		}
+	}
 	// 事件注册原子去重；同一工具调用改变条件不能复用旧注册。
-	record := TaskWaitRecord{ID: rand.Text(), Scope: scope, Turn: turn, Key: taskHash([]string{scope, turn, key}), Digest: taskHash([]any{requested.IDs, requested.All, requested.Timeout, requested.Deadline, requested.Checkpoint}), Spec: spec, State: "waiting", Depth: TaskWakeDepth(ctx) + 1, Revision: 1, CreatedAt: time.Now().UTC(), ExpiresAt: spec.Deadline.Add(r.cfg.LedgerRetention)}
+	record := TaskWaitRecord{ID: rand.Text(), Scope: scope, Turn: turn, Key: taskHash([]string{scope, turn, key}), Digest: taskHash([]any{requested.IDs, requested.Events, requested.All, requested.Timeout, requested.Deadline, requested.Checkpoint, requested.Contexts}), Spec: spec, State: "waiting", Depth: TaskWakeDepth(ctx) + 1, Revision: 1, CreatedAt: time.Now().UTC(), ExpiresAt: spec.Deadline.Add(r.cfg.LedgerRetention)}
 	record.Epoch = epoch
+	record.TraceID = TaskTraceID(ctx)
 	if prior, err := r.cfg.Store.FindWait(ctx, scope, record.Key); err == nil {
 		if prior.Digest != record.Digest {
 			return prior, ErrTaskConflict
@@ -69,6 +95,9 @@ func (r *TaskRuntime) Suspend(ctx context.Context, scope, turn, key string, spec
 	if err = r.checkEpoch(ctx, scope, epoch, false); err != nil {
 		_, _ = r.cancelWait(ctx, scope, old.ID)
 		return old, err
+	}
+	if created {
+		r.observeWait(ctx, old, "wait_registered", "")
 	}
 	return old, nil
 }
@@ -102,12 +131,15 @@ func (r *TaskRuntime) ClaimWake(ctx context.Context, scope, consumer string) (*T
 			if w.RetryAt.After(now) {
 				continue
 			}
-			ready := false
-			reason := "tasks_finished"
-			if !w.Spec.Deadline.After(now) {
+			// 首次认领固定触发事实；交付重投不能换成后来另一条事件。
+			ready := w.Reason != ""
+			reason := w.Reason
+			matches := append([]TaskEventMatch(nil), w.EventMatches...)
+			if !ready && !w.Spec.Deadline.After(now) {
 				ready = true
 				reason = "deadline"
-			} else if len(w.Spec.IDs) > 0 {
+			} else if !ready && len(w.Spec.IDs)+len(w.Spec.Events) > 0 {
+				reason = "tasks_finished"
 				finished := 0
 				for _, id := range w.Spec.IDs {
 					rec, e := r.cfg.Store.GetTask(ctx, scope, id)
@@ -127,16 +159,47 @@ func (r *TaskRuntime) ClaimWake(ctx context.Context, scope, consumer string) (*T
 						finished++
 					}
 				}
-				ready = finished == len(w.Spec.IDs) || !w.Spec.All && finished > 0
+				for _, condition := range w.Spec.Events {
+					source, e := r.cfg.Events.GetEventSource(ctx, scope, condition.SourceID)
+					e = WrapTaskStorage(e)
+					if errors.Is(e, ErrTaskNotFound) {
+						matches = append(matches, TaskEventMatch{SourceID: condition.SourceID, State: "source_unavailable"})
+						reason = "event_source_unavailable"
+						finished++
+						continue
+					}
+					if e != nil {
+						return nil, e
+					}
+					for _, event := range source.Records {
+						if event.Seq > condition.After && eventTypeMatches(condition.Types, event.Type) {
+							state := "available"
+							if !event.BodyExpiresAt.After(now) {
+								state = "body_expired"
+							}
+							matches = append(matches, TaskEventMatch{SourceID: source.ID, Seq: event.Seq, State: state})
+							finished++
+							if reason == "tasks_finished" {
+								reason = "external_event"
+							}
+							break
+						}
+					}
+				}
+				ready = finished == len(w.Spec.IDs)+len(w.Spec.Events) || !w.Spec.All && finished > 0
 			}
 			if !ready {
 				continue
+			}
+			if len(w.Spec.Contexts) > 0 && len(w.ContextMatches) == 0 {
+				w.ContextMatches = r.matchContextVersions(ctx, scope, w.Spec.Contexts)
 			}
 			rev := w.Revision
 
 			w.State = "delivering"
 			w.Owner = consumer
 			w.Reason = reason
+			w.EventMatches = matches
 			w.LeaseUntil = now.Add(r.cfg.LeaseDuration)
 			w.Revision++
 			ok, e := r.cfg.Store.ReplaceWait(ctx, w, rev)
@@ -144,6 +207,7 @@ func (r *TaskRuntime) ClaimWake(ctx context.Context, scope, consumer string) (*T
 				return nil, e
 			}
 			if ok {
+				r.observeWait(ctx, w, "wake_claimed", "")
 				return &w, nil
 			}
 		}
@@ -211,6 +275,11 @@ func (r *TaskRuntime) UpdateWake(ctx context.Context, scope, id, consumer, actio
 	if w.State == "delivered" || w.State == "cancelled" || w.State == "failed" {
 		r.releaseBudget(w.ID)
 	}
+	code := ""
+	if budgetExhausted {
+		code = "wake_budget_exhausted"
+	}
+	r.observeWait(ctx, w, "wake_"+action, code)
 	if budgetExhausted {
 		return ErrTaskWakeBudget
 	}

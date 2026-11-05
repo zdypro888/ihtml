@@ -274,7 +274,26 @@ func (m *turnToolMiddleware) callable(name string) bool {
 }
 
 func (m *turnToolMiddleware) guardInvokable(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
-	return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
+	return func(ctx context.Context, input *compose.ToolInput) (output *compose.ToolOutput, callErr error) {
+		// 调度原语在此中间件分派，可能绕过Handler包装；仍使用同一错误协议并保留真实中断。
+		defer func() {
+			if callErr == nil || input == nil || !taskKernelName(input.Name) {
+				return
+			}
+			if _, ok := compose.IsInterruptRerunError(callErr); ok {
+				return
+			}
+			if _, ok := compose.ExtractInterruptInfo(callErr); ok {
+				return
+			}
+			if text, ok := ai.TaskFailureJSON(callErr, "not_started", false, "", nil); ok {
+				output = &compose.ToolOutput{Result: text}
+				callErr = nil
+			}
+		}()
+		if m.tasks != nil {
+			ctx = m.tasks.TraceContext(ctx, m.taskScope, m.sessionID)
+		}
 		if input == nil {
 			return next(ctx, input)
 		}

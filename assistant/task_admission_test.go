@@ -27,3 +27,35 @@ func TestTaskAdmissionRejectionDoesNotAppearAccepted(t *testing.T) {
 	}
 	t.Fatal("missing admission result")
 }
+
+// 结构化错误作为工具信封返回也必须保持unknown/error显示，不能因Go error为nil显示成功。
+func TestStructuredToolFailureProjectionKeepsExecutionFacts(t *testing.T) {
+	for _, unknown := range []bool{false, true} {
+		state := "handler_returned"
+		expected := ihtml.ChatToolError
+		if unknown {
+			state = "unknown"
+			expected = ihtml.ChatToolUnknown
+		}
+		rec := newRecorder()
+		cfg := configFor(&fakeEngine{run: func(_ context.Context, req *agent.TurnRequest) (*agent.TurnResult, error) {
+			req.OnEvent(agent.Step{Kind: agent.StepToolCall, ToolName: "arbitrary", Result: `{"status":"operation_failed","execution_state":"` + state + `","admitted":true}`})
+			return &agent.TurnResult{Text: "receipt required"}, nil
+		}})
+		s := openSession(t, cfg, "alice", rec)
+		send(s, "start")
+		events := rec.wait(t, ihtml.ChatStreamAssistantDone, 1)
+		found := false
+		for _, event := range events {
+			if event.Type == ihtml.ChatStreamToolResult {
+				found = true
+				if event.ToolStatus != expected {
+					t.Fatal(state, event)
+				}
+			}
+		}
+		if !found {
+			t.Fatal("missing execution facts")
+		}
+	}
+}

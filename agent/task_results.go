@@ -19,20 +19,21 @@ var ErrTaskResultRange = errors.New("agent: invalid result byte range")
 // TaskResultRecord 是不可变的最终执行事实与正文提交。Body 只用于写入，元数据查询不得返回它。
 // Store 仅在正文全部持久后发布此记录；正文过期后仍保留事实，不能靠重放恢复结果。
 type TaskResultRecord struct {
-	Scope           string    `bson:"scope"`
-	TaskID          string    `bson:"taskID"`
-	Digest          string    `bson:"digest"`
-	State           string    `bson:"state"`
-	Error           string    `bson:"error,omitempty"`
-	Started         bool      `bson:"started"`
-	Size            int64     `bson:"size"`
-	SHA256          string    `bson:"sha256"`
-	Encoding        string    `bson:"encoding"`
-	Availability    string    `bson:"availability"`
-	CreatedAt       time.Time `bson:"createdAt"`
-	ExpiresAt       time.Time `bson:"expiresAt"`
-	LedgerExpiresAt time.Time `bson:"ledgerExpiresAt"`
-	Body            []byte    `bson:"-"`
+	Scope           string       `bson:"scope"`
+	TaskID          string       `bson:"taskID"`
+	Digest          string       `bson:"digest"`
+	State           string       `bson:"state"`
+	Error           string       `bson:"error,omitempty"`
+	Failure         *TaskFailure `bson:"failure,omitempty"`
+	Started         bool         `bson:"started"`
+	Size            int64        `bson:"size"`
+	SHA256          string       `bson:"sha256"`
+	Encoding        string       `bson:"encoding"`
+	Availability    string       `bson:"availability"`
+	CreatedAt       time.Time    `bson:"createdAt"`
+	ExpiresAt       time.Time    `bson:"expiresAt"`
+	LedgerExpiresAt time.Time    `bson:"ledgerExpiresAt"`
+	Body            []byte       `bson:"-"`
 }
 
 // TaskResultStore 必须在(scope,taskID)内原子发布不可变结果，重复补写相同事实须成功。
@@ -82,7 +83,7 @@ func resultRef(record TaskResultRecord) *TaskResultRef {
 
 // TaskResultIdentity 对不可变内容及执行事实求指纹，适配器可用于原子去重；不包含重试时间。
 func TaskResultIdentity(record TaskResultRecord) string {
-	return taskHash([]any{record.Scope, record.TaskID, record.Digest, record.State, record.Error, record.Started, record.Size, record.SHA256, record.Encoding, record.Availability})
+	return taskHash([]any{record.Scope, record.TaskID, record.Digest, record.State, record.Error, record.Started, record.Size, record.SHA256, record.Encoding, record.Availability, cloneTaskFailure(record.Failure)})
 }
 
 // PutResult 校验完整正文后不可变提交，重复写入只接受同一执行事实。
@@ -103,9 +104,11 @@ func (s *MemoryTaskResultStore) PutResult(ctx context.Context, record TaskResult
 		old.Body = nil
 		return old, nil
 	}
+	record.Failure = cloneTaskFailure(record.Failure)
 	record.Body = append([]byte(nil), record.Body...)
 	s.records[key] = record
 	record.Body = nil
+	record.Failure = cloneTaskFailure(record.Failure)
 	return record, nil
 }
 
@@ -121,6 +124,7 @@ func (s *MemoryTaskResultStore) GetResult(ctx context.Context, scope, id string)
 		return TaskResultRecord{}, ErrTaskNotFound
 	}
 	record.Body = nil
+	record.Failure = cloneTaskFailure(record.Failure)
 	return record, nil
 }
 
@@ -177,12 +181,15 @@ func (r *TaskRuntime) ReadResult(ctx context.Context, scope, id string, offset i
 		return TaskResultPage{}, ErrTaskResultRange
 	}
 	record, err := r.cfg.Store.GetTask(ctx, scope, id)
-	if err != nil || !allowed[record.Info.Tool] {
+	if err != nil {
+		return TaskResultPage{}, WrapTaskStorage(err)
+	}
+	if !allowed[record.Info.Tool] {
 		return TaskResultPage{}, ErrTaskNotFound
 	}
 	meta, err := r.cfg.Results.GetResult(ctx, scope, id)
 	if err != nil {
-		return TaskResultPage{}, err
+		return TaskResultPage{}, WrapTaskStorage(err)
 	}
 	if meta.Digest != record.Digest {
 		return TaskResultPage{}, ErrTaskConflict
@@ -199,7 +206,7 @@ func (r *TaskRuntime) ReadResult(ctx context.Context, scope, id string, offset i
 	// 多取一个字符的最大宽度，确保跨存储块的 UTF-8 页尾仍完整。
 	data, err := r.cfg.Results.ReadResult(ctx, scope, id, offset, limit+utf8.UTFMax)
 	if err != nil {
-		return TaskResultPage{}, err
+		return TaskResultPage{}, WrapTaskStorage(err)
 	}
 	if int64(len(data)) != min(int64(limit+utf8.UTFMax), meta.Size-offset) {
 		return TaskResultPage{}, ErrTaskResultUnavailable
@@ -250,7 +257,16 @@ func (r *TaskRuntime) makeResult(t *toolTask, tool Tool, result string, callErr 
 		availability = "size_exceeded"
 		body = nil
 	}
-	return TaskResultRecord{Scope: t.scope, TaskID: t.id, Digest: digest, State: state, Error: publicError, Started: started, Size: int64(len(result)), SHA256: hex.EncodeToString(sum[:]), Encoding: encoding, Availability: availability, CreatedAt: now, ExpiresAt: now.Add(r.cfg.ResultRetention), LedgerExpiresAt: now.Add(r.cfg.LedgerRetention), Body: body}
+	outcome := TaskResultRecord{Scope: t.scope, TaskID: t.id, Digest: digest, State: state, Error: publicError, Started: started, Size: int64(len(result)), SHA256: hex.EncodeToString(sum[:]), Encoding: encoding, Availability: availability, CreatedAt: now, ExpiresAt: now.Add(r.cfg.ResultRetention), LedgerExpiresAt: now.Add(r.cfg.LedgerRetention), Body: body}
+	execution := "not_started"
+	if started {
+		execution = "handler_returned"
+	}
+	if state == "unknown" {
+		execution = "unknown"
+	}
+	outcome.Failure = TaskFailureFrom(callErr, execution, true, t.id, resultRef(outcome))
+	return outcome
 }
 
 func (r *TaskRuntime) applyResult(ctx context.Context, record *TaskRecord, result TaskResultRecord) error {
@@ -259,6 +275,7 @@ func (r *TaskRuntime) applyResult(ctx context.Context, record *TaskRecord, resul
 	}
 	record.Info.State, record.Info.Error = result.State, result.Error
 	record.Info.ResultRef = resultRef(result)
+	record.Info.Failure = cloneTaskFailure(result.Failure)
 	record.Info.Result = ""
 	record.ResultExpiresAt, record.ExpiresAt = result.ExpiresAt, result.LedgerExpiresAt
 	record.Info.ResultExpired = !result.ExpiresAt.After(time.Now())

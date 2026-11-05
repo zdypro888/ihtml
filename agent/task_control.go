@@ -115,17 +115,17 @@ func (r *TaskRuntime) editControl(ctx context.Context, key string, change func(*
 		if errors.Is(err, ErrTaskNotFound) {
 			row = TaskControlState{Key: key}
 		} else if err != nil {
-			return row, err
+			return row, WrapTaskStorage(err)
 		}
 		revision := row.Revision
 		if err = change(&row); err != nil {
-			return row, err
+			return row, WrapTaskStorage(err)
 		}
 		row.Revision++
 		row.UpdatedAt = time.Now().UTC()
 		ok, err := r.cfg.ControlStore.CompareControl(ctx, row, revision)
 		if err != nil {
-			return row, err
+			return row, WrapTaskStorage(err)
 		}
 		if ok {
 			return row, nil
@@ -167,7 +167,7 @@ func (r *TaskRuntime) checkEpoch(ctx context.Context, scope, epoch string, commi
 	}
 	row, err := r.cfg.ControlStore.LoadControl(ctx, r.scopeControlKey(scope))
 	if err != nil {
-		return err
+		return WrapTaskStorage(err)
 	}
 	if row.Epoch != epoch {
 		return ErrTaskStopped
@@ -318,7 +318,7 @@ func (r *TaskRuntime) Budget(ctx context.Context) ([]TaskBudgetView, error) {
 	}
 	row, err := r.cfg.ControlStore.LoadControl(ctx, r.poolControlKey())
 	if err != nil && !errors.Is(err, ErrTaskNotFound) {
-		return nil, err
+		return nil, WrapTaskStorage(err)
 	}
 	liveBudget(&row)
 	out := make([]TaskBudgetView, 0, len(r.cfg.Budgets))
@@ -352,6 +352,9 @@ func (r *TaskRuntime) BindWaitContext(ctx context.Context, scope, id string) (co
 	}
 	if err = r.checkEpoch(ctx, scope, epoch, false); err != nil {
 		return nil, err
+	}
+	if wait.TraceID != "" {
+		ctx = context.WithValue(ctx, taskTraceContextKey{}, wait.TraceID)
 	}
 	return context.WithValue(ctx, taskEpochKey{}, taskEpochContext{r.scopeControlKey(scope), epoch}), nil
 }

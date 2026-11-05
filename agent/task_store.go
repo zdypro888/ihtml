@@ -41,32 +41,37 @@ type TaskRecord struct {
 
 // TaskWaitSpec 只保存 AI 选择的等待条件和工作上下文，不保存接口专用后续步骤。
 type TaskWaitSpec struct {
-	Timeout    time.Duration `json:"-" bson:"timeout"`
-	IDs        []string      `json:"ids" bson:"ids"`
-	All        bool          `json:"all" bson:"all"`
-	Deadline   time.Time     `json:"deadline" bson:"deadline"`
-	Checkpoint string        `json:"checkpoint" bson:"checkpoint"`
+	Contexts   []TaskContextVersion `json:"contexts,omitempty" bson:"contexts,omitempty"`
+	Events     []TaskEventCondition `json:"events,omitempty" bson:"events,omitempty"`
+	Timeout    time.Duration        `json:"-" bson:"timeout"`
+	IDs        []string             `json:"ids" bson:"ids"`
+	All        bool                 `json:"all" bson:"all"`
+	Deadline   time.Time            `json:"deadline" bson:"deadline"`
+	Checkpoint string               `json:"checkpoint" bson:"checkpoint"`
 }
 
 // TaskWaitRecord 保存条件、交付租约与处理状态；delivered 不表示原业务全部完成。
 type TaskWaitRecord struct {
-	Epoch      string       `bson:"epoch,omitempty" json:"-"`
-	Attempts   int          `bson:"attempts" json:"-"`
-	Depth      int          `bson:"depth" json:"-"`
-	ID         string       `bson:"_id" json:"id"`
-	Scope      string       `bson:"scope" json:"-"`
-	Key        string       `bson:"key" json:"-"`
-	Digest     string       `bson:"digest" json:"-"`
-	Turn       string       `bson:"turn" json:"-"`
-	Spec       TaskWaitSpec `bson:"spec" json:"condition"`
-	State      string       `bson:"state" json:"state"`
-	Reason     string       `bson:"reason,omitempty" json:"reason,omitempty"`
-	Revision   int64        `bson:"revision" json:"-"`
-	Owner      string       `bson:"owner" json:"-"`
-	LeaseUntil time.Time    `bson:"leaseUntil" json:"-"`
-	RetryAt    time.Time    `bson:"retryAt" json:"-"`
-	CreatedAt  time.Time    `bson:"createdAt" json:"-"`
-	ExpiresAt  time.Time    `bson:"expiresAt" json:"-"`
+	ContextMatches []TaskContextMatch `bson:"contextMatches,omitempty" json:"context_matches,omitempty"`
+	TraceID        string             `bson:"traceID,omitempty" json:"trace_id,omitempty"`
+	EventMatches   []TaskEventMatch   `bson:"eventMatches,omitempty" json:"event_matches,omitempty"`
+	Epoch          string             `bson:"epoch,omitempty" json:"-"`
+	Attempts       int                `bson:"attempts" json:"-"`
+	Depth          int                `bson:"depth" json:"-"`
+	ID             string             `bson:"_id" json:"id"`
+	Scope          string             `bson:"scope" json:"-"`
+	Key            string             `bson:"key" json:"-"`
+	Digest         string             `bson:"digest" json:"-"`
+	Turn           string             `bson:"turn" json:"-"`
+	Spec           TaskWaitSpec       `bson:"spec" json:"condition"`
+	State          string             `bson:"state" json:"state"`
+	Reason         string             `bson:"reason,omitempty" json:"reason,omitempty"`
+	Revision       int64              `bson:"revision" json:"-"`
+	Owner          string             `bson:"owner" json:"-"`
+	LeaseUntil     time.Time          `bson:"leaseUntil" json:"-"`
+	RetryAt        time.Time          `bson:"retryAt" json:"-"`
+	CreatedAt      time.Time          `bson:"createdAt" json:"-"`
+	ExpiresAt      time.Time          `bson:"expiresAt" json:"-"`
 }
 
 // TaskScan 提供稳定分页和活跃筛选，维护不扫描已经结束的全部历史。
@@ -95,18 +100,22 @@ type TaskStore interface {
 
 // MemoryTaskStore 供不需要重启恢复的宿主和测试使用；生产宿主可接入同一 CAS 存储协议。
 type MemoryTaskStore struct {
-	control *MemoryTaskControlStore
-	results *MemoryTaskResultStore
-	mu      sync.Mutex
-	tasks   map[string]TaskRecord
-	waits   map[string]TaskWaitRecord
+	observations *MemoryTaskObservationStore
+	events       *MemoryTaskEventStore
+	control      *MemoryTaskControlStore
+	results      *MemoryTaskResultStore
+	contexts     *MemoryTaskContextStore
+	mu           sync.Mutex
+	tasks        map[string]TaskRecord
+	waits        map[string]TaskWaitRecord
 }
 
 // NewMemoryTaskStore 创建独立内存账本，不宣称支持进程重启恢复。
 func NewMemoryTaskStore() *MemoryTaskStore {
-	return &MemoryTaskStore{control: NewMemoryTaskControlStore(), results: NewMemoryTaskResultStore(), tasks: map[string]TaskRecord{}, waits: map[string]TaskWaitRecord{}}
+	return &MemoryTaskStore{observations: NewMemoryTaskObservationStore(), control: NewMemoryTaskControlStore(), results: NewMemoryTaskResultStore(), contexts: NewMemoryTaskContextStore(), tasks: map[string]TaskRecord{}, waits: map[string]TaskWaitRecord{}}
 }
 func cloneTaskRecord(r TaskRecord) TaskRecord {
+	r.Info.Failure = cloneTaskFailure(r.Info.Failure)
 	r.Args = append([]byte(nil), r.Args...)
 	r.Info.Input = append([]byte(nil), r.Info.Input...)
 	if r.Info.ResultRef != nil {
@@ -116,7 +125,14 @@ func cloneTaskRecord(r TaskRecord) TaskRecord {
 	return r
 }
 func cloneWaitRecord(r TaskWaitRecord) TaskWaitRecord {
+	r.ContextMatches = append([]TaskContextMatch(nil), r.ContextMatches...)
+	r.Spec.Contexts = append([]TaskContextVersion(nil), r.Spec.Contexts...)
 	r.Spec.IDs = append([]string(nil), r.Spec.IDs...)
+	r.Spec.Events = append([]TaskEventCondition(nil), r.Spec.Events...)
+	for i := range r.Spec.Events {
+		r.Spec.Events[i].Types = append([]string(nil), r.Spec.Events[i].Types...)
+	}
+	r.EventMatches = append([]TaskEventMatch(nil), r.EventMatches...)
 	return r
 }
 

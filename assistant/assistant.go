@@ -1099,6 +1099,10 @@ func (p *projection) step(step agent.Step, host func(agent.Step)) {
 		case admission.Status == "not_admitted" && admission.ExecutionState == "not_started":
 			// 通用接纳协议优先于工具异步声明，不能把共享预算拒绝展示成已受理。
 			status, summary = ihtml.ChatToolCancelled, "调用未受理，原工具未执行。"
+		case admission.Status == "operation_failed" && admission.ExecutionState == "unknown":
+			status, summary = ihtml.ChatToolUnknown, "调用结果未知，请核对原回执。"
+		case admission.Status == "operation_failed":
+			status, summary = ihtml.ChatToolError, "调用未完成，请核对执行状态与回执。"
 		case previewRefresh:
 			status, summary = ihtml.ChatToolCancelled, "Preview needs refreshing; nothing executed."
 		case step.ApprovalRejected:

@@ -12,8 +12,9 @@ import (
 func TestCancelAllStopsRemoteScopeAndPreservesOtherScopes(t *testing.T) {
 	for _, fixed := range []bool{true, false} {
 		t.Run(map[bool]string{true: "fixed_scope", false: "seen_scope"}[fixed], func(t *testing.T) {
+			// 本例核对作用域取消，失租另有显式故障测试；避免并发全量回归中的调度抖动先触发60ms租约。
 			store := NewMemoryTaskStore()
-			executor := taskRuntimeFixture(t, TaskConfig{Store: store, LeaseDuration: 60 * time.Millisecond, PollInterval: time.Millisecond})
+			executor := taskRuntimeFixture(t, TaskConfig{Store: store, LeaseDuration: time.Second, PollInterval: time.Millisecond})
 			entered := make(chan string, 2)
 			stopped := make(chan string, 2)
 			tool := Tool{Name: "arbitrary_sync", Effect: ToolEffectRead, Handler: func(ctx context.Context, raw json.RawMessage) (string, error) {
@@ -37,7 +38,7 @@ func TestCancelAllStopsRemoteScopeAndPreservesOtherScopes(t *testing.T) {
 					t.Fatal("original executor did not start")
 				}
 			}
-			cfg := TaskConfig{Store: store, LeaseDuration: 60 * time.Millisecond, PollInterval: time.Millisecond}
+			cfg := TaskConfig{Store: store, LeaseDuration: time.Second, PollInterval: time.Millisecond}
 			if fixed {
 				cfg.Scope = "owner"
 			}
@@ -54,7 +55,7 @@ func TestCancelAllStopsRemoteScopeAndPreservesOtherScopes(t *testing.T) {
 				if who != `"owner"` {
 					t.Fatal("stopped another scope", who)
 				}
-			case <-time.After(time.Second):
+			case <-time.After(3 * time.Second):
 				t.Fatal("remote executor ignored persisted stop")
 			}
 			rows, err := executor.Wait(t.Context(), "owner", []string{own.ID}, map[string]bool{tool.Name: true}, time.Second, true)

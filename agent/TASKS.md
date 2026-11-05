@@ -9,12 +9,15 @@
 | `task_start` | 提交已发现工具的冻结参数，立即取得调用句柄；同步接口也可后台执行 |
 | `task_budget` | 查询宿主绑定的共享资源剩余额度；快照不代表预留 |
 | `task_result` | 按受权句柄和字节偏移读取完整结果片段，不重新调用原工具 |
+| `task_event_sources` / `task_event_read` | 发现授权事件源、按持久游标读取外部事实；模型无发布权限 |
+| `task_context_save` / `task_context_read` / `task_context_list` / `task_context_delete` | AI维护长期目标、约束、待办及证据引用，按版本CAS更新 |
+| `task_trace` / `task_metrics` | 查询脱敏追踪和有界统计，明确分页与观测损失 |
 | `task_read` | 查询原调用/等待的状态、授权范围内的原参数和结果；调用与活跃等待分别分页 |
 | `task_wait` | 短时间等待任意/全部调用终态；超时不取消工作 |
 | `task_suspend` | AI 主动声明句柄条件、任意/全部、期限和事实检查点，结束当前推理；期限也可作为独立计时事件 |
 | `task_cancel` | 请求协作取消调用，或取消等待登记以阻止后续唤醒；不撤回已发生业务 |
 
-`task_suspend` 必须是该次模型输出唯一的工具调用，避免挂起和未批准写入在同一步互相覆盖。它仅在宿主明确声明具备唤醒消费者时暴露；`checkpoint` 保存用户目标、范围、待办和证据引用，不保存隐藏推理或新增授权。
+`task_suspend` 必须是该次模型输出唯一的工具调用，避免挂起和未批准写入在同一步互相覆盖。它仅在宿主明确声明具备唤醒消费者时暴露；`checkpoint` 保存用户目标、范围、待办和证据引用；也可通过 `contexts` 指定长期上下文ID与版本，两者至少一项。不保存隐藏推理或新增授权。
 
 AI 决定直接、同轮并行、后台、短等或挂起，以及事件后使用哪些当前工具。`completed` 只表示 Handler 返回；原回执中的 pending、accepted 和业务后台作业状态仍需按原契约解释。
 
@@ -82,3 +85,34 @@ TaskConfig通过ControlStore、ControlNamespace、BudgetPool和Budgets绑定可�
 接纳不足返回budget_exhausted、not_started、retry_after_ms；原Handler未执行。已接纳调用在共享并发不足时受管排队，期间不轮询模型。执行租约续期，真正收尾后释放；失联到期可回收。等待预留直到交付/取消/失败才释放，触发期限已过但尚未处理的事件仍计入积压；最晚随账本保留期结束回收。维护可补偿终态已提交、释放预留时断线的窗口，不依据缺失记录抢回仍在入库的接纳。
 
 `task_budget`只展示当前宿主绑定资源的限制和剩余额度；AI自主选择顺序、并发、查询、短等或挂起。预算限制的是受管工具执行和等待资源，不等于模型token计费额度。租约不能强制终止不响应context的Handler；配置中途变更应由宿主协调，而不是多个实例分别采用不同限额。
+
+
+## 通用外部事件
+
+`TaskEventPublisher` 是可信宿主Go入口，`OpenSource`用稳定键创建作用域内事件源，`Publish`以事件key和内容指纹原子去重。发布工具不交给模型，也不开放无认证webhook。宿主按当前权限绑定namespace/scope，发布已经脱敏、可向该范围展示的事实；接入具体生产者由宿主适配，不在运行时猜业务字段或写固定步骤。
+
+每源持久分配到达顺序Seq；ProducerSequence和OccurredAt保留为来源事实，乱序到达不会被丢弃。sourceID与after游标组成订阅条件，源丢失/过期明确报告不可用，不默默重置游标为零。正文默认24小时、元数据/去重默认30天；正文失效后仍保留事件发生事实。每源最多256条、每事件JSON最多8KiB，每scope最多256源；满额明确拒绝，不覆盖未读事件。模型只读授权源，不能改变生产者、作用域或发布权限。
+
+`task_suspend.events`最多32项，与任务句柄合计最多128项，可按types筛选；all对任务和事件的组合条件生效，期限仍是独立触发事实。事件先到、等待后注册同样可匹配。首次认领后的Reason/EventMatches冻结，交付重投不换成后来另一事件；恢复信封只带SourceID/Seq/State，正文要通过受控工具单独读取。取消、预算和严格停止代次沿用原等待协议。读取事件始终标识为不可信数据，内容不能提升为系统指令或授权。
+
+## 长期工作上下文
+
+`TaskContextStore`独立于聊天压缩，保存AI公开维护的Goal、Constraints、Pending、Evidence、Notes和State。State只是工作声明，不是业务成功回执。保存、读取、分页和删除均受可信scope约束；写入验证停止代次，模型不能选择其他用户或权限范围。
+
+更新必须指定expected_revision；同一可信逻辑轮次+mutation_key幂等，重投返回原应用版本及当前记录，不覆盖后续更新。存储提交应答未知给出admission_state=unknown和可查询ID；只有同一幂等键核对，不靠新写入猜测。删除清正文、留墓碑。默认每scope最多128条、每文档32KiB(最高64KiB)、4096条轻量mutation receipts；目录显示用量和剩余，满额拒绝。默认保留30天，更新延长期限时同步延长该上下文的已有去重回执。Mongo用单个有界bucket CAS完成版本、配额和幂等，不要求跨文档事务。
+
+等待可引用至多16个ID/Revision。认领时记录available/version_changed/deleted/unavailable/unconfirmed的版本事实，重投保留该观察；旧引用不是历史正文快照，恢复后仍应读取当前版本比较。引用已丢失时保留未完成与差异事实，不能把新版本当成原计划或猜测旧目标。运行时不据上下文内容自动执行步骤。
+
+## 结构化错误
+
+`TaskFailure`公开code、execution_state、admission_state、receipt_id、result_ref、retry_after_ms及固定脱敏message。兼容admitted=true也可能表示“可能受理”，应以admission_state的admitted/not_admitted/unknown三态为准。CreateTask/Context提交失去应答不能标作not_admitted，已开始的外层写调用不能因下游资源拒绝被反证成尚未执行。错误不包含原驱动地址、响应原文或凭据；cause只留进程内errors.Is/As。
+
+全部kernel工具和原调用错误使用同一信封；真实挂起interrupt保留原协议，不被包装成普通错误。界面区分未受理、失败和结果未知。结构化错误只提供事实，不授权自动重试或扩大目标。明确存储边界分类storage_unavailable，版本/容量/范围/期限/停止各有稳定code，不按接口名或错误文本猜测。
+
+## 可观测性
+
+`TaskObservationStore`接收白名单关联元数据：trace、调用/父子/等待/恢复/上下文/源/事件ID、状态、稳定code、revision、duration和时间。参数、正文、外部payload、检查点及目标内容均不进入追踪。Invocation/Turn按摘要保存，父子调用与等待恢复继承TraceID，事件/上下文通过引用关联边可追溯。
+
+观测采用128容量有界异步队列，默认每次sink期限100ms、保留30天，失败不改变业务结果、不重放Handler。local_dropped/local_failed/local_pending明确是本运行时指标，会随进程重建重置；它是best effort遥测，不是可靠业务账本或完整审计承诺。关闭限时drain，适配器须响应context。已持久记录可跨重建查询；重复ID只接受同一事实，时间按UTC毫秒规范化以兼容Mongo精度。
+
+`task_trace`分页、`task_metrics`最多汇总1024条快照，next/truncated不能被当作全量统计。时间窗口统一[From,To)，并发写入分页不是完整实时事件流。宿主额外提供本人当前权限代次的只读HTTP观测目录，不接受客户端scope、不返回正文。单独发布者可用PrepareTaskObservation归一化元数据后接同一sink；观测hook失败不改变外部事件的持久结果。
