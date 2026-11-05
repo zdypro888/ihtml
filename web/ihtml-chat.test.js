@@ -1851,3 +1851,45 @@ test('late background confirmations keep the original batch after model suspensi
  const frame=await page.evaluate(()=>sockets[0].sent.find(f=>f.type==='confirm_tools'));
  assert.equal(frame.tool_calls.length,2);
 });
+
+// 任意工具都使用实时卡片渲染器，历史仅移除授权，不能丢掉范围、差异或公开结果。
+test('structured operation history preserves approval scope and per-item results without restoring authority',async(t)=>{
+ const page=await fixture(t,{width:390,height:844});
+ await page.evaluate(async()=>{
+  window.a=ihtml.mountChat('#a',{locale:'zh-CN',initialMessages:[{id:'question',role:'user',content:'通用批量操作'},{id:'reply',role:'assistant',content:'原始回复'}],initialOperations:['success','accepted','unknown','pending'].map((status,i)=>({id:'history-'+i,afterMessageId:'question',status,proposalRecorded:true,summary:'实际回执 '+i,result:{saved:status==='success',jobId:'original-'+i,api_key:'SECRET'},call:{name:'arbitrary_tool',title:'任意资源变更',method:'PUT',path:'/resources',confirmation_group:'original',reason:'只修改原始范围',confirmation_token:'OLD_SECRET',confirmation_nonce:'OLD_NONCE',requires_confirmation:true,presentation:{facts:[{label:'目标',value:'resource-'+i},{label:'用途',value:'原目标值'}]},review:{scope:'原始范围',before:{value:'旧值'},after:{value:'新值'}}}}))});await a.ready();
+ });
+ assert.equal(await page.locator('.ihtml-tool-batch').count(),1);assert.match(await page.locator('.ihtml-tool-batch').innerText(),/完成 1.*已接受 1.*结果未知 1/);
+ assert.equal(await page.locator('.ihtml-operation-history .t-actions button:visible').count(),0);
+ await page.locator('.t-batch-list > summary').click();await page.locator('.ihtml-tool').first().locator('summary.t-head').click();
+ assert.match(await page.locator('.ihtml-tool').first().innerText(),/resource-0/);assert.match(await page.locator('.ihtml-tool').first().innerText(),/旧值/);assert.match(await page.locator('.ihtml-tool').first().innerText(),/新值/);
+ await page.locator('.ihtml-tool').first().locator('.t-tech > summary').click();assert.match(await page.locator('.ihtml-tool').first().innerText(),/original-0/);
+ const exported=await page.evaluate(()=>JSON.stringify(a.options||{}));assert.ok(!exported.includes('OLD_SECRET'));
+ assert.ok(!(await page.locator('#a').innerText()).includes('SECRET'));
+ assert.equal(await page.evaluate(()=>sockets.some(s=>s.sent.some(f=>['confirm_tool','confirm_tools','cancel_tool'].includes(f.type)))),false);
+ await page.locator('#a').screenshot({path:'/tmp/ihtml-structured-history.png'});
+});
+
+test('live evidence updates historical operation in place and old card cannot authorize execution',async(t)=>{
+ const page=await fixture(t);await page.evaluate(async()=>{
+  window.a=ihtml.mountChat('#a',{initialMessages:[{id:'u',role:'user',content:'original'}],initialOperations:[{id:'same-call',afterMessageId:'u',status:'running',proposalRecorded:true,call:{name:'write',title:'Original target',method:'PUT',path:'/old',presentation:{facts:[{label:'Target',value:'original-resource'}]}}}]});await a.ready();await a.chat.send('status');
+  const s=sockets[0];s.emit({type:'turn_start',run_id:'restore',seq:1});s.emit({type:'tool_result',run_id:'restore',seq:2,tool_call:{id:'same-call',confirmation_nonce:'server-reference',method:'',path:'',risk:'',reason:''},tool_status:'success',tool_summary:'authoritative receipt',tool_result:{saved:true}});s.emit({type:'assistant_done',run_id:'restore',seq:3,message:'Updated'});
+ });
+ assert.equal(await page.locator('.ihtml-tool').count(),1);assert.match(await page.locator('.ihtml-tool').innerText(),/authoritative receipt/);await page.locator('.ihtml-tool > summary').click();assert.match(await page.locator('.ihtml-tool').innerText(),/original-resource/);
+ assert.equal(await page.locator('.ihtml-operation-history button').count(),0);
+});
+
+test('operation ID links legacy text to structured receipts without merging unrelated identical summaries',async(t)=>{
+ const page=await fixture(t);await page.evaluate(async()=>{window.a=ihtml.mountChat('#a',{locale:'zh-CN',initialMessages:[{id:'u',role:'user',content:'original'},{id:'one',operationId:'op-one',role:'tool',content:'identical'},{id:'two',operationId:'op-two',role:'tool',content:'identical'}],initialOperations:['one','two'].map(id=>({id:'op-'+id,afterMessageId:'u',status:'success',receiptOnly:true,proposalRecorded:false,summary:'identical',result:{saved:true},call:{name:'unrelated_'+id,title:'Operation '+id}}))});await a.ready()});
+ assert.equal(await page.locator('.ihtml-receipt-history').count(),0);assert.equal(await page.locator('.ihtml-tool').count(),2);assert.equal(await page.locator('.ihtml-tool-batch').count(),0);
+ await page.locator('.ihtml-tool > summary').first().click();assert.match(await page.locator('.ihtml-tool').first().innerText(),/未保存原确认范围/);assert.match(await page.locator('.ihtml-tool').first().innerText(),/saved/);
+ assert.equal(await page.locator('.ihtml-operation-history button').count(),0);
+});
+
+test('operation history pages join the original batch and retain per-item results',async(t)=>{
+ const page=await fixture(t);await page.evaluate(async()=>{
+  const record=i=>({id:'op-'+i,afterMessageId:'u',status:'success',proposalRecorded:true,summary:'saved '+i,result:{saved:true,target:'resource-'+i},call:{name:'write',title:'Original group',confirmation_group:'group',presentation:{facts:[{label:'Target',value:'resource-'+i}]}}});
+  window.a=ihtml.mountChat('#a',{initialMessages:[{id:'u',role:'user',content:'original'}],initialOperations:[record(2)],operationHistory:{cursor:'older',load:async({cursor,signal})=>{if(cursor!=='older'||signal.aborted)throw Error('invalid cursor');return{items:[record(1)],cursor:''}}}});await a.ready();
+ });
+ await page.locator('.t-history-more').click();await page.waitForFunction(()=>!document.querySelector('.t-history-more'));
+ assert.equal(await page.locator('.ihtml-operation-history').count(),1);assert.equal(await page.locator('.ihtml-tool-batch').count(),1);await page.locator('.t-batch-list > summary').click();assert.equal(await page.locator('.ihtml-tool').count(),2);assert.equal(await page.locator('.ihtml-operation-history button:visible').count(),0);
+});

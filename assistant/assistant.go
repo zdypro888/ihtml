@@ -65,6 +65,9 @@ type Config struct {
 	PresentToolResult func(context.Context, *ihtml.ChatSessionContext, agent.Tool, json.RawMessage, string) ToolResultView
 	// CompleteTool persists manual execution evidence; it does not resume the model trajectory.
 	CompleteTool func(context.Context, *ihtml.ChatSessionContext, *ConfirmedToolResult) error
+	// PersistToolHistory 在公开操作事件交付前保存历史。错误阻止交付并停止当前会话，
+	// 不允许已签发确认卡只有浏览器副本；回调必须有界，且不得重入当前会话。
+	PersistToolHistory func(context.Context, *ihtml.ChatSessionContext, ToolHistoryRecord) error
 	// ContinueAfterTool 可选地提交一个新的受管轮次；只在确认执行及回执保存成功后调用。
 	// 新轮次仍走 PrepareTurn、权限和签名确认，不继承上一张卡的写权限。
 	ContinueAfterTool func(context.Context, *ihtml.ChatSessionContext, *ConfirmedToolResult) (*ihtml.ChatClientEvent, error)
@@ -624,10 +627,33 @@ func (s *session) emit(ev ihtml.ChatStreamEvent) (err error) {
 			s.cancel()
 		}
 	}()
+	if err := s.persistToolHistory(ev); err != nil {
+		return err
+	}
 	if s.ctx.Err() != nil {
 		return s.ctx.Err()
 	}
 	return s.sctx.Emit(ev)
+}
+
+// 终态历史不依赖浏览器仍连接；取消后只给有界保存时间，不借此恢复模型或执行工具。
+func (s *session) persistToolHistory(ev ihtml.ChatStreamEvent) (err error) {
+	defer func() {
+		if recover() != nil {
+			err = errors.New("assistant: PersistToolHistory panicked")
+		}
+	}()
+	if s.backend != nil && s.backend.cfg.PersistToolHistory != nil {
+		if record, ok := ToolHistoryEvent(ev); ok {
+			host := s.sctx
+			ctx, stop := context.WithTimeout(context.WithoutCancel(s.ctx), 5*time.Second)
+			defer stop()
+			if err := s.backend.cfg.PersistToolHistory(ctx, &host, record); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (s *session) run(ctx context.Context, cancel context.CancelFunc, ev *ihtml.ChatClientEvent) {
@@ -998,6 +1024,10 @@ func newProjection(s *session, ctx context.Context, cancel context.CancelFunc) *
 // All send calls hold mu across sequence assignment and synchronous emission.
 func (p *projection) send(ev ihtml.ChatStreamEvent) {
 	if p.emitFailed {
+		// 网络失败后仍保留后续实际终态；不能因已停止发帧而把历史永久留在执行中。
+		if err := p.session.persistToolHistory(ev); err != nil {
+			p.err = errors.Join(p.err, err)
+		}
 		return
 	}
 	p.seq++

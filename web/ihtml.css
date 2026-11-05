@@ -2199,3 +2199,7 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
 .ihtml-root .ihtml-receipt-history > ol { display: grid; gap: 6px; margin: 8px 0 0; padding-left: 20px; }
 .ihtml-root .ihtml-receipt-history li { overflow-wrap: anywhere; white-space: pre-wrap; }
 .ihtml-root .ihtml-receipt-history .t-receipt-count { white-space: nowrap; margin-left: 8px; }
+
+/* 操作历史复用实时卡片，只增加只读来源标识和通用分页入口。 */
+.ihtml-root .ihtml-operation-history .t-history-label { color: var(--ui-text-muted); font-size: 12px; font-weight: 600; margin-bottom: 8px; }
+.ihtml-root .t-history-more { justify-self: start; margin: 8px 0; }

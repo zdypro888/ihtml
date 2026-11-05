@@ -53,6 +53,27 @@
   const lib = window.__ihtmlLib || { makeT: () => (k) => k, fmt: {}, util: {}, chart: {} };
   let instanceSeq = 0;
   const chatOnlyOption = Symbol('ihtml.mountChat');
+  // 显示历史、技术详情和公共回调共用同一凭据字段过滤，不能各自维护例外。
+  function isTechnicalSecretKey(key) {
+    const normalized = String(key == null ? '' : key).toLowerCase().replace(/[^a-z0-9]/g, '');
+    return !!normalized && /(?:authorization|auth|token|secret|password|passwd|cookie|credential|apikey|session|sessionid|sessionkey|nonce|signature|privatekey)$/.test(normalized);
+  }
+
+  // 首屏和分页共用有界只读快照校验，任何路径都不能恢复签名或 nonce。
+  function normalizeOperationHistory(records) {
+          if (!Array.isArray(records) || records.length > 512) throw new TypeError('ihtml: initialOperations must contain at most 512 public records');
+          let bytes=0;const ids=new Set();
+          return records.map(record=>{
+            if (!record || typeof record.id!=='string' || !record.id || record.id.length>256 || ids.has(record.id)) throw new TypeError('ihtml: operation history requires unique bounded IDs');
+            ids.add(record.id);
+            const source=record.call||{},call={id:record.id};
+            for (const key of ['confirmation_group','name','title','method','path','risk','reason','presentation','review','body','query','confirmation_expires']) if (source[key]!==undefined) call[key]=source[key];
+            const safe=JSON.parse(JSON.stringify({id:record.id,afterMessageId:typeof record.afterMessageId==='string'?record.afterMessageId:'',call,status:['pending','running','accepted','success','error','unknown','cancelled','expired'].includes(record.status)?record.status:'unknown',summary:typeof record.summary==='string'?record.summary:'',result:record.result,proposalRecorded:record.proposalRecorded===true,receiptOnly:record.receiptOnly===true,updatedAt:typeof record.updatedAt==='string'?record.updatedAt:''},(key,value)=>isTechnicalSecretKey(key)?undefined:value));
+            bytes+=new TextEncoder().encode(JSON.stringify(safe)).length;
+            if (bytes>8*1024*1024) throw new TypeError('ihtml: operation history exceeds 8 MiB');
+            return safe;
+          });
+  }
   let runtimeSymbolName = 'ihtml.runtime.v1';
   let runtimeSymbol = Symbol.for(runtimeSymbolName);
 
@@ -5053,10 +5074,6 @@
         return JSON.stringify(v, null, 2);
       } catch { return String(v); }
     }
-    function isTechnicalSecretKey(key) {
-      const normalized = String(key == null ? '' : key).toLowerCase().replace(/[^a-z0-9]/g, '');
-      return !!normalized && /(?:authorization|auth|token|secret|password|passwd|cookie|credential|apikey|session|sessionid|sessionkey|nonce|signature|privatekey)$/.test(normalized);
-    }
     function redactTechnical(value, depth = 0, seen = new WeakSet(), keyName = '') {
       if (value == null || typeof value === 'number' || typeof value === 'boolean') return value;
       if (typeof value === 'string') {
@@ -5665,7 +5682,17 @@
 
       appendMessages(messages) {
         let receipts = null;
+        this.operationHistoryStart=doc.createComment('operation-history');this.log.appendChild(this.operationHistoryStart);
+        this.messageAnchors=new Map();
+        const restored = new Set();
+        const appendOperations = id => {
+          const records = (opts.initialOperations || []).filter(record => !restored.has(record.id) && record.afterMessageId === id);
+          if (!records.length) return;
+          records.forEach(record => restored.add(record.id));this.appendOperationHistory(records);
+        };
+        appendOperations('');
         for (const message of messages || []) {
+          if (message.role==='tool' && message.operationId && (opts.initialOperations||[]).some(record=>record.id===message.operationId)) {appendOperations(message.id);continue;}
           if (!message.content.trim()) continue;
           // 工具回执是只读展示记录，不是 AI 发言，也不能恢复旧签名或执行入口。
           if (message.role === 'tool') {
@@ -5683,7 +5710,7 @@
               row.append(el('span', '', message.content), counter);receipts.list.appendChild(row);
               receipts.last = {text: message.content, count: 1, counter};
             }
-            continue;
+            appendOperations(message.id);continue;
           }
           receipts = null;
           const card = el('article', 'ihtml-msg ' + message.role);
@@ -5694,8 +5721,62 @@
           else body.replaceChildren(renderAssistant(message.content, message.contentFormat, body, false));
           card.appendChild(body);
           this.log.appendChild(card);
+          if(message.id)this.messageAnchors.set(message.id,card);
+          appendOperations(message.id);
         }
+        this.appendOperationHistory((opts.initialOperations || []).filter(record => !restored.has(record.id)));
+        this.operationCursor=opts.operationHistory?.cursor||'';this.renderOperationPager();
         this.scroll();
+      },
+
+      // 历史与实时操作复用同一张卡和批次统计；显示快照始终不拥有执行权限。
+      appendOperationHistory(records) {
+        if (!records.length) return;
+        this.historyTools ||= new Map();this.historyTurns ||= new Map();
+        const groups=new Map();for(const record of records){const key=record.afterMessageId||'';if(!groups.has(key))groups.set(key,[]);groups.get(key).push(record);}
+        const previousTurn=this.turn;
+        for(const [anchor,items] of groups){
+          let t=this.historyTurns.get(anchor);
+          if(!t){
+            t=this.beginTurn('deep');t.done=true;t.historical=true;t.elapsedUnknown=true;
+            t.card.querySelector('.author')?.remove();t.card.classList.add('ihtml-operation-history');
+            t.card.prepend(el('div','t-history-label',T('tool_history_readonly')));
+            const after=this.messageAnchors?.get(anchor)||this.operationHistoryStart;if(after?.isConnected)after.after(t.card);
+            this.historyTurns.set(anchor,t);
+          }
+          for(const record of items){
+            const existing=this.historyTools.get(record.id);
+            if(existing){
+              // 分页可能补齐旧回执缺失的原提案，但不能覆盖已收到的实时执行证据或授权。
+              if(existing.historical && !existing.historyRecord.proposalRecorded && record.proposalRecorded){
+                existing.call={...record.call,id:record.id};existing.historyRecord=record;
+                if(!existing.receivedLiveEvidence){existing.lastEvent={...existing.lastEvent,tool_summary:record.summary,tool_result:record.result};this.setToolStatus(existing,record.status,existing.ownerTurn);}
+                this.renderToolRecord(existing,existing.lastEvent,existing.ownerTurn);
+              }
+              continue;
+            }
+            this.upsertTool({type:'tool_result',tool_call:{...record.call,id:record.id},tool_status:record.status,tool_summary:record.summary,tool_result:record.result,history_record:record},record.status,t);
+            this.historyTools.set(record.id,t.tools.get(record.id));
+          }
+          t.process.hidden=true;t.actions.hidden=false;
+        }
+        this.turn=previousTurn;
+      },
+      renderOperationPager(){
+        this.operationPager?.remove();this.operationPager=null;
+        if(!this.operationCursor||!opts.operationHistory)return;
+        const button=el('button','t-history-more',T('tool_history_more'));button.type='button';this.operationPager=button;this.log.appendChild(button);
+        button.onclick=async()=>{
+          if(this.operationsAbort||destroyed||authRefreshing)return;
+          const controller=new AbortController();this.operationsAbort=controller;button.disabled=true;
+          try{
+            const page=await boundedChatHook(()=>opts.operationHistory.load({cursor:this.operationCursor,signal:controller.signal}),controller.signal,30000);
+            if(destroyed||controller.signal.aborted)return;
+            if(!page||!Array.isArray(page.items)||typeof (page.cursor||'')!=='string'||page.cursor===this.operationCursor)throw new Error('invalid operation history page');
+            this.appendOperationHistory(normalizeOperationHistory(page.items));this.operationCursor=page.cursor||'';this.renderOperationPager();
+          }catch{if(!destroyed&&!controller.signal.aborted){button.textContent=T('tool_history_more_failed');button.disabled=false;}}
+          finally{controller.abort();if(this.operationsAbort===controller)this.operationsAbort=null;}
+        };
       },
 
       getMessages() {
@@ -6073,6 +6154,7 @@
         chatSessionID(true); // 换会话号 = 服务端上下文重开
         this.clearTurnTimers();
         this.log.replaceChildren();
+        this.historyTools?.clear();this.historyTurns?.clear();this.messageAnchors?.clear();
         this.setFollowing(true);
         this.availabilityNote = null;
         this.turn = null;
@@ -6087,6 +6169,7 @@
         if (typeof opts.onNewChat === 'function') { try { opts.onNewChat(); } catch { /* display-only host hook */ } }
       },
       clearTurnTimers() {
+        this.operationsAbort?.abort();this.operationsAbort=null;
         if (this.scrollFrame) cancelAnimationFrame(this.scrollFrame);
         this.scrollFrame = 0;
         if (this.composerResizeFrame) cancelAnimationFrame(this.composerResizeFrame);
@@ -6123,6 +6206,7 @@
           const turn = card._turn;
           if (!turn) continue;
           for (const rec of turn.tools.values()) {
+            if (rec.historical) continue;
             if (rec.status !== 'pending') continue;
             if (rec.confirmAbort) rec.confirmAbort.abort();
             if (this.confirmationBusy === rec) this.confirmationBusy = null;
@@ -6168,6 +6252,7 @@
         this.close();
         if (this.log) {
           this.log.replaceChildren();
+          this.historyTools?.clear();this.historyTurns?.clear();this.messageAnchors?.clear();this.operationPager=null;this.operationCursor='';
           this.notice(T('welcome'));
         }
       },
@@ -6977,7 +7062,7 @@
         if (!rec || !t) return;
         const hadFocus = rec.body.contains(doc.activeElement);
         rec.attention = rec.attention || ['pending', 'error', 'unknown'].includes(rec.status);
-        const parent = rec.batchGroup ? rec.batchGroup.items : (rec.attention ? t.actions : t.pBody);
+        const parent = rec.batchGroup ? rec.batchGroup.items : (rec.historical || rec.attention ? t.actions : t.pBody);
         if (rec.card.parentNode !== parent) parent.appendChild(rec.card);
         if (rec.countdown) { clearInterval(rec.countdown); rec.countdown = 0; }
         const view = this.toolView(rec.call, ev || {});
@@ -7010,7 +7095,7 @@
           primary.id = rec.domID + '-primary';
           rec.body.appendChild(primary);
         }
-        if (rec.status === 'pending' && view.reason) {
+        if ((rec.status === 'pending' || rec.historical) && view.reason) {
           const reason = el('div', 't-reason');
           reason.append(el('strong', '', view.reasonLabel), doc.createTextNode(view.reason));
           rec.body.appendChild(reason);
@@ -7028,6 +7113,11 @@
             facts.appendChild(row);
           }
           rec.body.appendChild(facts);
+        }
+        if (rec.historical && rec.historyRecord.receiptOnly) rec.body.appendChild(el('p','t-reason',T('tool_history_missing_proposal')));
+        if (rec.historical && rec.historyRecord.updatedAt) {
+          const when = new Date(rec.historyRecord.updatedAt);
+          if (Number.isFinite(when.getTime())) { const time = el('time','t-meta',when.toLocaleString(opts.locale || navigator.language));time.dateTime=when.toISOString();rec.body.appendChild(time); }
         }
         if (rec.status === 'unknown' && typeof opts.verificationLinks === 'function') {
           try {
@@ -7065,7 +7155,7 @@
         }
         const meta = el('div', 't-meta');
         if (rec.call.risk) meta.appendChild(el('span', 'ihtml-chip risk-' + rec.call.risk, RISK_LABEL[rec.call.risk] || rec.call.risk));
-        if (rec.status === 'pending' && rec.call.confirmation_expires) {
+        if (!rec.historical && rec.status === 'pending' && rec.call.confirmation_expires) {
           const countdown = el('span', 't-countdown');
           countdown.setAttribute('aria-live', 'off');
           meta.appendChild(countdown);
@@ -7111,7 +7201,7 @@
         }
         if (meta.childNodes.length) rec.body.appendChild(meta);
         // 业务影响说明不能替代续办能力；受管续办另显示一行共享提示，普通单卡避免重复说明。
-        if (rec.status === 'pending' && rec.call.approval_resume === 'manual_tool_only' && (!view.reason || this.deepApprovalResume === 'managed_turn')) {
+        if (!rec.historical && rec.status === 'pending' && rec.call.approval_resume === 'manual_tool_only' && (!view.reason || this.deepApprovalResume === 'managed_turn')) {
           const manual = el('div', 'ihtml-agent-manual', T(this.deepApprovalResume === 'managed_turn' ? 'agent_managed_confirm' : 'agent_manual_confirm'));
           manual.setAttribute('role', 'note');
           rec.body.appendChild(manual);
@@ -7119,7 +7209,9 @@
 
         const techBody = el('div', 't-tech-body');
         const hasRequest = this.appendTechnicalSection(techBody, T('request_summary'), view.request, rec, 'request');
-        const hasResult = this.appendTechnicalSection(techBody, T('result_data'), view.result, rec, 'result');
+        // 历史中的执行结果是核心内容，展开单项后直接可见，不再藏在第二层技术详情里。
+        if (rec.historical) this.appendTechnicalSection(rec.body, T('result_data'), view.result, rec, 'result');
+        const hasResult = !rec.historical && this.appendTechnicalSection(techBody, T('result_data'), view.result, rec, 'result');
         const hasDebug = this.appendTechnicalSection(techBody, T('diagnostic_data'), view.debug, rec, 'debug');
         if (view.hasTechnical && (hasRequest || hasResult || hasDebug)) {
           const tech = el('details', 't-tech');
@@ -7128,7 +7220,7 @@
           tech.append(techSummary, techBody);
           rec.body.appendChild(tech);
         }
-        if (rec.status === 'pending') {
+        if (!rec.historical && rec.status === 'pending') {
           const bar = el('div', 't-actions');
           const okBtn = el('button', 'ok', view.confirmText);
           const noBtn = el('button', '', view.cancelText);
@@ -7145,7 +7237,7 @@
           rec.body.setAttribute('aria-labelledby', rec.title.id);
           if (primary) rec.body.setAttribute('aria-describedby', primary.id);
         }
-        if (rec.expired && rec.status === 'expired') {
+        if (!rec.historical && rec.expired && rec.status === 'expired') {
           const bar = el('div', 't-actions');
           const refresh = el('button', 't-refresh', T('refresh_confirmation'));
           refresh.disabled = !!this.confirmationBusy || this.active || this.sending;
@@ -7164,14 +7256,20 @@
       },
       // 同轮同类签名操作汇总为一张卡；完整参数仍在可展开清单内，不根据展示摘要扩大授权。
       syncToolGroups(t) {
-        if (!t || !this.modelInfo?.batch_confirmations) return;
+        if (!t || !t.historical && !this.modelInfo?.batch_confirmations) return;
         t.toolGroups ||= new Map();
         const buckets = new Map();
         for (const rec of t.tools.values()) {
-          if (!rec.call.confirmation_nonce || !rec.call.name || rec.call.approval_resume === 'checkpoint') continue;
+          if ((!rec.historical && !rec.call.confirmation_nonce) || !rec.call.name || rec.call.approval_resume === 'checkpoint') continue;
           const key = JSON.stringify([rec.call.confirmation_group || '', rec.call.name, rec.call.method || '', rec.call.risk || '', rec.call.reason || '']);
           if (!buckets.has(key)) buckets.set(key, []);
           buckets.get(key).push(rec);
+        }
+        // 分页可补齐旧记录的分组信息；移除失效分组，避免留下旧汇总和新汇总两张卡。
+        for(const [key,g] of t.toolGroups){
+          if((buckets.get(key)||[]).length>=2)continue;
+          for(const rec of g.records)if(rec.batchGroup===g){rec.batchGroup=null;(rec.historical||rec.attention?t.actions:t.pBody).appendChild(rec.card);}
+          g.card.remove();t.toolGroups.delete(key);
         }
         for (const [key, records] of buckets) {
           if (records.length < 2) continue;
@@ -7196,8 +7294,9 @@
           const common = views[0].facts.filter(fact => views.every(view => view.facts.some(other => other.label === fact.label && other.value === fact.value)));
           g.title.textContent = T('tool_batch_title', {n: records.length});
           g.operation.textContent = views[0].title;
-          g.reason.replaceChildren();g.reason.hidden = !views[0].reason;
-          if (views[0].reason) g.reason.append(el('strong', '', views[0].reasonLabel), doc.createTextNode(views[0].reason));
+          const reasonText=views[0].reason || (records.every(rec=>rec.historical&&rec.historyRecord.receiptOnly)?T('tool_history_missing_proposal'):'');
+          g.reason.replaceChildren();g.reason.hidden = !reasonText;
+          if (reasonText) g.reason.append(el('strong', '', views[0].reasonLabel), doc.createTextNode(reasonText));
           g.summary.textContent = T('tool_batch_list', {n: records.length});
           g.facts.replaceChildren();
           for (const fact of common.filter(fact => fact.value !== views[0].reason && fact.value !== views[0].title)) {
@@ -7215,7 +7314,7 @@
             rec.title.textContent = label ? clip(label, 320) : views[i].title;
           });
           g.counts.textContent = g.error || Object.entries(counts).filter(([, count]) => count > 0).map(([status, count]) => (TOOL_STATUS_LABEL[status] || status) + ' ' + count).join(' · ');
-          const pending = records.filter(rec => rec.status === 'pending' && !rec.expired);
+          const pending = records.filter(rec => !rec.historical && rec.status === 'pending' && !rec.expired);
           g.confirm.textContent = T('tool_batch_confirm', {n: pending.length});
           g.confirm.hidden = pending.length === 0;
           g.confirm.disabled = destroyed || readOnly || authRefreshing || !this.enabled || this.active || this.sending || !!this.confirmationBusy || pending.some(rec => rec.call.review?.blocking_reason || rec.cancelPending || rec.confirmPending);
@@ -7224,7 +7323,7 @@
       // 全部宿主确认钩子通过后才发送固定卡片数组；后端原子入队，各项仍独立验签与记录结果。
       async confirmToolGroup(g) {
         if (destroyed || readOnly || authRefreshing || !this.enabled || this.active || this.sending || this.confirmationBusy) return;
-        const records = g.records.filter(rec => rec.status === 'pending' && !rec.expired);
+        const records = g.records.filter(rec => !rec.historical && rec.status === 'pending' && !rec.expired);
         if (!records.length || records.some(rec => rec.call.review?.blocking_reason || rec.cancelPending)) return;
         if (records.length === 1) return this.confirmTool(records[0]);
         const snapshot = records.map(rec => JSON.parse(JSON.stringify(rec.call)));
@@ -7283,6 +7382,15 @@
         if (!t) return;
         const call = ev.tool_call && typeof ev.tool_call === 'object' ? ev.tool_call : {};
         const nonce = String(call.confirmation_nonce || '');
+        // 实时权威事件按原操作 ID 更新历史卡。只有重新下发完整签名提案才开放批准入口。
+        const archived = !ev.history_record && this.historyTools?.get(call.id || ev.tool_id);
+        if (archived) {
+          archived.receivedLiveEvidence=true;
+          if (ev.type === 'confirmation_required' && call.confirmation_token && nonce) {
+            archived.historical = false;archived.call = call;this.historyTools.delete(archived.id);
+          }
+          if (archived.ownerTurn !== t) return this.upsertTool(ev,status,archived.ownerTurn);
+        }
         // 历史回放中的确认执行属于新 run；按签名卡的 id+nonce 回写原卡，
         // 不能仅按工具 id 或标题匹配，已执行状态不能被迟到的待确认事件回退。
         if (nonce) {
@@ -7317,7 +7425,7 @@
         }
         // 同一轮模型可能复用 call.id；不同 nonce 必须保留各自参数、按钮和计数。
         const occupied = t.tools.get(id);
-        if (nonce && occupied && String(occupied.call.confirmation_nonce || '') !== nonce) id += '|confirmation:' + nonce;
+        if (nonce && occupied && !occupied.historical && String(occupied.call.confirmation_nonce || '') !== nonce) id += '|confirmation:' + nonce;
         let rec = t.tools.get(id);
         if (!rec) {
           const card = el('details', 'ihtml-tool');
@@ -7335,6 +7443,7 @@
           t.pBody.appendChild(card);
           rec = {
             id, card, summary, chip, title, note, body, domID, call, status: '', ownerTurn: t,
+            historical:!!ev.history_record, historyRecord:ev.history_record,
             countedPending: false, countedError: false, countdown: 0, cancelAckTimer: 0,
             cancelPending: false, cancelSent: false, confirmPending: false, interactionError: '', lastEvent: {},
           };
@@ -7346,7 +7455,7 @@
         if (nonce) t.anonymousToolAliases.set(nonce, id);
         // 已签发卡是不可变提案；执行引用序列化出的空 method/path/risk/reason 也不能覆盖它。
         // 新授权使用新 nonce 单独建卡，执行结果只更新状态和结果投影。
-        if (ev.tool_call && !rec.call.confirmation_nonce) rec.call = Object.assign({}, rec.call, ev.tool_call);
+        if (ev.tool_call && !rec.call.confirmation_nonce && !rec.historical) rec.call = Object.assign({}, rec.call, ev.tool_call);
         if (ev.type === 'tool_start' || ev.type === 'tool_result') {
           rec.interactionError = '';
           // 新执行证据替换上一阶段结果，不能继续展示撤销失败或旧回执的摘要。
@@ -7375,6 +7484,7 @@
         this.scroll();
       },
       async confirmTool(rec) {
+        if (rec?.historical) return;
         if (destroyed || !this.enabled || authRefreshing || readOnly) return;
         if (!rec || rec.status !== 'pending') return;
         if (rec.call.confirmation_expires && rec.call.confirmation_expires * 1000 <= Date.now()) {
@@ -7453,6 +7563,7 @@
         queueMicrotask(() => { if (rec.summary.isConnected) rec.summary.focus({ preventScroll: true }); });
       },
       async cancelTool(rec) {
+        if (rec?.historical) return;
         if (!rec || rec.status !== 'pending') return;
         if (this.active || this.sending || this.confirmationBusy) {
           this.syncChatControls();
@@ -8336,9 +8447,11 @@
             if (!message || !['user', 'assistant', 'tool'].includes(message.role) || typeof message.content !== 'string') throw new TypeError('ihtml: initialMessages require user/assistant/tool role and string content');
             bytes += new TextEncoder().encode(message.content).length;
             if (bytes > 512 * 1024) throw new TypeError('ihtml: initialMessages exceed 512 KiB');
-            return { role: message.role, content: message.content, contentFormat: message.role === 'tool' ? 'text' : typeof message.contentFormat === 'string' ? message.contentFormat : 'text' };
+            return { id:typeof message.id==='string'?message.id:'',operationId:typeof message.operationId==='string'?message.operationId:'',role: message.role, content: message.content, contentFormat: message.role === 'tool' ? 'text' : typeof message.contentFormat === 'string' ? message.contentFormat : 'text' };
           });
         }
+        if (opts.initialOperations != null) opts.initialOperations=normalizeOperationHistory(opts.initialOperations);
+        if (opts.operationHistory && (typeof opts.operationHistory.load!=='function' || typeof opts.operationHistory.cursor!=='string')) throw new TypeError('ihtml: operationHistory requires cursor and load');
         if (typeof opts.menu === 'string') doc.querySelector(opts.menu); // validate selector before createInstance mutates DOM
         else if (opts.menu && (opts.menu.nodeType !== 1 || typeof opts.menu.appendChild !== 'function')) {
           throw new TypeError('ihtml.mount: menu must be an element or selector');

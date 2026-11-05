@@ -117,6 +117,7 @@ const offTheme = assistant.theme.onChange(theme => observeTheme(theme));
 | `chatHeader: 'none'` | 宿主接管整个标题栏；必须自行提供“新对话”等入口，调用原有公共方法 |
 | `starters: string[]` | 最多四个空对话示例；在消息区滚动，首条消息提交后隐藏，恢复已有消息时不显示 |
 | `initialMessages` / `chat.getMessages()` | 最多 100 条、总计 512 KiB 的显示快照；user/assistant 为正文，tool 为只读回执，连续回执默认折叠汇总；不含可继续执行的旧授权 |
+| `initialOperations` / `operationHistory` | 独立于正文的只读操作快照；复用实时确认卡、变更差异、结果和批次统计，支持按消息 ID 锚定及游标分段加载，不恢复旧签名 |
 | `chat.sessionId` | 当前 SDK 的稳定 `csid`，非认证凭据；连续追问和重连沿用，显式新对话换号 |
 | `chat.clear()` / `onNewChat` | 开始新对话并通知宿主解除原生继续绑定；不删除历史、不撤销业务操作 |
 | `beforeConfirm` | 接入宿主的原生确认/身份核验；不能替代服务端执行时再次鉴权 |
@@ -626,3 +627,12 @@ SDK 将同一签名提案轮次中同类操作汇总为一张卡：展示公共�
 同批续办提示沿用通用队列去重，在剩余操作之后重新核对原请求；未声明此能力和原生 checkpoint 审批继续使用原单卡流程。
 
 `ihtml.ToolFactsFromSchema` 按可信请求 Schema 的 `title` 与 `x-display-values` 生成确认事实，支持请求变体、`x-display-count-title` 的完整清单/数量、`x-display-prefix` 的明确回退以及 `x-display-hidden` 的技术条件字段。渲染器不识别 API ID、业务名或固定字段名；同名字段在不同接口可以有不同声明。任何实际参数缺少显示声明、或枚举值未知且没有声明回退时，返回未覆盖，由宿主保留完整原参数。此显示投影不授予权限，不替代 API 的真实参数校验。
+
+
+### 操作历史与持久化
+
+`assistant.Config.PersistToolHistory(ctx, session, record)` 在公开操作事件发出前调用；宿主必须将同一操作 ID 的快照可靠写入自己的存储。失败会阻止确认卡交付。`assistant.ToolHistoryEvent` 和 `MergeToolHistory` 共用公开投影、原提案保留及状态合并规则，不按业务工具名编排。确认提案来自宿主已经脱敏的 Preview，结果只来自 PresentToolResult；原始 Handler 返回值不能直接写入显示快照。取消或断线后，已有实际终态仍有独立、最长五秒的保存窗口，不恢复模型或工具执行。
+
+历史宿主提供 `initialMessages: [{id, role, content, operationId?}]` 和 `initialOperations: [{id, afterMessageId, call, status, summary, result, proposalRecorded, receiptOnly?, updatedAt}]`。`operationId` 显式关联兼容文本，避免重复显示；同文摘要不会被用作操作身份。`call` 保留公开确认范围、facts、review 与请求说明，但签名、nonce 和批准语义始终剥离。`receiptOnly:true` 表示旧记录没有原提案，UI 明确说明缺失，不猜测原范围。
+
+`operationHistory: {cursor, load: async ({cursor, signal}) => ({items, cursor})}` 分页加载更早的操作；首屏与每页共用校验（最多512项、8MiB）。相同消息锚点的分页会合入原批次，逐项结果直接显示在展开的卡片中。宿主负责游标、所有权、过期与持久化；SDK 不将显示历史作为模型上下文或执行凭据。有效签名卡只能从重新鉴权的实时服务端事件恢复。
