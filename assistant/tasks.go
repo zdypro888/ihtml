@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"sync/atomic"
 
 	"github.com/zdypro888/ihtml"
 )
@@ -26,14 +27,15 @@ func (s *session) scheduleConfirmedTask(ctx context.Context, event *ihtml.ChatCl
 		card := *event.ToolCall
 		copied.ToolCall = &card
 		tool := item.tool
-		started := false
+		// Call 可在运行时停止后先于 Handler 退出；启动标记跨 goroutine 读写必须同步。
+		var started atomic.Bool
 		tool.Handler = func(callCtx context.Context, _ json.RawMessage) (string, error) {
-			started = true
+			started.Store(true)
 			return s.runConfirmedTool(callCtx, func() {}, &copied, false)
 		}
 		parent := context.WithValue(item.invocation, batchIntermediateContextKey{}, ctx.Value(batchIntermediateContextKey{}))
 		_, err := s.tasks.Call(parent, item.taskScope, "confirmed/"+item.invocationScope, card.ConfirmationNonce+"/"+rand.Text(), tool, item.args)
-		if err != nil && !started {
+		if err != nil && !started.Load() {
 			s.runConfirmedTool(ctx, func() {}, &copied, true)
 		}
 		return true

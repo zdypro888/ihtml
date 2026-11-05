@@ -248,8 +248,11 @@ func (b *Backend) NewSession(ctx context.Context, sctx *ihtml.ChatSessionContext
 		}
 		onComplete := taskConfig.OnComplete
 		taskConfig.OnComplete = func(info agent.TaskInfo) {
-			// 通知只发送句柄与调用状态；模型按需读取真实回执，不自动编排新的动作。
-			_ = s.emit(ihtml.ChatStreamEvent{Type: ihtml.ChatStreamTaskComplete, TaskID: info.ID, TaskState: info.State, ToolName: info.Tool})
+			// 聊天通知仅用于显式后台调用；同步记账不能在推理中产生后台未读/推送。
+			// 通用完成钩子仍接收所有账本终态，通知只发送句柄与状态。
+			if info.Background {
+				_ = s.emit(ihtml.ChatStreamEvent{Type: ihtml.ChatStreamTaskComplete, TaskID: info.ID, TaskState: info.State, ToolName: info.Tool})
+			}
 			if onComplete != nil {
 				onComplete(info)
 			}

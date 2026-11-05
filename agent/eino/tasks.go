@@ -123,7 +123,7 @@ func taskTools(req *ai.TurnRequest) ([]ai.Tool, error) {
 		}},
 	}
 	if req.AllowTaskSuspend {
-		tools = append(tools, ai.Tool{Name: "task_suspend", Completion: ai.ToolCompletionAsynchronous, Effect: ai.ToolEffectExecute, Description: "主动挂起当前推理，等待已启动调用的任意/全部终态或期限，再由宿主唤醒。不会重复轮询模型；checkpoint 保存用户目标、约束、待办与证据句柄，不含隐藏推理或新授权。ids 可为空以仅等待计时事件。由你选择条件和后续编排；恢复后写入仍重新确认。", InputSchema: taskSchema(map[string]any{"ids": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "maxItems": 128}, "all": map[string]any{"type": "boolean"}, "timeout_ms": map[string]any{"type": "integer", "minimum": 1, "maximum": 86400000}, "checkpoint": map[string]any{"type": "string", "maxLength": 8192}}, "ids", "timeout_ms", "checkpoint"), Handler: func(ctx context.Context, raw json.RawMessage) (string, error) {
+		tools = append(tools, ai.Tool{Name: "task_suspend", Completion: ai.ToolCompletionAsynchronous, Effect: ai.ToolEffectExecute, Description: "主动挂起当前推理，等待已启动调用的任意/全部终态或期限，再由宿主唤醒。不会重复轮询模型；checkpoint 保存用户目标、约束、待办与证据句柄，不含隐藏推理或新授权。ids 可为空以仅等待计时事件。由你选择条件和后续编排；本次模型输出只能包含这一个工具调用，恢复后写入仍重新确认。", InputSchema: taskSchema(map[string]any{"ids": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "maxItems": 128}, "all": map[string]any{"type": "boolean"}, "timeout_ms": map[string]any{"type": "integer", "minimum": 1, "maximum": 86400000}, "checkpoint": map[string]any{"type": "string", "maxLength": 8192}}, "ids", "timeout_ms", "checkpoint"), Handler: func(ctx context.Context, raw json.RawMessage) (string, error) {
 			var in struct {
 				IDs        []string `json:"ids"`
 				All        bool     `json:"all"`

@@ -74,10 +74,8 @@ type toolInvocationKey struct{}
 // WithToolInvocationKey attaches the runtime-owned identity of one logical
 // write/execute invocation. Domain handlers may use it as an idempotency key;
 // user input must never be trusted as this value.
+// 空值显式清除继承身份，防止从无 invocation 的原提案借入其他轮次的授权键。
 func WithToolInvocationKey(ctx context.Context, key string) context.Context {
-	if key == "" {
-		return ctx
-	}
 	return context.WithValue(ctx, toolInvocationKey{}, key)
 }
 

@@ -8,6 +8,63 @@ import (
 	"time"
 )
 
+type heldTaskAdmissionStore struct {
+	TaskStore
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (s *heldTaskAdmissionStore) CreateTask(ctx context.Context, rec TaskRecord) (TaskRecord, bool, error) {
+	close(s.entered)
+	select {
+	case <-ctx.Done():
+		return TaskRecord{}, false, ctx.Err()
+	case <-s.release:
+		return s.TaskStore.CreateTask(ctx, rec)
+	}
+}
+
+// 持久接纳也属于运行时生命周期；关闭必须等受理和未开始调用的取消落库，不能只等 Handler。
+func TestTaskRuntimeCloseJoinsAdmissionInProgress(t *testing.T) {
+	store := &heldTaskAdmissionStore{TaskStore: NewMemoryTaskStore(), entered: make(chan struct{}), release: make(chan struct{})}
+	r := taskRuntimeFixture(t, TaskConfig{Store: store})
+	var calls atomic.Int32
+	started := make(chan TaskInfo, 1)
+	go func() {
+		row, err := r.Start(t.Context(), "scope", "turn", "call", Tool{Name: "write", Effect: ToolEffectWrite, Handler: func(context.Context, json.RawMessage) (string, error) {
+			calls.Add(1)
+			return "actual", nil
+		}}, json.RawMessage(`{}`))
+		if err != nil {
+			t.Error(err)
+		}
+		started <- row
+	}()
+	<-store.entered
+	closed := make(chan struct{})
+	go func() { r.Close(); close(closed) }()
+	early := false
+	select {
+	case <-closed:
+		early = true
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(store.release)
+	row := <-started
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not join admitted invocation")
+	}
+	if early {
+		t.Fatal("Close returned before pending admission completed")
+	}
+	record, err := store.GetTask(t.Context(), "scope", row.ID)
+	if err != nil || record.Info.State != "cancelled" || calls.Load() != 0 {
+		t.Fatal("Close did not persist unstarted cancellation", record, err, calls.Load())
+	}
+}
+
 // 执行名额与账本数量分离；超过旧的累计上限仍能执行，重建运行时不重放已完成的调用。
 func TestDurableTaskLedgerRecreationAndActiveCapacity(t *testing.T) {
 	store := NewMemoryTaskStore()

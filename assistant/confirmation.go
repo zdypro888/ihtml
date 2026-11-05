@@ -565,8 +565,11 @@ func (s *session) runConfirmedTool(ctx context.Context, cancel context.CancelFun
 	s.pendingMu.Unlock()
 	pending = item
 	evidence = &ConfirmedToolResult{Call: item.call, Tool: item.tool, Args: append(json.RawMessage(nil), item.args...), InvocationScope: item.invocationScope}
-	callCtx, stop := context.WithTimeout(item.invocation, s.backend.cfg.Confirmation.ToolTimeout)
-	// 调用继承原提案的可信执行上下文，但进度必须绑定本次确认轮次，不能写回已结束的提案。
+	// 当前受管调用的追踪值优先，缺失值才回落到原提案；授权 invocation 始终固定为原提案。
+	// 否则 TaskID 会被旧预览句柄覆盖，嵌套任务与回调将错误关联到准备阶段。
+	values := sessionParentValues{Context: ctx, parent: item.invocation}
+	callCtx, stop := context.WithTimeout(agent.WithToolInvocationKey(values, agent.ToolInvocationKey(item.invocation)), s.backend.cfg.Confirmation.ToolTimeout)
+	// 进度绑定本次确认轮次，不能写回已结束的提案。
 	callCtx = agent.WithStatusReporter(callCtx, func(text string) { p.step(agent.Step{Kind: agent.StepStatus, Result: text}, nil) })
 	defer stop()
 	stopParent := context.AfterFunc(ctx, stop)
@@ -599,7 +602,8 @@ func (s *session) runConfirmedTool(ctx context.Context, cancel context.CancelFun
 	// 确认桥接与普通引擎共用工具的只读回执恢复协议；绝不再次调用 Handler。
 	// 请求超时后只核对同一 invocation，用户停止/会话关闭则不发起恢复或续办。
 	if runErr != nil && item.tool.RecoverResult != nil && replyParent.Err() == nil && s.ctx.Err() == nil {
-		reconcile, finish := context.WithTimeout(item.invocation, min(s.backend.cfg.Confirmation.ToolTimeout, 5*time.Second))
+		// 核对使用独立期限，但保留当前执行身份和原授权，不退回旧预览上下文。
+		reconcile, finish := context.WithTimeout(context.WithoutCancel(callCtx), min(s.backend.cfg.Confirmation.ToolTimeout, 5*time.Second))
 		stopReply := context.AfterFunc(replyParent, finish)
 		finishRecovery = func() { stopReply(); finish() }
 		host := s.sctx

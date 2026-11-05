@@ -22,11 +22,13 @@ type TaskConfig struct {
 
 // TaskInfo 的 completed 表示 Handler 已返回，不能代替原异步业务的完成状态。
 type TaskInfo struct {
-	ID            string          `json:"id" bson:"id"`
-	ParentID      string          `json:"parent_id,omitempty" bson:"parentID,omitempty"`
-	Tool          string          `json:"tool" bson:"tool"`
-	State         string          `json:"state" bson:"state"`
-	Completion    ToolCompletion  `json:"completion,omitempty" bson:"completion,omitempty"`
+	ID         string         `json:"id" bson:"id"`
+	ParentID   string         `json:"parent_id,omitempty" bson:"parentID,omitempty"`
+	Tool       string         `json:"tool" bson:"tool"`
+	State      string         `json:"state" bson:"state"`
+	Completion ToolCompletion `json:"completion,omitempty" bson:"completion,omitempty"`
+	// Background 是调用方选择的执行方式，与原业务是否异步完成无关。
+	Background    bool            `json:"background" bson:"background"`
 	Result        string          `json:"result,omitempty" bson:"result,omitempty"`
 	Error         string          `json:"error,omitempty" bson:"error,omitempty"`
 	Input         json.RawMessage `json:"arguments,omitempty" bson:"-"`
@@ -160,12 +162,24 @@ func (r *TaskRuntime) Start(ctx context.Context, scope, turn, key string, tool T
 		return TaskInfo{}, errors.New("agent: active task capacity reached")
 	}
 	r.reserved++
+	// 接纳的存储请求也必须被 Close 等待；计数在锁内取得，随后转交给执行 goroutine。
+	// 否则 CreateTask 尚未返回时 Wait 已结束，关闭后仍可能新增工作。
+	r.wg.Add(1)
 	r.mu.Unlock()
-	defer func() { r.mu.Lock(); r.reserved--; r.mu.Unlock() }()
+	launched := false
+	defer func() {
+		r.mu.Lock()
+		r.reserved--
+		r.mu.Unlock()
+		if !launched {
+			r.wg.Done()
+		}
+	}()
 	now := time.Now().UTC()
 	id := rand.Text()
 	deadline := now.Add(r.cfg.Timeout)
-	record := TaskRecord{ID: id, Scope: scope, Key: compound, Digest: digest, Turn: turn, Args: args, Invocation: ToolInvocationKey(ctx), Effect: tool.Effect, Info: TaskInfo{ID: id, ParentID: TaskID(ctx), Tool: tool.Name, State: "queued", Completion: tool.Completion}, Owner: r.owner, Revision: 1, CreatedAt: now, UpdatedAt: now, Deadline: deadline, LeaseUntil: minTaskTime(now.Add(r.cfg.LeaseDuration), deadline)}
+	synchronous, _ := ctx.Value(synchronousInvocationKey{}).(bool)
+	record := TaskRecord{ID: id, Scope: scope, Key: compound, Digest: digest, Turn: turn, Args: args, Invocation: ToolInvocationKey(ctx), Effect: tool.Effect, Info: TaskInfo{ID: id, ParentID: TaskID(ctx), Tool: tool.Name, State: "queued", Completion: tool.Completion, Background: !synchronous}, Owner: r.owner, Revision: 1, CreatedAt: now, UpdatedAt: now, Deadline: deadline, LeaseUntil: minTaskTime(now.Add(r.cfg.LeaseDuration), deadline)}
 	saved, created, err := r.cfg.Store.CreateTask(op, record)
 	if err != nil {
 		return TaskInfo{}, err
@@ -178,7 +192,6 @@ func (r *TaskRuntime) Start(ctx context.Context, scope, turn, key string, tool T
 	}
 	taskCtx, cancel := context.WithDeadline(context.WithoutCancel(ctx), deadline)
 	unlinkRoot := context.AfterFunc(r.ctx, cancel)
-	synchronous, _ := ctx.Value(synchronousInvocationKey{}).(bool)
 	t := &toolTask{scope: scope, turn: turn, id: id, cancel: cancel, done: make(chan struct{}), background: !synchronous}
 	t.unlink = context.AfterFunc(ctx, cancel)
 	r.mu.Lock()
@@ -186,8 +199,8 @@ func (r *TaskRuntime) Start(ctx context.Context, scope, turn, key string, tool T
 		cancel()
 	}
 	r.tasks[id] = t
-	r.wg.Add(1)
 	r.mu.Unlock()
+	launched = true
 	go r.run(taskCtx, t, tool, args, unlinkRoot)
 	return record.Info, nil
 }
@@ -588,15 +601,20 @@ func (r *TaskRuntime) Cancel(scope, id string, allowed map[string]bool) (TaskInf
 	}
 	op, stop := r.operation()
 	defer stop()
+	return r.cancelInvocation(op, scope, id, allowed, false)
+}
+
+// cancelInvocation 统一保存取消意图；host 仅由已绑定作用域的宿主停止入口使用，不接受模型授权。
+func (r *TaskRuntime) cancelInvocation(ctx context.Context, scope, id string, allowed map[string]bool, host bool) (TaskInfo, error) {
 	for range 8 {
-		rec, err := r.cfg.Store.GetTask(op, scope, id)
-		if errors.Is(err, ErrTaskNotFound) && allowed["task_suspend"] {
-			return r.cancelWait(op, scope, id)
+		rec, err := r.cfg.Store.GetTask(ctx, scope, id)
+		if errors.Is(err, ErrTaskNotFound) && !host && allowed["task_suspend"] {
+			return r.cancelWait(ctx, scope, id)
 		}
 		if err != nil {
 			return TaskInfo{}, err
 		}
-		if !allowed[rec.Info.Tool] {
+		if !host && !allowed[rec.Info.Tool] {
 			return TaskInfo{}, ErrTaskNotFound
 		}
 		if taskTerminal(rec.Info.State) {
@@ -607,7 +625,7 @@ func (r *TaskRuntime) Cancel(scope, id string, allowed map[string]bool) (TaskInf
 		rec.Info.State = "cancelling"
 		rec.Revision++
 		rec.UpdatedAt = time.Now()
-		ok, err := r.cfg.Store.ReplaceTask(op, rec, rev)
+		ok, err := r.cfg.Store.ReplaceTask(ctx, rec, rev)
 		if err != nil {
 			return TaskInfo{}, err
 		}
@@ -625,7 +643,7 @@ func (r *TaskRuntime) Cancel(scope, id string, allowed map[string]bool) (TaskInf
 	return TaskInfo{}, ErrTaskConflict
 }
 
-// CancelAll 只停止本运行时的在途工作，同时取消本作用域尚未交付的等待条件。
+// CancelAll 先立即停止本地工作，再持久取消本作用域的活跃调用和等待；远程执行器经心跳响应。
 func (r *TaskRuntime) CancelAll() error {
 	r.mu.Lock()
 	for _, t := range r.tasks {
@@ -644,6 +662,22 @@ func (r *TaskRuntime) CancelAll() error {
 	ctx, stop := r.operation()
 	defer stop()
 	for _, scope := range scopes {
+		after := ""
+		for {
+			rows, err := r.cfg.Store.ListTasks(ctx, scope, TaskScan{After: after, Limit: 128, ActiveOnly: true})
+			if err != nil {
+				return err
+			}
+			for _, rec := range rows {
+				if _, err = r.cancelInvocation(ctx, scope, rec.ID, nil, true); err != nil {
+					return err
+				}
+			}
+			if len(rows) < 128 {
+				break
+			}
+			after = rows[len(rows)-1].ID
+		}
 		if err := r.CancelWaits(ctx, scope); err != nil {
 			return err
 		}
@@ -651,7 +685,8 @@ func (r *TaskRuntime) CancelAll() error {
 	return nil
 }
 
-// Done 终态才关闭；跨实例的调用使用有界轮询观察账本，不重建执行工作。
+// Done 本地句柄在执行器退出后关闭，远程句柄在观察到账本终态后关闭，不重建执行工作。
+// 本地退出不保证最终回执已持久成功；需要可核对终态/观察错误时使用带 context 的 Wait。
 func (r *TaskRuntime) Done(scope, id string, allowed map[string]bool) (<-chan struct{}, error) {
 	rows, err := r.Read(scope, []string{id}, allowed)
 	if err != nil {

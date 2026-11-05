@@ -50,6 +50,14 @@ func (s *session) pollTaskWake() {
 	if guard := s.backend.cfg.TaskWakeGuard; guard != nil {
 		host := s.sctx
 		if guard(ctx, &host) != nil {
+			// 撤权也必须中止已经准入的本地推理；保留来源元数据，直到队列退休再释放。
+			s.mu.Lock()
+			for _, w := range s.taskWakes {
+				if w.cancel != nil {
+					w.cancel()
+				}
+			}
+			s.mu.Unlock()
 			_ = s.tasks.CancelWaits(ctx, s.tasks.Scope())
 			return
 		}
