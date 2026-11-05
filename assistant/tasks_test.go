@@ -228,3 +228,85 @@ func TestBackgroundConfirmedSynchronousWritesStayConcurrentAndContinueOnce(t *te
 		t.Fatal("receipts or continuation mismatch", persisted.Load(), continued.Load())
 	}
 }
+
+// 已批准但尚未开始的后台调用被停止后，原 nonce 未消费；同一确切卡片应允许用户再次批准。
+func TestCancelledQueuedConfirmationCanBeExplicitlyApprovedAgain(t *testing.T) {
+	r := newRecorder()
+	var writes atomic.Int32
+	cfg := approvalConfig(t, func(context.Context, json.RawMessage) (string, error) { writes.Add(1); return "stored", nil })
+	cfg.Tasks = &agent.TaskConfig{MaxConcurrent: 1}
+	var scope string
+	cfg.Engine = &fakeEngine{run: func(ctx context.Context, req *agent.TurnRequest) (*agent.TurnResult, error) {
+		scope = agent.TaskScope(req)
+		row, err := req.Tasks.Start(ctx, scope, req.InvocationScope, "proposal", req.Tools[0], json.RawMessage(`{"target":"fixed"}`))
+		if err != nil {
+			return nil, err
+		}
+		_, err = req.Tasks.Wait(ctx, scope, []string{row.ID}, map[string]bool{"destroy": true}, time.Second, true)
+		return &agent.TurnResult{Text: "pending"}, err
+	}}
+	s := openSession(t, cfg, "alice", r).(*session)
+	card := proposedCard(t, s, r)
+	release := make(chan struct{})
+	defer close(release)
+	entered := make(chan struct{})
+	_, err := s.tasks.Start(t.Context(), scope, "blocker", "one", agent.Tool{Name: "local_blocker", Effect: agent.ToolEffectRead, Handler: func(context.Context, json.RawMessage) (string, error) {
+		close(entered)
+		<-release
+		return "released", nil
+	}}, json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-entered
+	confirmCard(s, card)
+	deadline := time.Now().Add(time.Second)
+	child := ""
+	for time.Now().Before(deadline) {
+		rows, _ := s.tasks.Read(scope, nil, map[string]bool{"destroy": true})
+		for _, row := range rows {
+			if row.ParentID != "" {
+				child = row.ID
+			}
+		}
+		if child != "" {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if child == "" {
+		t.Fatal("confirmed call not admitted")
+	}
+	s.HandleEvent(t.Context(), &ihtml.ChatClientEvent{Type: ihtml.ChatClientCancel})
+	rows, err := s.tasks.Wait(t.Context(), scope, []string{child}, map[string]bool{"destroy": true}, time.Second, true)
+	if err != nil || rows[0].State != "cancelled" || writes.Load() != 0 {
+		t.Fatal(rows, err, writes.Load())
+	}
+	deadline = time.Now().Add(time.Second)
+	available := false
+	for time.Now().Before(deadline) {
+		s.pendingMu.Lock()
+		item := s.pendingTools[card.ConfirmationNonce]
+		available = item != nil && !item.queued
+		s.pendingMu.Unlock()
+		if available {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if !available {
+		t.Fatal("cancelled queued call left the issued confirmation permanently reserved")
+	}
+	release <- struct{}{}
+	confirmCard(s, card)
+	r.wait(t, ihtml.ChatStreamAssistantDone, 2)
+	if writes.Load() != 1 {
+		t.Fatal("explicit reapproval did not execute exactly once", writes.Load())
+	}
+	confirmCard(s, card)
+	r.wait(t, ihtml.ChatStreamTurnError, 1)
+	if writes.Load() != 1 {
+		t.Fatal("consumed confirmation was replayed", writes.Load())
+	}
+
+}

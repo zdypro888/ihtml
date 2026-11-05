@@ -2,6 +2,7 @@ package assistant
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 
 	"github.com/zdypro888/ihtml"
@@ -40,7 +41,9 @@ func (s *session) scheduleConfirmedTask(ctx context.Context, event *ihtml.ChatCl
 	tool.Handler = func(callCtx context.Context, _ json.RawMessage) (string, error) {
 		return s.runConfirmedTool(callCtx, func() {}, &copied, false)
 	}
-	info, err := s.tasks.Start(parent, item.taskScope, "confirmed/"+item.invocationScope, card.ConfirmationNonce, tool, item.args)
+	// 每次显式批准是一次新的调度尝试，业务授权仍由同一个一次性 nonce 决定。
+	// 不能复用已取消队列项的句柄，否则再次批准只会读回旧 cancelled 而永远不执行。
+	info, err := s.tasks.Start(parent, item.taskScope, "confirmed/"+item.invocationScope, card.ConfirmationNonce+"/"+rand.Text(), tool, item.args)
 	if err != nil {
 		finish()
 		// 资源拒绝发生在验签消费与业务执行前，恢复原卡可重试状态，不改成同步执行。
@@ -51,7 +54,14 @@ func (s *session) scheduleConfirmedTask(ctx context.Context, event *ihtml.ChatCl
 			finish()
 		} else {
 			s.confirmationTasks.Add(1)
-			go func() { defer s.confirmationTasks.Done(); <-done; finish() }()
+			go func() {
+				defer s.confirmationTasks.Done()
+				<-done
+				// 未进入 Handler 的取消/排队超时不会消费 nonce；释放预留，允许用户重新批准原卡。
+				// 已消费的卡已从 pendingTools 移除，此处不改变原防重放边界。
+				s.releaseQueued(card)
+				finish()
+			}()
 		}
 	}
 	return true
