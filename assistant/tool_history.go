@@ -18,7 +18,7 @@ type ToolHistoryRecord struct {
 	Result           json.RawMessage        `json:"result,omitempty"`
 	ProposalRecorded bool                   `json:"proposalRecorded"`
 	ReceiptOnly      bool                   `json:"receiptOnly,omitempty"`
-	UpdatedAt        time.Time              `json:"updatedAt"`
+	UpdatedAt        *time.Time             `json:"updatedAt,omitempty"`
 }
 
 // ToolHistoryEvent 仅接收框架已投影的公开事件；宿主可按 ID 合并并持久化，不依赖工具名称。
@@ -61,7 +61,8 @@ func ToolHistoryEvent(event ihtml.ChatStreamEvent) (ToolHistoryRecord, bool) {
 		}
 	}
 	out.Result = append(json.RawMessage(nil), event.ToolResult...)
-	out.UpdatedAt = time.Now().UTC()
+	updatedAt := time.Now().UTC()
+	out.UpdatedAt = &updatedAt
 	// JSON 往返脱离事件中的 map/slice，持久化回调不能修改仍将发送的签名提案。
 	raw, err := json.Marshal(out)
 	if err != nil || len(raw) > 512<<10 {

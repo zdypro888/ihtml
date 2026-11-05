@@ -7296,7 +7296,7 @@
           g.operation.textContent = views[0].title;
           const reasonText=views[0].reason || (records.every(rec=>rec.historical&&rec.historyRecord.receiptOnly)?T('tool_history_missing_proposal'):'');
           g.reason.replaceChildren();g.reason.hidden = !reasonText;
-          if (reasonText) g.reason.append(el('strong', '', views[0].reasonLabel), doc.createTextNode(reasonText));
+          if (reasonText) g.reason.append(el('strong', '', records.every(rec=>rec.historical&&rec.historyRecord.receiptOnly)?T('tool_history_note'):views[0].reasonLabel), doc.createTextNode(reasonText));
           g.summary.textContent = T('tool_batch_list', {n: records.length});
           g.facts.replaceChildren();
           for (const fact of common.filter(fact => fact.value !== views[0].reason && fact.value !== views[0].title)) {
