@@ -23,7 +23,7 @@
  * remove?({id,signal})->boolean, entry?:false, onOpenChange?(opened)}.
  * Host owns storage, resume binding, authorization and native deletion confirmation.
  * chat.history.open/close/refresh and .opened control the same optional renderer.
- * onReady/onAuthError, initialMessages: [{role, content, contentFormat?}],
+ * onReady/onAuthError, initialMessages: [{role: user|assistant|tool, content, contentFormat?}],
  * contextProvider({context, user, signal}) -> partial ChatClientContext | Promise,
  * onChatEvent(event) -> void (detached snapshot, confirmation secrets omitted).
  * beforeConfirm({toolCall, signal}) -> true | Promise<true> adds a host-owned
@@ -5664,7 +5664,28 @@
       },
 
       appendMessages(messages) {
+        let receipts = null;
         for (const message of messages || []) {
+          if (!message.content.trim()) continue;
+          // 工具回执是只读展示记录，不是 AI 发言，也不能恢复旧签名或执行入口。
+          if (message.role === 'tool') {
+            if (!receipts) {
+              const card = el('details', 'ihtml-receipt-history'), summary = el('summary'), list = el('ol');
+              card.append(summary, list);card._displayMessages = [];this.log.appendChild(card);
+              receipts = {card, summary, list, last: null};
+            }
+            receipts.card._displayMessages.push({...message, contentFormat: 'text'});
+            receipts.summary.textContent = T('tool_history_title', {n: receipts.card._displayMessages.length});
+            if (receipts.last?.text === message.content) {
+              receipts.last.count++;receipts.last.counter.textContent = '× ' + receipts.last.count;
+            } else {
+              const row = el('li'), counter = el('small', 't-receipt-count');
+              row.append(el('span', '', message.content), counter);receipts.list.appendChild(row);
+              receipts.last = {text: message.content, count: 1, counter};
+            }
+            continue;
+          }
+          receipts = null;
           const card = el('article', 'ihtml-msg ' + message.role);
           card._displayMessage = { role: message.role, content: message.content, contentFormat: message.contentFormat };
           card.appendChild(el('div', 'author', message.role === 'user' ? T('author_user') : 'AI'));
@@ -5684,15 +5705,17 @@
         // Take the newest display text only; notices and process/tool state are
         // deliberately not replayable. Never derive history from rendered HTML.
         for (const card of Array.from(this.log.children).reverse()) {
-          const source = card._turn
-            ? { role: 'assistant', content: card._turn.text, contentFormat: card._turn.contentFormat }
-            : card._displayMessage;
-          if (!source || !source.content || !remaining || messages.length === 100) continue;
-          const limited = chatContentCore.clipUTF8(source.content, remaining);
-          if (!limited.text) continue;
-          remaining -= limited.bytes;
-          messages.push({ role: source.role, content: limited.text,
-            contentFormat: source.role === 'user' ? 'text' : chatContentCore.resolveFormat(source.contentFormat, source.content) });
+          const sources = card._turn
+            ? [{ role: 'assistant', content: card._turn.text, contentFormat: card._turn.contentFormat }]
+            : card._displayMessages || [card._displayMessage];
+          for (const source of sources.slice().reverse()) {
+            if (!source || !source.content || !remaining || messages.length === 100) continue;
+            const limited = chatContentCore.clipUTF8(source.content, remaining);
+            if (!limited.text) continue;
+            remaining -= limited.bytes;
+            messages.push({ role: source.role, content: limited.text,
+              contentFormat: source.role !== 'assistant' ? 'text' : chatContentCore.resolveFormat(source.contentFormat, source.content) });
+          }
         }
         return messages.reverse();
       },
@@ -6726,6 +6749,8 @@
         t.textBytes += limited.bytes;
         if (limited.truncated) t.textTruncated = true;
         t.answer.style.display = '';
+        t.answer.hidden = false;
+        t.card.querySelector(':scope > .author').hidden = false;
         t.answer.classList.add('streaming');
         if (!t.renderFrame) {
           const clock = typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now();
@@ -6752,6 +6777,7 @@
         t.textTruncated = false;
         t.contentFormat = chatContentCore.mergeFormat('auto', ev && ev.content_format, true);
         t.answer.replaceChildren();
+        t.answer.hidden = false;
         t.answer.classList.remove('streaming');
         t.answer.removeAttribute('data-content-format');
         t.answer.style.display = 'none';
@@ -7170,10 +7196,11 @@
           const common = views[0].facts.filter(fact => views.every(view => view.facts.some(other => other.label === fact.label && other.value === fact.value)));
           g.title.textContent = T('tool_batch_title', {n: records.length});
           g.operation.textContent = views[0].title;
-          g.reason.textContent = views[0].reason;g.reason.hidden = !views[0].reason;
+          g.reason.replaceChildren();g.reason.hidden = !views[0].reason;
+          if (views[0].reason) g.reason.append(el('strong', '', views[0].reasonLabel), doc.createTextNode(views[0].reason));
           g.summary.textContent = T('tool_batch_list', {n: records.length});
           g.facts.replaceChildren();
-          for (const fact of common) {
+          for (const fact of common.filter(fact => fact.value !== views[0].reason && fact.value !== views[0].title)) {
             const row = el('div', 't-fact');row.append(el('dt', '', fact.label), el('dd', '', fact.value));g.facts.appendChild(row);
           }
           const counts = {pending: 0, running: 0, success: 0, accepted: 0, error: 0, unknown: 0, cancelled: 0, expired: 0};
@@ -7317,8 +7344,9 @@
           t.toolCount++;
         }
         if (nonce) t.anonymousToolAliases.set(nonce, id);
-        // 开始/回执事件通常只有签名卡的引用，不能覆盖原来已验证的目标和标题。
-        if (ev.tool_call) rec.call = Object.assign({}, rec.call, ev.tool_call);
+        // 已签发卡是不可变提案；执行引用序列化出的空 method/path/risk/reason 也不能覆盖它。
+        // 新授权使用新 nonce 单独建卡，执行结果只更新状态和结果投影。
+        if (ev.tool_call && !rec.call.confirmation_nonce) rec.call = Object.assign({}, rec.call, ev.tool_call);
         if (ev.type === 'tool_start' || ev.type === 'tool_result') {
           rec.interactionError = '';
           // 新执行证据替换上一阶段结果，不能继续展示撤销失败或旧回执的摘要。
@@ -7640,6 +7668,7 @@
             if(ev.background_replay && (opts.initialMessages||[]).some(message=>message.role==='assistant'&&message.content===ev.message)) {
               // 产品历史已有正文，回放只补工具回执/待确认卡，避免同一答复显示两遍。
               t.answer.hidden=true;
+              t.card.querySelector(':scope > .author').hidden=true;
               // 已有正文只去重展示文字；续办还在使用此容器，不能连同后续进度一起删掉。
               if(t.done&&!t.toolCount&&!t.pendingCount)t.card.remove();
             }
@@ -7665,6 +7694,7 @@
         if(continuing&&t){
           cancelAssistantRender(t);this.clearTransientStatus(t);this.finalizeThinking(t);
           t.confirmingTool=false;t.done=false;t.acceptNextRun=true;t.text='';t.textBytes=0;t.answer.replaceChildren();t.answer.style.display='none';
+          t.card.querySelector(':scope > .author').hidden=true;
           this.appendStatus(T('agent_continuing'),false,t);this.updateProcess(t);if(this.turn===t)this.setActive(true);return;
         }
         if (!t || t.done) {
@@ -7686,9 +7716,12 @@
         }
         t.confirmingTool = false;
         if ((t.text && t.text.trim()) || t.textTruncated) {
+          t.answer.hidden = false;
+          t.card.querySelector(':scope > .author').hidden = false;
           t.answer.style.display = '';
           replaceAssistantPreservingView(t.answer, renderAssistant(t.text, t.contentFormat, t.answer, t.textTruncated));
         } else {
+          t.card.querySelector(':scope > .author').hidden = true;
           t.answer.replaceChildren();
           t.answer.style.display = 'none';
         }
@@ -8300,10 +8333,10 @@
           if (!Array.isArray(opts.initialMessages) || opts.initialMessages.length > 100) throw new TypeError('ihtml: initialMessages must be an array of at most 100 messages');
           let bytes = 0;
           opts.initialMessages = opts.initialMessages.map((message) => {
-            if (!message || !['user', 'assistant'].includes(message.role) || typeof message.content !== 'string') throw new TypeError('ihtml: initialMessages require user/assistant role and string content');
+            if (!message || !['user', 'assistant', 'tool'].includes(message.role) || typeof message.content !== 'string') throw new TypeError('ihtml: initialMessages require user/assistant/tool role and string content');
             bytes += new TextEncoder().encode(message.content).length;
             if (bytes > 512 * 1024) throw new TypeError('ihtml: initialMessages exceed 512 KiB');
-            return { role: message.role, content: message.content, contentFormat: typeof message.contentFormat === 'string' ? message.contentFormat : 'text' };
+            return { role: message.role, content: message.content, contentFormat: message.role === 'tool' ? 'text' : typeof message.contentFormat === 'string' ? message.contentFormat : 'text' };
           });
         }
         if (typeof opts.menu === 'string') doc.querySelector(opts.menu); // validate selector before createInstance mutates DOM

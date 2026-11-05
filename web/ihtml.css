@@ -1817,33 +1817,33 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
   border-left-color: var(--ui-err);
   background: color-mix(in srgb, var(--ui-err) 5%, var(--ui-surface));
 }
-.ihtml-tool .t-reason {
+:is(.ihtml-tool, .ihtml-tool-batch) .t-reason {
   min-width: 0; padding: 7px 9px;
   border: 1px solid color-mix(in srgb, var(--ui-warn) 26%, var(--ui-border)); border-radius: 7px;
   background: color-mix(in srgb, var(--ui-warn) 6%, transparent);
   color: var(--ui-text); line-height: 1.5; overflow-wrap: anywhere;
 }
-.ihtml-tool .t-reason strong { margin-right: 4px; }
+:is(.ihtml-tool, .ihtml-tool-batch) .t-reason strong { margin-right: 4px; }
 .ihtml-tool .t-interaction-error {
   border-color: color-mix(in srgb, var(--ui-err) 30%, var(--ui-border));
   background: color-mix(in srgb, var(--ui-err) 6%, transparent);
   color: var(--ui-err);
 }
-.ihtml-tool .t-facts {
+:is(.ihtml-tool, .ihtml-tool-batch) .t-facts {
   display: grid; grid-template-columns: repeat(auto-fit, minmax(min(150px, 100%), 1fr));
   gap: 5px; min-width: 0; margin: 0;
 }
-.ihtml-tool .t-fact {
+:is(.ihtml-tool, .ihtml-tool-batch) .t-fact {
   display: grid; grid-template-columns: minmax(0, auto) minmax(0, 1fr); gap: 4px 7px;
   align-content: start; min-width: 0; padding: 5px 7px;
   border: 1px solid var(--ui-border); border-radius: 7px;
   background: var(--ui-surface-muted); color: var(--ui-text-muted);
   font-size: 11.5px; line-height: 1.4; overflow-wrap: anywhere;
 }
-.ihtml-tool .t-fact :is(dt, dd) { min-width: 0; margin: 0; overflow-wrap: anywhere; }
-.ihtml-tool .t-fact dt { font-weight: 650; }
-.ihtml-tool .t-fact dd { color: var(--ui-text); }
-.ihtml-tool .t-fact strong { color: var(--ui-text); font-weight: 650; }
+:is(.ihtml-tool, .ihtml-tool-batch) .t-fact :is(dt, dd) { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+:is(.ihtml-tool, .ihtml-tool-batch) .t-fact dt { font-weight: 650; }
+:is(.ihtml-tool, .ihtml-tool-batch) .t-fact dd { color: var(--ui-text); }
+:is(.ihtml-tool, .ihtml-tool-batch) .t-fact strong { color: var(--ui-text); font-weight: 650; }
 .ihtml-tool .t-input {
   max-height: 4.5em; overflow: auto;
   padding: 6px 8px; border-radius: 7px;
@@ -1923,14 +1923,14 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
   .ihtml-tool .t-title { max-width: 100%; }
   .ihtml-tool .t-summary { -webkit-line-clamp: 2; }
   .ihtml-tool .tbody { padding: 8px; }
-  .ihtml-tool .t-facts { grid-template-columns: minmax(0, 1fr); }
+  :is(.ihtml-tool, .ihtml-tool-batch) .t-facts { grid-template-columns: minmax(0, 1fr); }
   .ihtml-tool .t-actions button { flex: 1 1 120px; min-height: 44px; }
   .ihtml-tool pre { max-height: 200px; }
 }
 
 @media (forced-colors: active) {
   .ihtml-process .pbody, .ihtml-think, .ihtml-tool,
-  .ihtml-tool .tbody, .ihtml-tool .t-fact, .ihtml-tool pre { border-color: CanvasText; }
+  .ihtml-tool .tbody, :is(.ihtml-tool, .ihtml-tool-batch) .t-fact, .ihtml-tool pre { border-color: CanvasText; }
   .ihtml-process .p-dot, .ihtml-think .p-dot { background: currentColor; }
   .ihtml-process.active .p-dot,
   .ihtml-process[data-state="running"] .p-dot,
@@ -2110,7 +2110,7 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
 }
 
 /* 完整名单和逐项回执保留换行；长列表可自然滚动，不能静默裁掉未展示目标。 */
-.ihtml-tool .t-primary, .ihtml-tool .t-facts dd { white-space: pre-line; }
+.ihtml-tool .t-primary, :is(.ihtml-tool, .ihtml-tool-batch) .t-facts dd { white-space: pre-line; }
 .ihtml-tool .t-head .t-summary { white-space: normal; max-height: 3em; overflow: hidden; }
 
 /* 异步接收用信息色，不能显示成业务完成的绿色。 */
@@ -2176,7 +2176,7 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
 .ihtml-trace-actions .ihtml-tool[data-status="accepted"]:not([open]) > summary .t-summary { display: none; }
 
 /* 同类批量确认只展示公共摘要，逐项参数与独立回执保留在完整清单。 */
-.ihtml-root .ihtml-tool-batch { border: 1px solid var(--ui-primary-border); border-radius: 14px; padding: 14px; display: grid; gap: 10px; min-width: 0; }
+.ihtml-root .ihtml-tool-batch { font-size: 13px; line-height: 1.5; color: var(--ui-text); border: 1px solid var(--ui-primary-border); border-radius: 14px; padding: 14px; display: grid; gap: 10px; min-width: 0; }
 .ihtml-root .ihtml-tool-batch .t-batch-title { font-size: 1.05em; }
 .ihtml-root .ihtml-tool-batch .t-batch-operation, .ihtml-root .ihtml-tool-batch .t-batch-status { margin: 0; overflow-wrap: anywhere; }
 .ihtml-root .ihtml-tool-batch .t-batch-list > summary { cursor: pointer; min-height: 36px; padding: 6px 0; }
@@ -2190,3 +2190,12 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
 .ihtml-root .ihtml-tool-batch .t-facts { display: grid; gap: 6px; margin: 0; }
 .ihtml-root .ihtml-tool-batch .t-fact { display: flex; flex-wrap: wrap; gap: 8px; overflow-wrap: anywhere; }
 .ihtml-root .ihtml-tool-batch .t-fact dd { margin: 0; white-space: pre-line; }
+
+/* 历史回执只读折叠，不使用 AI 作者或聊天正文的段落字号。 */
+.ihtml-root .ihtml-tool-batch > .t-reason { margin: 0; }
+.ihtml-root .ihtml-tool-batch > [hidden] { display: none !important; }
+.ihtml-root .ihtml-receipt-history { border: 1px solid var(--ui-border); border-radius: 10px; padding: 10px 12px; color: var(--ui-text-muted); font-size: 12px; line-height: 1.5; min-width: 0; }
+.ihtml-root .ihtml-receipt-history > summary { cursor: pointer; min-height: 24px; font-weight: 600; }
+.ihtml-root .ihtml-receipt-history > ol { display: grid; gap: 6px; margin: 8px 0 0; padding-left: 20px; }
+.ihtml-root .ihtml-receipt-history li { overflow-wrap: anywhere; white-space: pre-wrap; }
+.ihtml-root .ihtml-receipt-history .t-receipt-count { white-space: nowrap; margin-left: 8px; }

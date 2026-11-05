@@ -116,7 +116,7 @@ const offTheme = assistant.theme.onChange(theme => observeTheme(theme));
 | `chatHeader: 'compact'` | 隐藏重复标题，保留紧凑操作行 |
 | `chatHeader: 'none'` | 宿主接管整个标题栏；必须自行提供“新对话”等入口，调用原有公共方法 |
 | `starters: string[]` | 最多四个空对话示例；在消息区滚动，首条消息提交后隐藏，恢复已有消息时不显示 |
-| `initialMessages` / `chat.getMessages()` | 最多 100 条、总计 512 KiB 的显示快照；不是可信历史，不含可继续执行的旧授权 |
+| `initialMessages` / `chat.getMessages()` | 最多 100 条、总计 512 KiB 的显示快照；user/assistant 为正文，tool 为只读回执，连续回执默认折叠汇总；不含可继续执行的旧授权 |
 | `chat.sessionId` | 当前 SDK 的稳定 `csid`，非认证凭据；连续追问和重连沿用，显式新对话换号 |
 | `chat.clear()` / `onNewChat` | 开始新对话并通知宿主解除原生继续绑定；不删除历史、不撤销业务操作 |
 | `beforeConfirm` | 接入宿主的原生确认/身份核验；不能替代服务端执行时再次鉴权 |
@@ -146,6 +146,9 @@ history: {
 ```
 
 `openNativeConversation`、`deleteNativeConversationAfterConfirmation` 是宿主实现的适配函数，不是 SDK 自带接口。`list` 每页最多 100 条；`select` 负责原生继续绑定，`initialMessages` 只负责显示。读取/选择有 30 秒超时，删除含确认阶段为 120 秒，均提供取消信号；删除失败或结果未知时不会自动重试。权限、归属、并发与幂等必须由宿主 API 校验，不能信任行里的 `selected` 或 `removable`。
+
+历史回执使用 `{role:'tool', content:'公开回执摘要', contentFormat:'text'}`，不会显示为 AI 回答，也不会恢复 tool_call、nonce、token 或按钮。SDK 保留各条记录的导出顺序；连续相同摘要只在展示时合并计数。真实签名确认卡一经接收保持原提案不变，后续执行引用只更新状态，不能用空字段改写分组或批准内容。
+
 
 **一轮提问（turn）、对话（conversation）与传输/执行 session 要分开。** 历史 ID 应标识整段对话；连续追问追加原记录，重连不能变成新历史。原生后端可把 `csid` 映射到自己的对话 ID，不能把它当访问凭据。点击新对话时，宿主必须在 `onNewChat` 中解除旧的 `params.conversation` 或原生继续令牌并重新绑定，不能只清屏后仍把新问题写回旧对话。
 

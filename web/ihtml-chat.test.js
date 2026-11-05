@@ -1636,6 +1636,12 @@ test('saved receipt text does not hide replayed continuation progress after reco
  assert.match(await page.locator('#a').innerText(),/LIVE PROGRESS 16\/30/);
  assert.equal(await page.locator('.ihtml-tool[data-status="accepted"]').count(),1);
  assert.equal(await page.evaluate(()=>a.chat.busy),true);
+ // 原正文去重不能粘住 hidden，让后续真实回答一直不可见，也不能留下空AI作者。
+ await page.evaluate(()=>{
+  sockets[0].emit({type:'assistant_delta',run_id:'continued',seq:3,background_session:'saved',background_seq:9,delta:'NEW VISIBLE ANSWER'});
+  sockets[0].emit({type:'assistant_done',run_id:'continued',seq:4,background_session:'saved',background_seq:10,message:'NEW VISIBLE ANSWER'});
+ });
+ await page.getByText('NEW VISIBLE ANSWER',{exact:true}).waitFor({state:'visible'});
 });
 
 for(const colorScheme of ['dark','light']) test('compact notification inbox marks rendered notices seen without reading background polls: '+colorScheme,async(t)=>{
@@ -1735,6 +1741,47 @@ test('57 signed operations use one batch confirmation and aggregate independent 
  assert.match(await page.locator('.t-batch-status').innerText(),/56/);
  assert.match(await page.locator('.t-batch-status').innerText(),/1/);
  assert.equal(await page.locator('.ihtml-tool-batch > .t-actions button').isVisible(),false);
+});
+
+// 使用 Go ProposedToolCall 的真实零值 JSON，不能只用省略 method/risk 的人工简化回执。
+test('serialized receipt references cannot split a signed batch or change its remaining approval',async(t)=>{
+ const page=await fixture(t,{width:390,height:844});
+ await page.evaluate(async()=>{
+  const originalFetch=fetch;window.fetch=async(...args)=>{const r=await originalFetch(...args);const read=r.text;r.text=async()=>JSON.stringify({...JSON.parse(await read()),batch_confirmations:true});return r};
+  window.a=ihtml.mountChat('#a',{locale:'zh-CN'});await a.ready();await a.chat.send('原30项');const s=sockets[0];s.emit({type:'turn_start',run_id:'proposal',seq:1});
+  for(let i=0;i<30;i++)s.emit({type:'confirmation_required',run_id:'proposal',seq:i+2,tool_call:{id:'item-'+i,name:'any_write',confirmation_group:'original',title:'同类设置',method:'PUT',path:'/settings',reason:'仅执行原清单',risk:'medium',requires_confirmation:true,approval_resume:'manual_tool_only',confirmation_nonce:'nonce-'+i,confirmation_token:'SIGN-'+i,confirmation_expires:Math.floor(Date.now()/1000)+600,presentation:{facts:[{label:'目标',value:'target-'+i},{label:'操作影响',value:'仅执行原清单'}]}}});
+  s.emit({type:'assistant_done',run_id:'proposal',seq:32,message:'请核对原清单'});
+ });
+ await page.locator('.t-batch-list > summary').click();
+ await page.locator('.ihtml-tool').nth(0).locator('summary.t-head').click();
+ await page.locator('.ihtml-tool').nth(0).locator('.t-actions button.ok').click();
+ await page.evaluate(()=>{
+  const s=sockets[0];s.emit({type:'turn_start',run_id:'execution',seq:1});
+  for(let i=0;i<2;i++)s.emit({type:'tool_start',run_id:'execution',seq:i+2,tool_call:{id:'item-'+i,confirmation_nonce:'nonce-'+i,method:'',path:'',risk:'',reason:'',requires_confirmation:false}});
+ });
+ assert.equal(await page.locator('.ihtml-tool-batch').count(),1);assert.match(await page.locator('.t-batch-title').innerText(),/30/);
+ assert.match(await page.locator('.t-batch-status').innerText(),/执行中 2/);assert.match(await page.locator('.t-batch-status').innerText(),/待确认 28/);
+ await page.evaluate(()=>{const s=sockets[0];for(let i=0;i<2;i++)s.emit({type:'tool_result',run_id:'execution',seq:i+4,tool_call:{id:'item-'+i,confirmation_nonce:'nonce-'+i,method:'',path:'',risk:'',reason:'',requires_confirmation:false},tool_status:'success'});s.emit({type:'assistant_done',run_id:'execution',seq:6,message:'2项已返回'});});
+ await page.getByRole('button',{name:'确认这 28 项操作',exact:true}).click();
+ const frames=await page.evaluate(()=>sockets[0].sent.filter(x=>x.type==='confirm_tools'));
+ assert.equal(frames.length,1);assert.equal(frames[0].tool_calls.length,28);assert.equal(frames[0].tool_calls[0].method,'PUT');assert.equal(frames[0].tool_calls[0].reason,'仅执行原清单');
+ assert.equal(await page.locator('.ihtml-tool-batch').count(),1);
+ await page.locator('.t-batch-list > summary').click();await page.locator('.ihtml-tool-batch').scrollIntoViewIfNeeded();
+ await page.locator('#a').screenshot({path:'/tmp/ihtml-stable-batch-after.png'});
+});
+
+test('display-only tool history folds receipts without AI authors, action authority or lost snapshot data',async(t)=>{
+ const page=await fixture(t,{width:390,height:844});
+ await page.evaluate(async()=>{
+  window.initial=[{role:'user',content:'原请求'},{role:'assistant',content:'请核对确认范围',contentFormat:'markdown'},...Array.from({length:28},()=>({role:'tool',content:'原操作接口已返回，请核对实际结果。',tool_call:{confirmation_nonce:'old',confirmation_token:'PRIVATE'},contentFormat:'markdown'})),{role:'assistant',content:'已查询原记录，28项已完成。'},{role:'assistant',content:' '}];
+  window.a=ihtml.mountChat('#a',{locale:'zh-CN',initialMessages:initial});await a.ready();
+ });
+ const group=page.locator('.ihtml-receipt-history');assert.equal(await group.count(),1);assert.match(await group.locator('summary').innerText(),/28/);assert.equal(await group.locator('ol').isVisible(),false);
+ // welcome 仍是独立引导，不能为28项回执各制造AI作者。
+ assert.equal(await page.locator('.ihtml-msg.assistant').count(),3);assert.equal(await page.locator('.ihtml-tool, .t-actions button').count(),0);
+ await group.locator('summary').click();assert.equal(await group.locator('li').count(),1);assert.match(await group.innerText(),/× 28/);
+ const saved=await page.evaluate(()=>a.chat.getMessages());assert.equal(saved.filter(m=>m.role==='tool').length,28);assert.ok(saved.every(m=>!m.tool_call));assert.ok(saved.filter(m=>m.role==='tool').every(m=>m.contentFormat==='text'));
+ await page.locator('#a').screenshot({path:'/tmp/ihtml-receipt-history-after.png'});
 });
 
 test('batch host rejection prevents every member from being sent',async(t)=>{
