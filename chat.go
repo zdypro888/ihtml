@@ -32,8 +32,9 @@ const (
 	// should reserve envelope headroom below this value.
 	MaxChatOutboundFrameBytes = (1 << 20) - 1
 
-	ChatClientUserMessage = "user_message"
-	ChatClientConfirmTool = "confirm_tool"
+	ChatClientUserMessage  = "user_message"
+	ChatClientConfirmTool  = "confirm_tool"
+	ChatClientConfirmTools = "confirm_tools"
 	// ChatClientCancelTool revokes one signed confirmation card without running
 	// it. The backend verifies the card and atomically consumes its nonce, so a
 	// later confirm_tool replay is rejected.
@@ -179,6 +180,8 @@ type ChatClientEvent struct {
 	ToolsEnabled  *bool             `json:"tools_enabled,omitempty"`
 	ClientContext ChatClientContext `json:"client_context"`
 	ToolCall      *ProposedToolCall `json:"tool_call,omitempty"`
+	// ToolCalls 是一次明确批准的固定清单；各项仍使用原签名，不能从筛选条件扩大范围。
+	ToolCalls []ProposedToolCall `json:"tool_calls,omitempty"`
 	// InspectID/Inspect 仅用于 inspect_result: 应答服务端的同 ID inspect_request。
 	InspectID string                `json:"inspect_id,omitempty"`
 	Inspect   *ChatClientInspection `json:"inspect,omitempty"`
@@ -332,6 +335,8 @@ type ToolCallPresentation struct {
 }
 
 type ProposedToolCall struct {
+	// ConfirmationGroup 由可信确认桥接层标识原提案轮次，历史恢复不能把不同轮次混成一批。
+	ConfirmationGroup    string                `json:"confirmation_group,omitempty"`
 	Presentation         *ToolCallPresentation `json:"presentation,omitempty"`
 	Review               *OperationReview      `json:"review,omitempty"`
 	ID                   string                `json:"id,omitempty"`
@@ -370,6 +375,8 @@ type ChatModels struct {
 	// Connection-scoped cards are invalidated on disconnect; the default is
 	// session-scoped. The backend must enforce the same ownership rule.
 	ConfirmationScope string `json:"confirmation_scope,omitempty"`
+	// BatchConfirmations 仅由支持固定清单排队及逐项验签的后端声明。
+	BatchConfirmations bool `json:"batch_confirmations,omitempty"`
 	// BackgroundExecution 表示传输断开不会取消后台轮次，重连会回放原执行进度。
 	BackgroundExecution bool  `json:"background_execution,omitempty"`
 	RequestTimeoutMS    int64 `json:"request_timeout_ms"`

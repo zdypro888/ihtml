@@ -1703,3 +1703,51 @@ test('restored progress does not invent elapsed time from the reconnect clock',a
  const page=await fixture(t);await page.evaluate(async()=>{window.a=ihtml.mountChat('#a',{locale:'zh-CN'});await a.ready();await a.chat.send('连接以接收原记录');sockets[0].emit({type:'turn_start',run_id:'old-run',seq:1,background_replay:true});sockets[0].emit({type:'tool_result',run_id:'old-run',seq:2,background_replay:true,tool_call:{id:'query',title:'查询原任务'},tool_status:'success'});sockets[0].emit({type:'assistant_status',run_id:'old-run',seq:3,background_replay:true,status:'已处理 12/30，后台继续执行'});});
  assert.equal(await page.locator('#a .p-title').last().textContent(),'已处理 12/30，后台继续执行');assert.ok(!(await page.locator('#a .p-meta').last().textContent()).includes('秒'));assert.ok((await page.locator('#a .p-meta').last().textContent()).includes('1 条工具记录'));await page.evaluate(()=>a.destroy());
 });
+
+// 公共 SDK 将同轮同类操作收成一张卡，批准发送固定签名清单，不触发逐项按钮或扩大后到范围。
+test('57 signed operations use one batch confirmation and aggregate independent receipts',async(t)=>{
+ const page=await fixture(t,{width:390,height:844});
+ await page.evaluate(async()=>{
+  const fetchOriginal=window.fetch;window.fetch=async(...args)=>{const response=await fetchOriginal(...args);const read=response.text;response.text=async()=>{const data=JSON.parse(await read());data.batch_confirmations=true;return JSON.stringify(data)};return response};
+  window.a=ihtml.mountChat('#a',{locale:'zh-CN'});await a.ready();await a.chat.send('批量设置这些账号');
+  const s=sockets[0];s.emit({type:'turn_start',run_id:'batch',seq:1});
+  for(let i=0;i<57;i++)s.emit({type:'confirmation_required',run_id:'batch',seq:i+2,tool_call:{id:'item-'+i,name:'update',title:'设置业务用途',method:'PUT',path:'/settings',risk:'medium',reason:'仅更改所列账号的用途',approval_resume:'manual_tool_only',confirmation_nonce:'nonce-'+i,confirmation_token:'signed-'+i,confirmation_expires:Math.floor(Date.now()/1000)+600,presentation:{facts:[{label:'用途',value:'仅直播转播'},{label:'账号',value:'account-'+i+'@example.test'}]}}});
+  s.emit({type:'assistant_done',run_id:'batch',seq:60,message:'请确认整批'});
+ });
+ assert.equal(await page.locator('.ihtml-tool-batch').count(),1);
+ assert.equal(await page.locator('.ihtml-trace-actions > .ihtml-tool').count(),0);
+ assert.equal(await page.locator('.t-batch-items').isVisible(),false);
+ assert.match(await page.locator('.ihtml-tool-batch').innerText(),/批量处理 · 57 项/);
+ assert.match(await page.locator('.ihtml-tool-batch').innerText(),/仅直播转播/);
+ assert.equal(await page.locator('.ihtml-tool-batch').evaluate(el=>el.scrollWidth<=el.clientWidth),true);
+ await page.screenshot({path:'/tmp/ihtml-batch-confirmation-mobile.png',animations:'disabled'});
+ await page.locator('.t-batch-list > summary').click();
+ assert.match(await page.locator('.t-batch-items').innerText(),/account-56@example.test/);
+ await page.getByRole('button',{name:'确认这 57 项操作',exact:true}).click();
+ const sent=await page.evaluate(()=>sockets[0].sent.filter(frame=>frame.type==='confirm_tools'));
+ assert.equal(sent.length,1);assert.equal(sent[0].tool_calls.length,57);assert.equal(sent[0].tool_calls[56].confirmation_token,'signed-56');
+ assert.equal(await page.evaluate(()=>sockets[0].sent.filter(frame=>frame.type==='confirm_tool').length),0);
+ await page.evaluate(()=>{
+  const s=sockets[0];s.emit({type:'turn_start',run_id:'execute',seq:1});
+  for(let i=0;i<57;i++)s.emit({type:'tool_result',run_id:'execute',seq:i+2,tool_call:{id:'item-'+i,confirmation_nonce:'nonce-'+i},tool_status:i===56?'unknown':'success',tool_summary:i===56?'请核对原回执':'已保存'});
+  s.emit({type:'assistant_done',run_id:'execute',seq:60,message:'批量处理结束'});
+ });
+ assert.match(await page.locator('.t-batch-status').innerText(),/56/);
+ assert.match(await page.locator('.t-batch-status').innerText(),/1/);
+ assert.equal(await page.locator('.ihtml-tool-batch > .t-actions button').isVisible(),false);
+});
+
+test('batch host rejection prevents every member from being sent',async(t)=>{
+ const page=await fixture(t);
+ await page.evaluate(async()=>{
+  const oldFetch=fetch;window.fetch=async(...args)=>{const r=await oldFetch(...args);const read=r.text;r.text=async()=>JSON.stringify({...JSON.parse(await read()),batch_confirmations:true});return r};
+  window.allowBatch=false;window.checks=0;
+  window.a=ihtml.mountChat('#a',{beforeConfirm:({toolCall})=>{checks++;toolCall.title='changed local copy';return allowBatch||checks!==2}});await a.ready();await a.chat.send('batch');
+  window.emitCard=(i,seq)=>sockets[0].emit({type:'confirmation_required',run_id:'proposal',seq,tool_call:{id:'batch-'+i,name:'write',title:'Original operation',method:'PUT',path:'/write',confirmation_group:'original',confirmation_nonce:'nonce-'+i,confirmation_token:'SIGNED',confirmation_expires:Math.floor(Date.now()/1000)+600,approval_resume:'manual_tool_only',body:{target:i}}});
+  sockets[0].emit({type:'turn_start',run_id:'proposal',seq:1});emitCard(1,2);emitCard(2,3);sockets[0].emit({type:'assistant_done',run_id:'proposal',seq:4,message:'Review'});
+ });
+ await page.locator('.ihtml-tool-batch > .t-actions button').click();
+ await page.waitForFunction(()=>checks===2&&!a.chat.busy);
+ assert.equal(await page.evaluate(()=>sockets[0].sent.some(f=>f.type==='confirm_tools')),false);
+
+});

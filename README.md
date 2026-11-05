@@ -612,3 +612,12 @@ GPT-6.1 Terra 的工具调用必须使用 `OpenAIAPI:"responses"`；SDK 在发�
 `agent.Tool.RecoverResult` 同时用于普通引擎和手动确认桥接。确认后的 Handler 报错或超时时，桥接层只核对原 invocation 的持久回执一次，重新经过实时权限校验，使用独立的短期限；不会再次调用 Handler。只有宿主返回 `recovered=true` 及非空确切回执，且 `CompleteTool` 保存成功，才可经 `ContinueAfterTool` 进入下一轮。未落库、执行中、结果未知、核对失败或权限撤销均不能被当成成功。用户停止或会话关闭不触发自动核对续办。
 
 请求格式或领域组合无效时，宿主可从执行前的 Preview/ToolExecutionGuard 返回 `assistant.ErrInvalidToolArguments`（支持包装）。桥接返回固定的 `invalid_arguments / not_started / correct_arguments` 结果，供模型修正参数；不签发确认卡，不透传错误原文。该标记不能用于权限错误、网络错误、数据库错误或可能已有副作用的操作。HTTP 非 2xx 本身不证明未执行。
+
+### 通用批量确认
+
+`assistant.Backend` 启用手动 `Confirmation` 后自动声明 `batch_confirmations=true`。
+SDK 将同一签名提案轮次中同类操作汇总为一张卡：展示公共变更和结果计数，完整目标、逐项参数及回执可展开核对。
+确认提交 `confirm_tools` 与固定 `tool_calls[]`，没有条件筛选或隐式新增目标；仍保留单项 `confirm_tool`。
+确认桥接层签发并签名 `confirmation_group`，历史恢复不会混合不同原始轮次。后端在同一排队边界核对整批已签发卡片，再逐项消费原 nonce、重查权限和执行原处理器。
+参数被改写、重复 nonce、过期、跨原始轮次或正在处理的成员使整批入队失败。执行不是事务：单项撤权、失败或结果未知各自记录，不自动重试或回滚其他已执行项。
+同批续办提示沿用通用队列去重，在剩余操作之后重新核对原请求；未声明此能力和原生 checkpoint 审批继续使用原单卡流程。

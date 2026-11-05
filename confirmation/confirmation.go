@@ -89,23 +89,24 @@ func NewChecked(cfg Config) (*Signer, error) {
 // CanonicalCall preserves the legacy chat JSON field order and names.
 // These fields, the protocol constant, and CanonicalBody define the wire signature.
 type CanonicalCall struct {
-	Scope        Scope                       `json:"scope"`
-	ID           string                      `json:"id"`
-	User         string                      `json:"user"`
-	Name         string                      `json:"name"`
-	Title        string                      `json:"title"`
-	Method       string                      `json:"method"`
-	Path         string                      `json:"path"`
-	Query        json.RawMessage             `json:"query"`
-	Body         json.RawMessage             `json:"body"`
-	Risk         string                      `json:"risk"`
-	Confirmation bool                        `json:"confirmation"`
-	Reason       string                      `json:"reason"`
-	AgentMode    string                      `json:"agent_mode"`
-	ResumeMode   string                      `json:"resume_mode"`
-	Nonce        string                      `json:"nonce"`
-	Expires      int64                       `json:"expires"`
-	Presentation *ihtml.ToolCallPresentation `json:"presentation,omitempty"`
+	Scope             Scope                       `json:"scope"`
+	ID                string                      `json:"id"`
+	User              string                      `json:"user"`
+	Name              string                      `json:"name"`
+	Title             string                      `json:"title"`
+	Method            string                      `json:"method"`
+	Path              string                      `json:"path"`
+	Query             json.RawMessage             `json:"query"`
+	Body              json.RawMessage             `json:"body"`
+	Risk              string                      `json:"risk"`
+	Confirmation      bool                        `json:"confirmation"`
+	Reason            string                      `json:"reason"`
+	AgentMode         string                      `json:"agent_mode"`
+	ResumeMode        string                      `json:"resume_mode"`
+	Nonce             string                      `json:"nonce"`
+	Expires           int64                       `json:"expires"`
+	Presentation      *ihtml.ToolCallPresentation `json:"presentation,omitempty"`
+	ConfirmationGroup string                      `json:"confirmation_group,omitempty"`
 }
 
 // CanonicalBody retains legacy JSON number normalization and null fallback.
@@ -137,7 +138,7 @@ func (s *Signer) Sign(user string, scope Scope, call ihtml.ProposedToolCall) str
 		Method: call.Method, Path: call.Path, Query: CanonicalBody(call.Query),
 		Body: CanonicalBody(call.Body), Risk: call.Risk, Confirmation: call.RequiresConfirmation,
 		Reason: call.Reason, AgentMode: call.AgentMode, ResumeMode: call.ApprovalResume,
-		Nonce: call.ConfirmationNonce, Expires: call.ConfirmationExpires, Presentation: call.Presentation,
+		Nonce: call.ConfirmationNonce, Expires: call.ConfirmationExpires, Presentation: call.Presentation, ConfirmationGroup: call.ConfirmationGroup,
 	})
 	mac := hmac.New(sha256.New, s.key)
 	mac.Write(payload)

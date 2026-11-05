@@ -88,6 +88,7 @@ func (s *session) prepareTool(ctx context.Context, tool agent.Tool, args json.Ra
 	}
 	// IDs and approval semantics are bridge-owned, never model- or preview-owned.
 	call.ID = newProjection(s, ctx, func() {}).id
+	call.ConfirmationGroup = p.id
 	call.Name, call.AgentMode, call.ApprovalResume = tool.Name, "deep", "manual_tool_only"
 	call.RequiresConfirmation = true
 	if call.Risk != "low" && call.Risk != "medium" && call.Risk != "high" && call.Risk != "blocked" {
@@ -181,6 +182,66 @@ func (s *session) expirePendingToolsLocked(now time.Time) {
 		if item.call.ConfirmationExpires <= now.Unix() {
 			delete(s.pendingTools, nonce)
 		}
+	}
+}
+
+type batchIntermediateContextKey struct{}
+
+// handleToolBatchEvent 一次冻结整份已签发清单后排队，避免第一项回执触发续办时其余项尚未入队。
+// 不改变单项执行协议：每项继续独立验签、消费 nonce、检查实时权限及保存实际回执。
+func (s *session) handleToolBatchEvent(ctx context.Context, ev *ihtml.ChatClientEvent) {
+	accept := func() bool {
+		if ev.ToolCall != nil || len(ev.ToolCalls) < 2 || len(ev.ToolCalls) > s.backend.cfg.Confirmation.MaxPendingTools {
+			return false
+		}
+		raw, err := json.Marshal(ev.ToolCalls)
+		if err != nil || len(raw) > 1<<20 {
+			return false
+		}
+		var calls []ihtml.ProposedToolCall
+		if json.Unmarshal(raw, &calls) != nil {
+			return false
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.pendingMu.Lock()
+		defer s.pendingMu.Unlock()
+		if s.closed || s.ctx.Err() != nil || ctx.Err() != nil || len(s.queue)+len(calls) > s.backend.cfg.Confirmation.MaxPendingTools+s.backend.cfg.MaxPendingTurns {
+			return false
+		}
+		seen := map[string]bool{}
+		var name, scope, group string
+		for i, call := range calls {
+			item := s.pendingTools[call.ConfirmationNonce]
+			if item == nil || item.queued || seen[call.ConfirmationNonce] || item.call.ConfirmationExpires <= time.Now().Unix() {
+				return false
+			}
+			// 参数、显示范围及令牌必须与保存的卡片完全一致，不能利用批量入口替换任一目标。
+			stored, _ := json.Marshal(item.call)
+			supplied, _ := json.Marshal(call)
+			if string(stored) != string(supplied) {
+				return false
+			}
+			if i == 0 {
+				name, scope, group = item.tool.Name, item.invocationScope, item.call.ConfirmationGroup
+			} else if name != item.tool.Name || scope != item.invocationScope || group != item.call.ConfirmationGroup {
+				return false
+			}
+			seen[call.ConfirmationNonce] = true
+		}
+		for i := range calls {
+			call := calls[i]
+			s.pendingTools[call.ConfirmationNonce].queued = true
+			s.queue = append(s.queue, pendingTurn{parent: ctx, event: ihtml.ChatClientEvent{Type: ihtml.ChatClientConfirmTool, ToolCall: &call}, issuedApproval: true, batchIntermediate: i < len(calls)-1})
+		}
+		select {
+		case s.wake <- struct{}{}:
+		default:
+		}
+		return true
+	}
+	if !accept() {
+		_ = s.emit(ihtml.ChatStreamEvent{Type: ihtml.ChatStreamTurnError, Error: "Batch confirmation rejected; no operations were queued. Review the original confirmations."})
 	}
 }
 
@@ -433,7 +494,7 @@ func (s *session) runConfirmedTool(ctx context.Context, cancel context.CancelFun
 				}()
 			}
 			reply := &agent.TurnResult{Text: summary, FinishReason: "manual_tool_only"}
-			if next == nil && s.backend.cfg.Confirmation.ResultReply != nil && evidence != nil && pending != nil {
+			if next == nil && replyParent.Value(batchIntermediateContextKey{}) != true && s.backend.cfg.Confirmation.ResultReply != nil && evidence != nil && pending != nil {
 				reply = s.explainToolResult(replyParent, p, pending, status, view, summary)
 			}
 			p.mu.Lock()

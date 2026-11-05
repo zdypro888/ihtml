@@ -5817,6 +5817,7 @@
               rec.body.setAttribute('aria-busy', String(!!rec.cancelPending || !!rec.confirmPending));
               rec.body.querySelectorAll('.t-actions button').forEach((button) => { button.disabled = disabled || (button.classList.contains('ok') && !!rec.call.review?.blocking_reason); });
             }
+            this.syncToolGroups(owner);
           }
         }
       },
@@ -6950,7 +6951,7 @@
         if (!rec || !t) return;
         const hadFocus = rec.body.contains(doc.activeElement);
         rec.attention = rec.attention || ['pending', 'error', 'unknown'].includes(rec.status);
-        const parent = rec.attention ? t.actions : t.pBody;
+        const parent = rec.batchGroup ? rec.batchGroup.items : (rec.attention ? t.actions : t.pBody);
         if (rec.card.parentNode !== parent) parent.appendChild(rec.card);
         if (rec.countdown) { clearInterval(rec.countdown); rec.countdown = 0; }
         const view = this.toolView(rec.call, ev || {});
@@ -7128,11 +7129,110 @@
         if (rec.status === 'pending' || rec.status === 'error' || rec.status === 'unknown' || rec.expired) rec.card.open = true;
         else if (['success', 'accepted', 'cancelled'].includes(rec.status) && !rec.pinned) rec.card.open = false;
         this.syncToolSummary(rec);
+        this.syncToolGroups(t);
         if (hadFocus) queueMicrotask(() => {
           const owner = rec.ownerTurn;
           const target = owner && rec.card.parentNode === owner.pBody && !owner.process.open ? owner.processSummary : rec.summary;
           if (target && target.isConnected) target.focus({ preventScroll: true });
         });
+      },
+      // 同轮同类签名操作汇总为一张卡；完整参数仍在可展开清单内，不根据展示摘要扩大授权。
+      syncToolGroups(t) {
+        if (!t || !this.modelInfo?.batch_confirmations) return;
+        t.toolGroups ||= new Map();
+        const buckets = new Map();
+        for (const rec of t.tools.values()) {
+          if (!rec.call.confirmation_nonce || !rec.call.name || rec.call.approval_resume === 'checkpoint') continue;
+          const key = JSON.stringify([rec.call.confirmation_group || '', rec.call.name, rec.call.method || '', rec.call.risk || '', rec.call.reason || '']);
+          if (!buckets.has(key)) buckets.set(key, []);
+          buckets.get(key).push(rec);
+        }
+        for (const [key, records] of buckets) {
+          if (records.length < 2) continue;
+          let g = t.toolGroups.get(key);
+          if (!g) {
+            const card = el('section', 'ihtml-tool-batch');
+            const title = el('strong', 't-batch-title');
+            const operation = el('div', 't-batch-operation');
+            const reason = el('p', 't-reason');
+            const facts = el('dl', 't-facts');
+            const counts = el('p', 't-batch-status');counts.setAttribute('aria-live', 'polite');
+            const list = el('details', 't-batch-list'), summary = el('summary'), items = el('div', 't-batch-items');
+            list.append(summary, items);
+            const bar = el('div', 't-actions'), confirm = el('button', 'ok');
+            bar.append(confirm);card.append(title, operation, reason, facts, counts, list, bar);t.actions.appendChild(card);
+            g = {card, title, operation, reason, facts, counts, list, summary, items, confirm, records: [], error: ''};
+            confirm.onclick = () => this.confirmToolGroup(g);
+            t.toolGroups.set(key, g);
+          }
+          g.records = records;
+          const views = records.map(rec => this.toolView(rec.call, rec.lastEvent || {}));
+          const common = views[0].facts.filter(fact => views.every(view => view.facts.some(other => other.label === fact.label && other.value === fact.value)));
+          g.title.textContent = T('tool_batch_title', {n: records.length});
+          g.operation.textContent = views[0].title;
+          g.reason.textContent = views[0].reason;g.reason.hidden = !views[0].reason;
+          g.summary.textContent = T('tool_batch_list', {n: records.length});
+          g.facts.replaceChildren();
+          for (const fact of common) {
+            const row = el('div', 't-fact');row.append(el('dt', '', fact.label), el('dd', '', fact.value));g.facts.appendChild(row);
+          }
+          const counts = {pending: 0, running: 0, success: 0, accepted: 0, error: 0, unknown: 0, cancelled: 0, expired: 0};
+          records.forEach((rec, i) => {
+            const fresh = rec.batchGroup !== g;
+            rec.batchGroup = g;
+            if (rec.card.parentNode !== g.items) g.items.appendChild(rec.card);
+            if (fresh && !rec.pinned) rec.card.open = false;
+            if (Object.hasOwn(counts, rec.status)) counts[rec.status]++;
+            const differing = views[i].facts.filter(fact => !common.some(other => other.label === fact.label && other.value === fact.value));
+            const label = differing.map(fact => fact.label + '：' + fact.value).join(' · ');
+            rec.title.textContent = label ? clip(label, 320) : views[i].title;
+          });
+          g.counts.textContent = g.error || Object.entries(counts).filter(([, count]) => count > 0).map(([status, count]) => (TOOL_STATUS_LABEL[status] || status) + ' ' + count).join(' · ');
+          const pending = records.filter(rec => rec.status === 'pending' && !rec.expired);
+          g.confirm.textContent = T('tool_batch_confirm', {n: pending.length});
+          g.confirm.hidden = pending.length === 0;
+          g.confirm.disabled = destroyed || readOnly || authRefreshing || !this.enabled || this.active || this.sending || !!this.confirmationBusy || pending.some(rec => rec.call.review?.blocking_reason || rec.cancelPending || rec.confirmPending);
+        }
+      },
+      // 全部宿主确认钩子通过后才发送固定卡片数组；后端原子入队，各项仍独立验签与记录结果。
+      async confirmToolGroup(g) {
+        if (destroyed || readOnly || authRefreshing || !this.enabled || this.active || this.sending || this.confirmationBusy) return;
+        const records = g.records.filter(rec => rec.status === 'pending' && !rec.expired);
+        if (!records.length || records.some(rec => rec.call.review?.blocking_reason || rec.cancelPending)) return;
+        if (records.length === 1) return this.confirmTool(records[0]);
+        const snapshot = records.map(rec => JSON.parse(JSON.stringify(rec.call)));
+        this.confirmationBusy = g;g.error = '';
+        records.forEach(rec => {rec.confirmPending = true;});this.syncChatControls();
+        const current = () => !destroyed && !authRefreshing && !readOnly && this.enabled && this.confirmationBusy === g && records.every((rec, i) => rec.status === 'pending' && !rec.expired && JSON.stringify(rec.call) === JSON.stringify(snapshot[i]) && (!rec.call.confirmation_expires || rec.call.confirmation_expires * 1000 > Date.now()));
+        try {
+          if (typeof opts.beforeConfirm === 'function') {
+            for (const rec of records) {
+              const controller = new AbortController();rec.confirmAbort = controller;
+              try {
+                const toolCall = JSON.parse(JSON.stringify(rec.call, (key, value) => isTechnicalSecretKey(key) ? undefined : value));
+                if (await boundedChatHook(() => opts.beforeConfirm({toolCall, signal: controller.signal}), controller.signal, 120000) !== true) return;
+              } finally {controller.abort();if (rec.confirmAbort === controller) rec.confirmAbort = null;}
+              if (!current()) return;
+            }
+          }
+          const ws = await this.ensureWS();
+          if (!current()) return;
+          const frame = JSON.stringify({type: 'confirm_tools', tool_calls: snapshot});
+          if (new TextEncoder().encode(frame).length > (1 << 20) - 1024) throw new Error('confirmation batch is too large');
+          ws.send(frame);
+          const t = records[0].ownerTurn;this.turn = t;t.done = false;t.cancelled = false;t.acceptNextRun = true;t.confirmingTool = true;
+          for (const rec of records) {
+            rec.confirmSent = true;this.setToolStatus(rec, 'running', t);
+            rec.lastEvent = Object.assign({}, rec.lastEvent, {tool_summary: T('confirmed_running')});
+            this.renderToolRecord(rec, rec.lastEvent, t);
+          }
+          this.setActive(true);this.updateProcess(t);
+        } catch {
+          g.error = T('confirmation_send_failed');
+        } finally {
+          if (this.confirmationBusy === g) this.confirmationBusy = null;
+          records.forEach(rec => {rec.confirmPending = false;});this.syncChatControls();
+        }
       },
       anonymousToolQueueKey(ev, call) {
         const body = call && call.body !== undefined ? technicalText(call.body, 1200) : '';

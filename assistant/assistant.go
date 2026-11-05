@@ -172,6 +172,7 @@ func cloneModels(m ihtml.ChatModels) ihtml.ChatModels {
 	// Capability metadata comes from checked bridge configuration, never from a
 	// host's unverified model listing.
 	m.DeepApprovalResume = ""
+	m.BatchConfirmations = false
 	if m.PreviewOnly {
 		m.ModelReady = false
 	}
@@ -192,6 +193,7 @@ func (b *Backend) Models(ctx context.Context) (models ihtml.ChatModels, err erro
 	}
 	if b.cfg.Confirmation != nil {
 		models.DeepApprovalResume = "manual_tool_only"
+		models.BatchConfirmations = true
 		// 续办复用普通受管轮次；只声明能继续核对，不把本卡批准扩大到后续写操作。
 		if b.cfg.ContinueAfterTool != nil {
 			models.DeepApprovalResume = "managed_turn"
@@ -254,11 +256,12 @@ func (b *Backend) NewSession(ctx context.Context, sctx *ihtml.ChatSessionContext
 }
 
 type pendingTurn struct {
-	parent         context.Context
-	event          ihtml.ChatClientEvent
-	reject         bool
-	issuedApproval bool
-	continuation   bool
+	parent            context.Context
+	event             ihtml.ChatClientEvent
+	reject            bool
+	issuedApproval    bool
+	continuation      bool
+	batchIntermediate bool
 }
 
 type session struct {
@@ -341,6 +344,10 @@ func (s *session) HandleEvent(ctx context.Context, ev *ihtml.ChatClientEvent) {
 		s.mu.Unlock()
 		return
 	}
+	if s.backend.cfg.Confirmation != nil && ev.Type == ihtml.ChatClientConfirmTools {
+		s.handleToolBatchEvent(ctx, ev)
+		return
+	}
 	if s.backend.cfg.Confirmation != nil && (ev.Type == ihtml.ChatClientConfirmTool || ev.Type == ihtml.ChatClientCancelTool) {
 		s.handleToolEvent(ctx, ev)
 		return
@@ -415,6 +422,7 @@ func cleanClonedEvent(out ihtml.ChatClientEvent) ihtml.ChatClientEvent {
 		}
 	}
 	out.ToolCall, out.Inspect = nil, nil
+	out.ToolCalls = nil
 	out.InspectID = ""
 	return out
 }
@@ -457,6 +465,7 @@ func (s *session) loop() {
 			next, s.queue = s.queue[0], s.queue[1:]
 		}
 		ctx, cancelCause, finish := sessionExecution(s.ctx, next.parent)
+		ctx = context.WithValue(ctx, batchIntermediateContextKey{}, next.batchIntermediate)
 		cancel := func() { cancelCause(context.Canceled) }
 		s.active = func() { cancelCause(ErrTurnStopped) }
 		s.mu.Unlock()
