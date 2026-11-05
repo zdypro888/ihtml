@@ -55,6 +55,7 @@ type MemoryTaskControlStore struct {
 	rows map[string]TaskControlState
 }
 
+// NewMemoryTaskControlStore 创建独立的内存协调根，多个运行时可显式共享同一实例。
 func NewMemoryTaskControlStore() *MemoryTaskControlStore {
 	return &MemoryTaskControlStore{rows: map[string]TaskControlState{}}
 }
@@ -65,6 +66,8 @@ func cloneControl(s TaskControlState) TaskControlState {
 	}
 	return s
 }
+
+// LoadControl 返回副本，调用者不能绕过 CAS 修改代次或资源预留。
 func (s *MemoryTaskControlStore) LoadControl(ctx context.Context, key string) (TaskControlState, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -77,6 +80,8 @@ func (s *MemoryTaskControlStore) LoadControl(ctx context.Context, key string) (T
 	}
 	return cloneControl(row), nil
 }
+
+// CompareControl 原子创建或替换指定版本，失败不留下部分资源接纳。
 func (s *MemoryTaskControlStore) CompareControl(ctx context.Context, row TaskControlState, expected int64) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -147,26 +152,6 @@ func (r *TaskRuntime) scopeEpoch(ctx context.Context, scope string) (string, err
 	return row.Epoch, err
 }
 
-// BindContext 在规划开始或新的明确批准时冻结停止代次；后续后台/嵌套调用继承它。
-func (r *TaskRuntime) BindContext(ctx context.Context, scope string) (context.Context, error) {
-	if scope == "" || len(scope) > 256 || r.cfg.Scope != "" && r.cfg.Scope != scope {
-		return nil, ErrTaskNotFound
-	}
-	r.mu.Lock()
-	r.seenScopes[scope] = true
-	r.mu.Unlock()
-	// 新受管轮次显式取得当前代次，不沿用原提案/旧轮次的代次。
-	row, err := r.editControl(ctx, r.scopeControlKey(scope), func(row *TaskControlState) error {
-		if row.Epoch == "" {
-			row.Epoch = rand.Text()
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return context.WithValue(ctx, taskEpochKey{}, taskEpochContext{r.scopeControlKey(scope), row.Epoch}), nil
-}
 func (r *TaskRuntime) checkEpoch(ctx context.Context, scope, epoch string, commit bool) error {
 	if epoch == "" {
 		return ErrTaskStopped // 无代次历史只能查询或由用户明确重新继续，不能自动取得新执行资格。

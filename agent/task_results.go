@@ -70,6 +70,7 @@ type MemoryTaskResultStore struct {
 	records map[string]TaskResultRecord
 }
 
+// NewMemoryTaskResultStore 创建隔离的结果目录，供会话内宿主或协议测试复用。
 func NewMemoryTaskResultStore() *MemoryTaskResultStore {
 	return &MemoryTaskResultStore{records: map[string]TaskResultRecord{}}
 }
@@ -84,6 +85,7 @@ func TaskResultIdentity(record TaskResultRecord) string {
 	return taskHash([]any{record.Scope, record.TaskID, record.Digest, record.State, record.Error, record.Started, record.Size, record.SHA256, record.Encoding, record.Availability})
 }
 
+// PutResult 校验完整正文后不可变提交，重复写入只接受同一执行事实。
 func (s *MemoryTaskResultStore) PutResult(ctx context.Context, record TaskResultRecord) (TaskResultRecord, error) {
 	if err := ctx.Err(); err != nil {
 		return TaskResultRecord{}, err
@@ -107,6 +109,7 @@ func (s *MemoryTaskResultStore) PutResult(ctx context.Context, record TaskResult
 	return record, nil
 }
 
+// GetResult 只返回元数据，正文过期后仍可核对执行事实。
 func (s *MemoryTaskResultStore) GetResult(ctx context.Context, scope, id string) (TaskResultRecord, error) {
 	if err := ctx.Err(); err != nil {
 		return TaskResultRecord{}, err
@@ -121,6 +124,7 @@ func (s *MemoryTaskResultStore) GetResult(ctx context.Context, scope, id string)
 	return record, nil
 }
 
+// ReadResult 每次核对作用域、保留期和字节范围，不依赖后台清理及时运行。
 func (s *MemoryTaskResultStore) ReadResult(ctx context.Context, scope, id string, offset int64, limit int) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -144,6 +148,7 @@ func (s *MemoryTaskResultStore) ReadResult(ctx context.Context, scope, id string
 	return append([]byte(nil), record.Body[offset:end]...), nil
 }
 
+// CollectResults 分别回收正文和最终事实，避免正文失效被误当作调用从未执行。
 func (s *MemoryTaskResultStore) CollectResults(ctx context.Context, now time.Time) error {
 	if err := ctx.Err(); err != nil {
 		return err

@@ -373,6 +373,37 @@ func (s *session) HandleEvent(ctx context.Context, ev *ihtml.ChatClientEvent) {
 	if ev.Type == ihtml.ChatClientUserMessage {
 		s.restartTaskWakes(ctx)
 	}
+	eventScope := ""
+	if s.tasks != nil {
+		eventScope = s.tasks.Scope()
+		if eventScope == "" && s.backend.cfg.Confirmation != nil {
+			// 动态宿主的确认范围来自已签发提案，不从浏览器卡片字段推导权限。
+			calls := ev.ToolCalls
+			if ev.ToolCall != nil {
+				calls = []ihtml.ProposedToolCall{*ev.ToolCall}
+			}
+			s.pendingMu.Lock()
+			for _, call := range calls {
+				if item := s.pendingTools[call.ConfirmationNonce]; item != nil {
+					if eventScope != "" && eventScope != item.taskScope {
+						eventScope = ""
+						break
+					}
+					eventScope = item.taskScope
+				}
+			}
+			s.pendingMu.Unlock()
+		}
+	}
+	if eventScope != "" && (ev.Type == ihtml.ChatClientUserMessage || ev.Type == ihtml.ChatClientConfirmTool || ev.Type == ihtml.ChatClientConfirmTools || ev.Type == ihtml.ChatClientCancelTool) {
+		// 明确消息在接纳时冻结代次；远程停止后，旧队列不能在出队时取得新代次。
+		bound, err := s.tasks.BindContext(ctx, eventScope)
+		if err != nil {
+			_ = s.emit(ihtml.ChatStreamEvent{Type: ihtml.ChatStreamTurnError, Error: "当前指令未获持久接纳，请稍后重试。"})
+			return
+		}
+		ctx = bound
+	}
 	if s.runner != nil {
 		if ev.Type == ihtml.ChatClientCancel {
 			s.runner.Stop()
@@ -599,6 +630,32 @@ func (s *session) emit(ev ihtml.ChatStreamEvent) (err error) {
 
 func (s *session) run(ctx context.Context, cancel context.CancelFunc, ev *ihtml.ChatClientEvent) {
 	wake, waking := ctx.Value(taskWakeQueueKey{}).(taskWakeState)
+	watchedScope := ""
+	if s.tasks != nil && s.tasks.Scope() != "" {
+		// 固定作用域在模型元数据与宿主准备前即验证，关闭工具也不解除整轮停止约束。
+		var err error
+		if waking {
+			ctx, err = s.tasks.BindWaitContext(ctx, s.tasks.Scope(), wake.record.ID)
+		} else {
+			ctx, err = s.tasks.UseContext(ctx, s.tasks.Scope())
+		}
+		if err != nil {
+			if waking {
+				s.finishTaskWake(ev, false)
+			}
+			return
+		}
+		var release func()
+		ctx, release, err = s.tasks.WatchContext(ctx, s.tasks.Scope())
+		if err != nil {
+			if waking {
+				s.finishTaskWake(ev, false)
+			}
+			return
+		}
+		defer release()
+		watchedScope = s.tasks.Scope()
+	}
 	if waking {
 		s.mu.Lock()
 		stopped := s.taskWakeStopped
@@ -763,16 +820,26 @@ func (s *session) run(ctx context.Context, cancel context.CancelFunc, ev *ihtml.
 	if runErr != nil {
 		return
 	}
-	if len(req.Tools) > 0 && s.tasks != nil {
-		req.Tasks = s.tasks
+	if s.tasks != nil && watchedScope == "" {
+		// 动态作用域由可信宿主准备后确定；同样覆盖没有业务工具的受管模型轮次。
+		scope := agent.TaskScope(req)
 		if waking {
-			executionCtx, runErr = s.tasks.BindWaitContext(executionCtx, agent.TaskScope(req), wake.record.ID)
+			executionCtx, runErr = s.tasks.BindWaitContext(executionCtx, scope, wake.record.ID)
 		} else {
-			executionCtx, runErr = s.tasks.BindContext(executionCtx, agent.TaskScope(req))
+			executionCtx, runErr = s.tasks.UseContext(executionCtx, scope)
 		}
 		if runErr != nil {
 			return
 		}
+		var release func()
+		executionCtx, release, runErr = s.tasks.WatchContext(executionCtx, scope)
+		if runErr != nil {
+			return
+		}
+		defer release()
+	}
+	if len(req.Tools) > 0 && s.tasks != nil {
+		req.Tasks = s.tasks
 		s.mu.Lock()
 		req.AllowTaskSuspend = s.tasks.Scope() != "" && !s.taskWakeStopped
 		s.mu.Unlock()
