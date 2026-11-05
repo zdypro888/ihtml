@@ -95,6 +95,14 @@ func TaskFailureFrom(err error, execution string, admitted bool, receipt string,
 	}
 	var budget *TaskBudgetError
 	switch {
+	case errors.Is(err, ErrTaskEventClosed):
+		f.Code = "event_source_closed"
+	case errors.Is(err, ErrTaskContract):
+		f.Code = "contract_violation"
+	case errors.Is(err, ErrTaskStorageVersion), errors.Is(err, ErrTaskStorageConfiguration):
+		f.Code = "storage_protocol_error"
+	case errors.Is(err, ErrTaskDraining):
+		f.Code = "runtime_draining"
 	case errors.Is(err, ErrTaskStorageUnavailable):
 		f.Code = "storage_unavailable"
 		f.Message = "持久存储当前无法确认，请按原记录核对；不自动重放业务。"
@@ -200,26 +208,30 @@ func normalizedTaskFailure(f *TaskFailure) *TaskFailure {
 		return nil
 	}
 	messages := map[string]string{
-		"goal_budget_exhausted": "原目标累计额度或总期限已用完；已提交事实保留，不自动重执行业务。",
-		"model_quote_required":  "宿主未提供可靠的模型费用/token上界，受硬额度约束的调用未开始。",
-		"policy_conflict":       "共享资源策略版本不一致，需要宿主更新配置，不能由模型扩大额度。",
-		"budget_exhausted":      "当前共享资源不足，调用尚未受理。",
-		"capacity_exhausted":    "当前持久资源容量不足，新的登记尚未受理。",
-		"invalid_context":       "长期任务上下文不符合通用保存协议。",
-		"invalid_cursor":        "事件游标无效，请先读取当前授权源的游标事实。",
-		"scope_stopped":         "原指令所属代次已停止；新的执行须来自新的明确请求或批准。",
-		"wake_budget_exhausted": "当前目标自动恢复预算已用完，未完成事实仍保留。",
-		"record_unavailable":    "当前授权范围内无法取得该记录；这不证明原业务未执行。",
-		"revision_conflict":     "记录已并发更新；请读取当前版本后再判断。",
-		"result_expired":        "原结果正文已过保留期，执行事实仍须按原记录核对。",
-		"invalid_range":         "结果字节范围无效，请使用返回的游标和范围。",
-		"result_unavailable":    "结果正文当前不可用，请核对元数据与原执行事实。",
-		"deadline_exceeded":     "操作期限已到，请核对原回执，不据此重复提交业务。",
-		"cancelled":             "当前操作已停止，已发生的业务影响仍须核对。",
-		"execution_unknown":     "调用可能已执行但结果未确认；请核对原回执，不自动重放。",
-		"handler_failed":        "工具已返回失败，原业务状态请按回执判断。",
-		"operation_failed":      "操作未能完成；请核对当前状态和原回执。",
-		"storage_unavailable":   "持久存储当前无法确认，请按原记录核对；不自动重放业务。",
+		"event_source_closed":    "原事件源已关闭或归档；请读取源状态和后继元数据，不猜造新来源。",
+		"contract_violation":     "工具契约校验失败；请核对执行状态与原回执，不据此重执行业务。",
+		"storage_protocol_error": "持久组件装配或存储格式不兼容，运行时拒绝降级写入。",
+		"runtime_draining":       "运行时正在排空退出，未接纳新的执行。",
+		"goal_budget_exhausted":  "原目标累计额度或总期限已用完；已提交事实保留，不自动重执行业务。",
+		"model_quote_required":   "宿主未提供可靠的模型费用/token上界，受硬额度约束的调用未开始。",
+		"policy_conflict":        "共享资源策略版本不一致，需要宿主更新配置，不能由模型扩大额度。",
+		"budget_exhausted":       "当前共享资源不足，调用尚未受理。",
+		"capacity_exhausted":     "当前持久资源容量不足，新的登记尚未受理。",
+		"invalid_context":        "长期任务上下文不符合通用保存协议。",
+		"invalid_cursor":         "事件游标无效，请先读取当前授权源的游标事实。",
+		"scope_stopped":          "原指令所属代次已停止；新的执行须来自新的明确请求或批准。",
+		"wake_budget_exhausted":  "当前目标自动恢复预算已用完，未完成事实仍保留。",
+		"record_unavailable":     "当前授权范围内无法取得该记录；这不证明原业务未执行。",
+		"revision_conflict":      "记录已并发更新；请读取当前版本后再判断。",
+		"result_expired":         "原结果正文已过保留期，执行事实仍须按原记录核对。",
+		"invalid_range":          "结果字节范围无效，请使用返回的游标和范围。",
+		"result_unavailable":     "结果正文当前不可用，请核对元数据与原执行事实。",
+		"deadline_exceeded":      "操作期限已到，请核对原回执，不据此重复提交业务。",
+		"cancelled":              "当前操作已停止，已发生的业务影响仍须核对。",
+		"execution_unknown":      "调用可能已执行但结果未确认；请核对原回执，不自动重放。",
+		"handler_failed":         "工具已返回失败，原业务状态请按回执判断。",
+		"operation_failed":       "操作未能完成；请核对当前状态和原回执。",
+		"storage_unavailable":    "持久存储当前无法确认，请按原记录核对；不自动重放业务。",
 	}
 	message, ok := messages[out.Code]
 	if !ok {
@@ -286,7 +298,7 @@ func WrapTaskStorage(err error) error {
 	}
 	var budget *TaskBudgetError
 	var failure *TaskFailure
-	if errors.As(err, &budget) || errors.As(err, &failure) || errors.Is(err, ErrTaskWakeBudget) {
+	if errors.Is(err, ErrTaskEventClosed) || errors.Is(err, ErrTaskContract) || errors.Is(err, ErrTaskStorageVersion) || errors.Is(err, ErrTaskStorageConfiguration) || errors.Is(err, ErrTaskDraining) || errors.As(err, &budget) || errors.As(err, &failure) || errors.Is(err, ErrTaskWakeBudget) {
 		return err
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrTaskStorageUnavailable) || errors.Is(err, ErrTaskNotFound) || errors.Is(err, ErrTaskConflict) || errors.Is(err, ErrTaskPolicyConflict) || errors.Is(err, ErrTaskResultExpired) || errors.Is(err, ErrTaskResultRange) || errors.Is(err, ErrTaskResultUnavailable) || errors.Is(err, ErrTaskContextCapacity) || errors.Is(err, ErrTaskContextInvalid) || errors.Is(err, ErrTaskEventCapacity) || errors.Is(err, ErrTaskEventCursor) || errors.Is(err, ErrTaskStopped) {

@@ -15,7 +15,7 @@ import (
 const taskStartTool = "task_start"
 
 func taskKernelName(name string) bool {
-	return observationKernelName(name) || contextKernelName(name) || name == "task_result_file" || name == taskStartTool || name == "task_read" || name == "task_result" || name == "task_budget" || name == "task_wait" || name == "task_cancel" || name == "task_suspend" || name == "task_event_sources" || name == "task_event_read"
+	return observationKernelName(name) || contextKernelName(name) || name == "task_reconcile" || name == "task_result_file" || name == taskStartTool || name == "task_read" || name == "task_result" || name == "task_budget" || name == "task_wait" || name == "task_cancel" || name == "task_suspend" || name == "task_event_sources" || name == "task_event_read"
 }
 
 type taskStartInput struct {
@@ -87,6 +87,19 @@ func taskTools(req *ai.TurnRequest) ([]ai.Tool, error) {
 			}
 			return taskJSON(page)
 		}},
+		{Name: "task_reconcile", Effect: ai.ToolEffectRead, Description: "只读核对原调用的持久业务回执。不会重执行业务或覆盖未知事实；核对成功返回 resolution_ref 作为独立证据。仅支持当前获准且提供回执恢复能力的工具。", InputSchema: taskSchema(map[string]any{"id": map[string]any{"type": "string"}}, "id"), Handler: func(ctx context.Context, raw json.RawMessage) (string, error) {
+			var in struct {
+				ID string `json:"id"`
+			}
+			if err := decodeTaskInput(string(raw), &in); err != nil {
+				return "", err
+			}
+			info, err := req.Tasks.Reconcile(ctx, scope, in.ID, req.Tools)
+			if err != nil {
+				return "", err
+			}
+			return taskJSON(info)
+		}},
 		{Name: "task_budget", Effect: ai.ToolEffectRead, Description: "查询宿主为当前身份绑定的共享任务额度与剩余量。全局、租户、用户资源同时约束接纳和执行；剩余量是快照，不是预留。你决定并发、顺序、短等或挂起，不能修改额度。", InputSchema: taskSchema(map[string]any{}), Handler: func(ctx context.Context, raw json.RawMessage) (string, error) {
 			if err := decodeTaskInput(string(raw), &struct{}{}); err != nil {
 				return "", err
@@ -103,7 +116,7 @@ func taskTools(req *ai.TurnRequest) ([]ai.Tool, error) {
 			if err != nil {
 				return "", err
 			}
-			return taskJSON(map[string]any{"resources": rows, "goal": goal, "scheduling": scheduling})
+			return taskJSON(map[string]any{"resources": rows, "goal": goal, "scheduling": scheduling, "runtime": req.Tasks.Status()})
 		}},
 		{Name: taskStartTool, Effect: ai.ToolEffectUnknown, Completion: ai.ToolCompletionAsynchronous, Description: "将一个已发现的原工具调用放入受管后台执行，即使原接口同步也立即返回调用句柄。由你根据目标和依赖决定是否使用。仍走原工具的确认、权限和防重放；启动不代表调用或业务完成。arguments 必须符合原工具协议。", InputSchema: taskSchema(map[string]any{"tool": map[string]any{"type": "string"}, "arguments": map[string]any{"type": "object"}}, "tool", "arguments"), Handler: func(context.Context, json.RawMessage) (string, error) {
 			return "", errors.New("task dispatch middleware required")

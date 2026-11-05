@@ -313,6 +313,8 @@ type pendingTurn struct {
 }
 
 type session struct {
+	shutdownOnce       sync.Once
+	shutdownDone       chan struct{}
 	backend            *Backend
 	tasks              *agent.TaskRuntime
 	asyncConfirmations int
@@ -1196,4 +1198,19 @@ func (s *session) publicToolResult(ctx context.Context, tool agent.Tool, args js
 		view.Result = nil
 	}
 	return view
+}
+
+// Shutdown 在取消后有期限地等待宿主与工具退出；超时不伪称物理执行者已停止。
+func (s *session) Shutdown(ctx context.Context) error {
+	s.shutdownOnce.Do(func() {
+		s.shutdownDone = make(chan struct{})
+		s.cancel()
+		go func() { s.Close(); close(s.shutdownDone) }()
+	})
+	select {
+	case <-s.shutdownDone:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }

@@ -6,8 +6,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"github.com/go-openapi/jsonpointer"
+	"io"
 	"strings"
+
+	"github.com/go-openapi/jsonpointer"
 )
 
 // ToolContract 仅声明能力，不替 AI 选择并行、等待、重试或业务步骤。
@@ -59,32 +61,15 @@ func (r *TaskRuntime) ResolveResultInput(ctx context.Context, scope string, ref 
 	if len(ref.SHA256) != 64 || len(ref.Pointer) > 2048 {
 		return nil, ErrTaskConflict
 	}
-	body := make([]byte, 0)
-	for offset := int64(0); ; {
-		page, err := r.ReadResult(ctx, scope, ref.ID, offset, 64<<10, allowed)
-		if err != nil {
-			return nil, err
-		}
-		if page.Result.SHA256 != ref.SHA256 || page.Result.Encoding != "utf-8" {
-			return nil, ErrTaskConflict
-		}
-		body = append(body, []byte(page.Text)...)
-		if len(body) > r.cfg.MaxStoredResultBytes {
-			return nil, ErrTaskResultRange
-		}
-		if page.EOF {
-			break
-		}
-		offset = page.NextOffset
+	reader, err := r.OpenResultInput(ctx, scope, ref, allowed)
+	if err != nil {
+		return nil, err
 	}
-	if taskBodySHA(body) != ref.SHA256 {
-		return nil, ErrTaskResultUnavailable
-	}
+	defer reader.Close()
 	if ref.Pointer == "" {
-		return body, nil
+		return io.ReadAll(reader)
 	}
-	// JSON Pointer 仅选择已有数据，不执行表达式或模型代码。
-	return selectJSONPointer(body, ref.Pointer)
+	return selectJSONReader(reader, ref.Pointer)
 }
 
 var errResultPointer = errors.New("agent: invalid result pointer")

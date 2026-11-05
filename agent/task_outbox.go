@@ -9,17 +9,30 @@ import (
 // TaskOutboxEntry 是与业务事实原子提交的事件，不含重放业务 Handler 的能力。
 // ID 必须由业务提交身份稳定导出；同 ID 的事实不能改变，ACK 前不允许清除正文。
 type TaskOutboxEntry struct {
-	ID         string            `bson:"_id" json:"id"`
-	Scope      string            `bson:"scope" json:"-"`
-	SourceID   string            `bson:"sourceID" json:"source_id"`
-	Event      TaskExternalEvent `bson:"event" json:"event"`
-	Revision   int64             `bson:"revision" json:"-"`
-	Owner      string            `bson:"owner" json:"-"`
-	LeaseUntil time.Time         `bson:"leaseUntil" json:"-"`
-	RetryAt    time.Time         `bson:"retryAt" json:"-"`
-	Delivered  bool              `bson:"delivered" json:"delivered"`
-	CreatedAt  time.Time         `bson:"createdAt" json:"created_at"`
-	ExpiresAt  time.Time         `bson:"expiresAt" json:"expires_at"`
+	TraceParent    string            `bson:"traceparent,omitempty" json:"-"`
+	TraceState     string            `bson:"tracestate,omitempty" json:"-"`
+	StorageVersion int               `bson:"storageVersion,omitempty" json:"-"`
+	Attempts       int               `bson:"attempts" json:"attempts"`
+	FailureCode    string            `bson:"failureCode,omitempty" json:"failure_code,omitempty"`
+	Dead           bool              `bson:"dead" json:"dead"`
+	Route          int               `bson:"-" json:"-"`
+	ID             string            `bson:"_id" json:"id"`
+	Scope          string            `bson:"scope" json:"-"`
+	SourceID       string            `bson:"sourceID" json:"source_id"`
+	Event          TaskExternalEvent `bson:"event" json:"event"`
+	Revision       int64             `bson:"revision" json:"-"`
+	Owner          string            `bson:"owner" json:"-"`
+	LeaseUntil     time.Time         `bson:"leaseUntil" json:"-"`
+	RetryAt        time.Time         `bson:"retryAt" json:"-"`
+	Delivered      bool              `bson:"delivered" json:"delivered"`
+	CreatedAt      time.Time         `bson:"createdAt" json:"created_at"`
+	ExpiresAt      time.Time         `bson:"expiresAt" json:"expires_at"`
+}
+
+// WithTrace 由可信提交者关联 W3C 追踪，不携带 baggage 或改变原事件事实。
+func (e TaskOutboxEntry) WithTrace(ctx context.Context) TaskOutboxEntry {
+	e.TraceParent, e.TraceState = captureTrace(ctx)
+	return e
 }
 
 // TaskOutboxStore 只负责租约投递。写入必须由宿主在原业务事务/同文档更新完成，不能分开双写。
@@ -41,7 +54,7 @@ func NewTaskOutboxEntry(scope, source, id, kind string, payload json.RawMessage,
 	if err != nil {
 		return TaskOutboxEntry{}, err
 	}
-	return TaskOutboxEntry{ID: taskHash([]string{scope, source, id}), Scope: scope, SourceID: source, Event: TaskExternalEvent{Key: id, Type: kind, Payload: body, OccurredAt: now}, Revision: 1, CreatedAt: now, ExpiresAt: now.Add(retention)}, nil
+	return TaskOutboxEntry{StorageVersion: TaskStorageVersion, ID: taskHash([]string{scope, source, id}), Scope: scope, SourceID: source, Event: TaskExternalEvent{Key: id, Type: kind, Payload: body, OccurredAt: now}, Revision: 1, CreatedAt: now, ExpiresAt: now.Add(retention)}, nil
 }
 
 // DeliverTaskOutbox 每次最多投递一项。发布成功但 ACK 丢失时只重发同一事件键，不调用业务。
@@ -53,13 +66,21 @@ func DeliverTaskOutbox(ctx context.Context, store TaskOutboxStore, publisher Tas
 	if err != nil || !ok {
 		return false, err
 	}
+	ctx, span := RuntimeSpan(restoreTrace(ctx, entry.TraceParent, entry.TraceState), "agent.outbox.deliver")
+	defer span.End()
+	if err := TaskProtocolVersion(entry.StorageVersion); err != nil {
+		return true, err
+	}
 	if !entry.ExpiresAt.After(time.Now()) {
+		if err := failTaskDelivery(ctx, store, entry, ErrTaskResultExpired); err != nil {
+			return true, err
+		}
 		return true, ErrTaskResultExpired
 	}
 	_, err = publisher.Publish(ctx, entry.Scope, entry.SourceID, entry.Event)
 	if err != nil {
 		// 重试的是已提交事实的投递；不因来源暂不可用而重新执行业务。
-		if retryErr := store.RetryOutbox(ctx, entry, time.Now().UTC().Add(time.Second)); retryErr != nil {
+		if retryErr := failTaskDelivery(ctx, store, entry, err); retryErr != nil {
 			return true, retryErr
 		}
 		return true, err

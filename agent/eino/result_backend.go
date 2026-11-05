@@ -1,9 +1,12 @@
 package einoengine
 
 import (
+	"bufio"
 	"context"
 	"encoding/hex"
+	"io"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/cloudwego/eino/adk/filesystem"
 	ai "github.com/zdypro888/ihtml/agent"
@@ -31,24 +34,42 @@ func (b *ResultBackend) Read(ctx context.Context, req *filesystem.ReadRequest) (
 	if _, err := hex.DecodeString(parts[3]); err != nil {
 		return nil, ai.ErrTaskNotFound
 	}
-	body, err := b.Runtime.ResolveResultInput(ctx, b.Scope, ai.TaskResultInput{ID: parts[2], SHA256: parts[3]}, b.Allowed)
+	reader, err := b.Runtime.OpenResultInput(ctx, b.Scope, ai.TaskResultInput{ID: parts[2], SHA256: parts[3]}, b.Allowed)
 	if err != nil {
 		return nil, err
 	}
-	lines := strings.Split(string(body), "\n")
-	offset := max(1, req.Offset) - 1
-	if offset > len(lines) || req.Limit < 0 {
+	defer reader.Close()
+	if req.Limit < 0 {
 		return nil, ai.ErrTaskResultRange
 	}
-	end := len(lines)
-	if req.Limit > 0 {
-		end = min(end, offset+req.Limit)
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 4096), 64<<10)
+	start := max(1, req.Offset)
+	count := 0
+	var result strings.Builder
+	for line := 1; scanner.Scan(); line++ {
+		if !utf8.Valid(scanner.Bytes()) {
+			return nil, ai.ErrTaskResultUnavailable
+		}
+		if line < start {
+			continue
+		}
+		if count > 0 {
+			result.WriteByte('\n')
+		}
+		result.Write(scanner.Bytes())
+		count++
+		if result.Len() > 64<<10 {
+			return nil, ai.ErrTaskResultRange
+		}
+		if req.Limit > 0 && count >= req.Limit {
+			break
+		}
 	}
-	content := strings.Join(lines[offset:end], "\n")
-	if len(content) > 64<<10 {
-		return nil, ai.ErrTaskResultRange
+	if err := scanner.Err(); err != nil && err != io.EOF {
+		return nil, err
 	}
-	return &filesystem.FileContent{Content: content}, nil
+	return &filesystem.FileContent{Content: result.String()}, nil
 }
 
 // 其余操作显式拒绝；目录枚举仍使用原有带游标 task_read，不能静默返回不完整清单。

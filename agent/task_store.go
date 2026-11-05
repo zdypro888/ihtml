@@ -17,6 +17,7 @@ var ErrTaskWakeBudget = errors.New("agent: task wake budget exhausted")
 // TaskRecord 是持久调用账本；参数只存于宿主受控存储，不向浏览器或任务列表透传。
 // Revision 与 Owner/LeaseUntil 形成 fencing，失去租约的执行器不能覆盖恢复后的状态。
 type TaskRecord struct {
+	StorageVersion  int       `bson:"storageVersion,omitempty" json:"storage_version,omitempty"`
 	Epoch           string    `bson:"epoch,omitempty"`
 	ID              string    `bson:"_id"`
 	Scope           string    `bson:"scope"`
@@ -52,6 +53,10 @@ type TaskWaitSpec struct {
 
 // TaskWaitRecord 保存条件、交付租约与处理状态；delivered 不表示原业务全部完成。
 type TaskWaitRecord struct {
+	// TraceParent/TraceState 只保存 W3C 追踪头，不保存 baggage 或业务上下文。
+	TraceParent    string             `bson:"traceparent,omitempty" json:"-"`
+	TraceState     string             `bson:"tracestate,omitempty" json:"-"`
+	StorageVersion int                `bson:"storageVersion,omitempty" json:"storage_version,omitempty"`
 	Goal           TaskGoalBinding    `bson:"goal,omitempty" json:"-"`
 	ContextMatches []TaskContextMatch `bson:"contextMatches,omitempty" json:"context_matches,omitempty"`
 	TraceID        string             `bson:"traceID,omitempty" json:"trace_id,omitempty"`
@@ -116,6 +121,10 @@ func NewMemoryTaskStore() *MemoryTaskStore {
 	return &MemoryTaskStore{observations: NewMemoryTaskObservationStore(), control: NewMemoryTaskControlStore(), results: NewMemoryTaskResultStore(), contexts: NewMemoryTaskContextStore(), tasks: map[string]TaskRecord{}, waits: map[string]TaskWaitRecord{}}
 }
 func cloneTaskRecord(r TaskRecord) TaskRecord {
+	if r.Info.ResolutionRef != nil {
+		ref := *r.Info.ResolutionRef
+		r.Info.ResolutionRef = &ref
+	}
 	r.Info.Failure = cloneTaskFailure(r.Info.Failure)
 	r.Args = append([]byte(nil), r.Args...)
 	r.Info.Input = append([]byte(nil), r.Info.Input...)
@@ -139,6 +148,10 @@ func cloneWaitRecord(r TaskWaitRecord) TaskWaitRecord {
 
 // CreateTask 原子绑定调用键与参数指纹，重复受理不创建第二个执行者。
 func (s *MemoryTaskStore) CreateTask(ctx context.Context, r TaskRecord) (TaskRecord, bool, error) {
+	if err := TaskProtocolVersion(r.StorageVersion); err != nil {
+		return TaskRecord{}, false, err
+	}
+	r.StorageVersion = TaskStorageVersion
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -187,6 +200,10 @@ func (s *MemoryTaskStore) FindTask(ctx context.Context, scope, key string) (Task
 
 // ReplaceTask 同时核对版本与调用身份，拒绝过期执行者覆盖恢复后的状态。
 func (s *MemoryTaskStore) ReplaceTask(ctx context.Context, r TaskRecord, revision int64) (bool, error) {
+	if err := TaskProtocolVersion(r.StorageVersion); err != nil {
+		return false, err
+	}
+	r.StorageVersion = TaskStorageVersion
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -228,6 +245,10 @@ func (s *MemoryTaskStore) ListTasks(ctx context.Context, scope string, query Tas
 
 // CreateWait 原子保存等待条件，相同登记只能取回原记录。
 func (s *MemoryTaskStore) CreateWait(ctx context.Context, r TaskWaitRecord) (TaskWaitRecord, bool, error) {
+	if err := TaskProtocolVersion(r.StorageVersion); err != nil {
+		return TaskWaitRecord{}, false, err
+	}
+	r.StorageVersion = TaskStorageVersion
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -247,6 +268,10 @@ func (s *MemoryTaskStore) CreateWait(ctx context.Context, r TaskWaitRecord) (Tas
 
 // ReplaceWait 用 CAS 串行化交付租约、确认与取消，不依赖进程内锁。
 func (s *MemoryTaskStore) ReplaceWait(ctx context.Context, r TaskWaitRecord, revision int64) (bool, error) {
+	if err := TaskProtocolVersion(r.StorageVersion); err != nil {
+		return false, err
+	}
+	r.StorageVersion = TaskStorageVersion
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := ctx.Err(); err != nil {

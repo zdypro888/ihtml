@@ -42,16 +42,18 @@ type TaskExternalEvent struct {
 // TaskEventSource 由可信宿主创建；Key仅用于宿主幂等，模型不能指定其他租户或发布者。
 // Records保留去重指纹至源到期，正文可更早回收；满额必须拒绝，不能静默覆盖未读取事件。
 type TaskEventSource struct {
-	ID        string              `json:"id" bson:"_id"`
-	Scope     string              `json:"-" bson:"scope"`
-	Key       string              `json:"-" bson:"key"`
-	Label     string              `json:"label" bson:"label"`
-	Revision  int64               `json:"-" bson:"revision"`
-	Capacity  int                 `json:"capacity" bson:"capacity"`
-	Head      uint64              `json:"head" bson:"head"`
-	CreatedAt time.Time           `json:"created_at" bson:"createdAt"`
-	ExpiresAt time.Time           `json:"expires_at" bson:"expiresAt"`
-	Records   []TaskExternalEvent `json:"-" bson:"records"`
+	State       string              `json:"state,omitempty" bson:"state,omitempty"`
+	SuccessorID string              `json:"successor_id,omitempty" bson:"successorID,omitempty"`
+	ID          string              `json:"id" bson:"_id"`
+	Scope       string              `json:"-" bson:"scope"`
+	Key         string              `json:"-" bson:"key"`
+	Label       string              `json:"label" bson:"label"`
+	Revision    int64               `json:"-" bson:"revision"`
+	Capacity    int                 `json:"capacity" bson:"capacity"`
+	Head        uint64              `json:"head" bson:"head"`
+	CreatedAt   time.Time           `json:"created_at" bson:"createdAt"`
+	ExpiresAt   time.Time           `json:"expires_at" bson:"expiresAt"`
+	Records     []TaskExternalEvent `json:"-" bson:"records"`
 }
 
 // TaskEventStore按(scope,key)原子创建源，按revision原子追加；同一源序号与去重在一次CAS中提交。
@@ -75,9 +77,10 @@ type TaskEventPage struct {
 
 // TaskEventMatch固定触发等待的事件序号；重投不能换成后来另一条事实。
 type TaskEventMatch struct {
-	SourceID string `json:"source_id" bson:"sourceID"`
-	Seq      uint64 `json:"seq,omitempty" bson:"seq,omitempty"`
-	State    string `json:"state" bson:"state"`
+	SuccessorID string `json:"successor_id,omitempty" bson:"successorID,omitempty"`
+	SourceID    string `json:"source_id" bson:"sourceID"`
+	Seq         uint64 `json:"seq,omitempty" bson:"seq,omitempty"`
+	State       string `json:"state" bson:"state"`
 }
 
 // MemoryTaskEventStore用于内存宿主/协议测试，多个运行时可共享同一实例。
@@ -173,7 +176,7 @@ func (s *MemoryTaskEventStore) ReplaceEventSource(ctx context.Context, row TaskE
 	if !ok || old.Scope != row.Scope || old.Revision != revision || !old.ExpiresAt.After(time.Now()) {
 		return false, nil
 	}
-	if row.Key != old.Key || row.Label != old.Label || row.Capacity != old.Capacity || !row.CreatedAt.Equal(old.CreatedAt) || !row.ExpiresAt.Equal(old.ExpiresAt) || row.Revision != revision+1 {
+	if row.Key != old.Key || row.Label != old.Label || row.Capacity != old.Capacity || !row.CreatedAt.Equal(old.CreatedAt) || row.ExpiresAt.Before(old.ExpiresAt) || row.Revision != revision+1 {
 		return false, ErrTaskConflict
 	}
 	s.sources[row.ID] = cloneEventSource(row)
@@ -304,6 +307,9 @@ func (p TaskEventPublisher) Publish(ctx context.Context, scope, id string, event
 				}
 				return prior, nil
 			}
+		}
+		if sourceIsClosed(source) {
+			return TaskExternalEvent{}, ErrTaskEventClosed
 		}
 		capacity := source.Capacity
 		if capacity < 1 || capacity > p.MaxRecords {

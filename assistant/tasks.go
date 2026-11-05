@@ -87,20 +87,16 @@ func (s *session) scheduleConfirmedTask(ctx context.Context, event *ihtml.ChatCl
 		// 资源拒绝发生在验签消费与业务执行前，恢复原卡可重试状态，不改成同步执行。
 		s.runConfirmedTool(ctx, func() {}, &copied, true)
 	} else {
-		done, doneErr := s.tasks.Done(item.taskScope, info.ID, map[string]bool{tool.Name: true})
-		if doneErr != nil {
-			finish()
-		} else {
-			s.confirmationTasks.Add(1)
-			go func() {
-				defer s.confirmationTasks.Done()
-				<-done
-				// 未进入 Handler 的取消/排队超时不会消费 nonce；释放预留，允许用户重新批准原卡。
-				// 已消费的卡已从 pendingTools 移除，此处不改变原防重放边界。
+		s.confirmationTasks.Add(1)
+		go func() {
+			defer s.confirmationTasks.Done()
+			_, waitErr := s.tasks.AwaitResult(s.ctx, item.taskScope, info.ID, map[string]bool{tool.Name: true})
+			// 存储失联不证明尚未开始；只在确知终态后释放原卡排队标记，防止误导再次批准。
+			if waitErr == nil {
 				s.releaseQueued(card)
-				finish()
-			}()
-		}
+			}
+			finish()
+		}()
 	}
 	return true
 }

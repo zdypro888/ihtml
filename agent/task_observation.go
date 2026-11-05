@@ -32,6 +32,8 @@ type TaskObservation struct {
 	State          string    `json:"state,omitempty" bson:"state,omitempty"`
 	Code           string    `json:"code,omitempty" bson:"code,omitempty"`
 	Revision       int64     `json:"revision,omitempty" bson:"revision,omitempty"`
+	InputTokens    int64     `json:"input_tokens,omitempty" bson:"inputTokens,omitempty"`
+	OutputTokens   int64     `json:"output_tokens,omitempty" bson:"outputTokens,omitempty"`
 	DurationMS     int64     `json:"duration_ms,omitempty" bson:"durationMS,omitempty"`
 	At             time.Time `json:"at" bson:"at"`
 	ExpiresAt      time.Time `json:"expires_at" bson:"expiresAt"`
@@ -159,7 +161,7 @@ func safeObservationValue(value string, limit int) bool {
 
 // ValidateTaskObservation 仅允许有界关联字段和枚举式状态，原始业务文本不能进入观测目录。
 func ValidateTaskObservation(row TaskObservation) error {
-	if row.Scope == "" || len(row.Scope) > 256 || row.ID == "" || !safeObservationValue(row.ID, 128) || !safeObservationValue(row.TraceID, 128) || row.Kind == "" || !safeObservationValue(row.Kind, 64) || !safeObservationValue(row.State, 64) || !safeObservationValue(row.Code, 64) || row.Revision < 0 || row.DurationMS < 0 || row.At.IsZero() || !row.ExpiresAt.After(row.At) {
+	if row.Scope == "" || len(row.Scope) > 256 || row.ID == "" || !safeObservationValue(row.ID, 128) || !safeObservationValue(row.TraceID, 128) || row.Kind == "" || !safeObservationValue(row.Kind, 64) || !safeObservationValue(row.State, 64) || !safeObservationValue(row.Code, 64) || row.Revision < 0 || row.DurationMS < 0 || row.InputTokens < 0 || row.OutputTokens < 0 || row.At.IsZero() || !row.ExpiresAt.After(row.At) {
 		return ErrTaskConflict
 	}
 	for _, value := range []string{row.TaskID, row.ParentID, row.InvocationID, row.TurnID, row.WaitID, row.WakeID, row.ContextID, row.SourceID, row.SubscriptionID, row.EventID, row.Tool} {
@@ -275,6 +277,7 @@ func (r *TaskRuntime) RecordObservation(ctx context.Context, scope string, row T
 		r.observer.dropped.Add(1)
 		return err
 	}
+	observeTelemetry(ctx, row)
 	o := r.observer
 	o.mu.Lock()
 	defer o.mu.Unlock()

@@ -38,11 +38,12 @@ type TaskBudgetLease struct {
 // TaskControlState 用同一 CAS 协议保存独立的停止代次文档和共享预算池文档。
 // 停止代次不可重置为旧值；预算租约到期可以回收，不能把失联执行者重新接纳为原执行者。
 type TaskControlState struct {
-	Key       string            `bson:"_id"`
-	Revision  int64             `bson:"revision"`
-	Epoch     string            `bson:"epoch,omitempty"`
-	Leases    []TaskBudgetLease `bson:"leases,omitempty"`
-	UpdatedAt time.Time         `bson:"updatedAt"`
+	StorageVersion int               `bson:"storageVersion,omitempty" json:"storage_version,omitempty"`
+	Key            string            `bson:"_id"`
+	Revision       int64             `bson:"revision"`
+	Epoch          string            `bson:"epoch,omitempty"`
+	Leases         []TaskBudgetLease `bson:"leases,omitempty"`
+	UpdatedAt      time.Time         `bson:"updatedAt"`
 	// Payload 供通用协调协议保存有界状态，不允许模型直接读写。
 	Payload   []byte    `bson:"payload,omitempty"`
 	ExpiresAt time.Time `bson:"expiresAt,omitempty"`
@@ -92,6 +93,10 @@ func (s *MemoryTaskControlStore) LoadControl(ctx context.Context, key string) (T
 
 // CompareControl 原子创建或替换指定版本，失败不留下部分资源接纳。
 func (s *MemoryTaskControlStore) CompareControl(ctx context.Context, row TaskControlState, expected int64) (bool, error) {
+	if err := TaskProtocolVersion(row.StorageVersion); err != nil {
+		return false, err
+	}
+	row.StorageVersion = TaskStorageVersion
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -126,6 +131,10 @@ func (r *TaskRuntime) editControl(ctx context.Context, key string, change func(*
 		} else if err != nil {
 			return row, WrapTaskStorage(err)
 		}
+		if err := TaskProtocolVersion(row.StorageVersion); err != nil {
+			return row, err
+		}
+		row.StorageVersion = TaskStorageVersion
 		revision := row.Revision
 		if err = change(&row); err != nil {
 			return row, WrapTaskStorage(err)
@@ -269,6 +278,13 @@ func (r *TaskRuntime) acquireBudget(ctx context.Context, scope, epoch, id, kind 
 		if err := r.configureQoS(row); err != nil {
 			return err
 		}
+		if kind == "wait" {
+			for _, active := range row.Leases {
+				if active.Running && claimsConflict(claims, active.Claims) {
+					return &TaskBudgetError{Kind: "resource_busy", RetryAfterMS: r.cfg.PollInterval.Milliseconds()}
+				}
+			}
+		}
 		resources := make([]string, 0, len(r.cfg.Budgets))
 		for _, limit := range r.cfg.Budgets {
 			a, _, w := budgetCounts(*row, limit.Key)
@@ -378,6 +394,7 @@ func (r *TaskRuntime) BindWaitContext(ctx context.Context, scope, id string) (co
 	if wait.TraceID != "" {
 		ctx = context.WithValue(ctx, taskTraceContextKey{}, wait.TraceID)
 	}
+	ctx = restoreWaitTrace(ctx, wait)
 	if wait.Goal.ID != "" {
 		if wait.Goal.Scope != r.scopeControlKey(scope) || !wait.Goal.Deadline.After(time.Now()) {
 			return nil, &TaskBudgetError{Kind: "goal_deadline"}

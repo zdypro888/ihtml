@@ -9,6 +9,11 @@ import (
 
 // Suspend 保存 AI 主动声明的等待条件。该记录本身不包含新的业务授权。
 func (r *TaskRuntime) Suspend(ctx context.Context, scope, turn, key string, spec TaskWaitSpec, allowed map[string]bool) (TaskWaitRecord, error) {
+	leave, admissionErr := r.enterAdmission()
+	if admissionErr != nil {
+		return TaskWaitRecord{}, admissionErr
+	}
+	defer leave()
 	if TaskWakeDepth(ctx) >= r.cfg.MaxWakeDepth {
 		return TaskWaitRecord{}, ErrTaskWakeBudget
 	}
@@ -67,7 +72,7 @@ func (r *TaskRuntime) Suspend(ctx context.Context, scope, turn, key string, spec
 		}
 	}
 	// 事件注册原子去重；同一工具调用改变条件不能复用旧注册。
-	record := TaskWaitRecord{ID: rand.Text(), Scope: scope, Turn: turn, Key: taskHash([]string{scope, turn, key}), Digest: taskHash([]any{requested.IDs, requested.Events, requested.All, requested.Timeout, requested.Deadline, requested.Checkpoint, requested.Contexts}), Spec: spec, State: "waiting", Depth: TaskWakeDepth(ctx) + 1, Revision: 1, CreatedAt: time.Now().UTC(), ExpiresAt: spec.Deadline.Add(r.cfg.LedgerRetention)}
+	record := TaskWaitRecord{StorageVersion: TaskStorageVersion, ID: rand.Text(), Scope: scope, Turn: turn, Key: taskHash([]string{scope, turn, key}), Digest: taskHash([]any{requested.IDs, requested.Events, requested.All, requested.Timeout, requested.Deadline, requested.Checkpoint, requested.Contexts}), Spec: spec, State: "waiting", Depth: TaskWakeDepth(ctx) + 1, Revision: 1, CreatedAt: time.Now().UTC(), ExpiresAt: spec.Deadline.Add(r.cfg.LedgerRetention)}
 	var goalErr error
 	ctx, goalErr = r.newGoal(ctx, scope, taskHash([]string{scope, turn, epoch}))
 	if goalErr != nil {
@@ -76,6 +81,7 @@ func (r *TaskRuntime) Suspend(ctx context.Context, scope, turn, key string, spec
 	record.Goal = goalBinding(ctx)
 	record.Epoch = epoch
 	record.TraceID = TaskTraceID(ctx)
+	captureWaitTrace(ctx, &record)
 	if prior, err := r.cfg.Store.FindWait(ctx, scope, record.Key); err == nil {
 		if prior.Digest != record.Digest {
 			return prior, ErrTaskConflict
@@ -85,8 +91,22 @@ func (r *TaskRuntime) Suspend(ctx context.Context, scope, turn, key string, spec
 		return TaskWaitRecord{}, err
 	}
 	// 未交付的到期事件仍占等待额度；只有终态释放或账本保留期结束才可回收。
-	if err = r.acquireBudget(ctx, scope, epoch, record.ID, "wait", record.ExpiresAt); err != nil {
+	claims := make([]TaskResourceRequest, 0, len(spec.Events))
+	for _, c := range spec.Events {
+		claims = append(claims, TaskResourceRequest{Key: "event-source/" + taskHash([]string{r.cfg.ControlNamespace, scope, c.SourceID}), Shared: true})
+	}
+	if err = r.acquireBudget(ctx, scope, epoch, record.ID, "wait", record.ExpiresAt, claims...); err != nil {
 		return TaskWaitRecord{}, err
+	}
+	for _, c := range spec.Events {
+		source, e := r.cfg.Events.GetEventSource(ctx, scope, c.SourceID)
+		if e != nil || source.State == "archived" || source.State == "archiving" {
+			r.releaseBudget(record.ID)
+			if e != nil {
+				return TaskWaitRecord{}, e
+			}
+			return TaskWaitRecord{}, ErrTaskEventClosed
+		}
 	}
 	old, created, err := r.cfg.Store.CreateWait(ctx, record)
 	if err != nil || !created {
@@ -122,6 +142,9 @@ func (r *TaskRuntime) ClaimWake(ctx context.Context, scope, consumer string) (*T
 			return nil, err
 		}
 		for _, w := range rows {
+			if err := TaskProtocolVersion(w.StorageVersion); err != nil {
+				return nil, err
+			}
 			if err := r.checkEpoch(ctx, scope, w.Epoch, false); err != nil {
 				if !errors.Is(err, ErrTaskStopped) {
 					return nil, err
@@ -191,6 +214,13 @@ func (r *TaskRuntime) ClaimWake(ctx context.Context, scope, consumer string) (*T
 							break
 						}
 					}
+					if len(matches) == 0 || matches[len(matches)-1].SourceID != source.ID {
+						if sourceIsClosed(source) {
+							matches = append(matches, TaskEventMatch{SourceID: source.ID, State: "source_closed", SuccessorID: source.SuccessorID})
+							finished++
+							reason = "event_source_closed"
+						}
+					}
 				}
 				ready = finished == len(w.Spec.IDs)+len(w.Spec.Events) || !w.Spec.All && finished > 0
 			}
@@ -208,12 +238,16 @@ func (r *TaskRuntime) ClaimWake(ctx context.Context, scope, consumer string) (*T
 			w.EventMatches = matches
 			w.LeaseUntil = now.Add(r.cfg.LeaseDuration)
 			w.Revision++
-			ok, e := r.cfg.Store.ReplaceWait(ctx, w, rev)
+			claimCtx, span := RuntimeSpan(restoreWaitTrace(ctx, w), "agent.wait.claim")
+			ok, e := r.cfg.Store.ReplaceWait(claimCtx, w, rev)
+			if ok {
+				r.observeWait(claimCtx, w, "wake_claimed", "")
+			}
+			span.End()
 			if e != nil {
 				return nil, e
 			}
 			if ok {
-				r.observeWait(ctx, w, "wake_claimed", "")
 				return &w, nil
 			}
 		}

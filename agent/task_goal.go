@@ -120,7 +120,24 @@ func (r *TaskRuntime) editGoal(ctx context.Context, change func(*TaskGoalView) e
 
 // GoalBudget 查询同一可信目标的累计保守预留，恢复不会产生新的额度。
 func (r *TaskRuntime) GoalBudget(ctx context.Context) (TaskGoalView, error) {
-	return r.editGoal(ctx, func(*TaskGoalView) error { return nil })
+	b := goalBinding(ctx)
+	if b.ID == "" || !b.Deadline.After(time.Now()) {
+		return TaskGoalView{}, &TaskBudgetError{Kind: "goal_deadline"}
+	}
+	query, stop := context.WithTimeout(ctx, 5*time.Second)
+	defer stop()
+	row, err := r.cfg.ControlStore.LoadControl(query, "goal/"+taskHash([]string{r.cfg.ControlNamespace, b.Scope, b.ID}))
+	if err != nil {
+		return TaskGoalView{}, WrapTaskStorage(err)
+	}
+	if err = TaskProtocolVersion(row.StorageVersion); err != nil {
+		return TaskGoalView{}, err
+	}
+	var view TaskGoalView
+	if json.Unmarshal(row.Payload, &view) != nil || view.Binding.ID != b.ID || view.Binding.Scope != b.Scope || !view.Binding.Deadline.Equal(b.Deadline) {
+		return view, ErrTaskConflict
+	}
+	return view, nil
 }
 
 // ChargeGoal 在实际调用前原子扣减；存储失败或无可靠报价时拒绝受约束的调用。

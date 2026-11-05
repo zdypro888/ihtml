@@ -39,6 +39,8 @@ type BackgroundBackend struct {
 	closed      bool
 	done        chan struct{}
 	restoreDone chan struct{}
+	closeOnce   sync.Once
+	closeDone   chan struct{}
 }
 
 type backgroundSession struct {
@@ -87,7 +89,7 @@ func NewBackgroundBackend(cfg BackgroundConfig) (*BackgroundBackend, error) {
 		return nil, errors.New("assistant: invalid background retention settings")
 	}
 	ctx, cancel := context.WithCancel(cfg.Lifetime)
-	b := &BackgroundBackend{cfg: cfg, ctx: ctx, cancel: cancel, sessions: map[string]*backgroundSession{}, done: make(chan struct{})}
+	b := &BackgroundBackend{cfg: cfg, ctx: ctx, cancel: cancel, sessions: map[string]*backgroundSession{}, done: make(chan struct{}), closeDone: make(chan struct{})}
 	go b.sweep()
 	if cfg.RestoreSessions != nil {
 		b.restoreDone = make(chan struct{})
@@ -372,22 +374,39 @@ func (e *backgroundSession) close() {
 
 // Close 是宿主服务退出，才取消所有后台会话并等待已有执行器真实收尾。
 func (b *BackgroundBackend) Close() {
-	b.cancel()
-	<-b.done
-	if b.restoreDone != nil {
-		<-b.restoreDone
-	}
-	b.mu.Lock()
-	if b.closed {
+	_ = b.Shutdown(context.Background())
+}
+
+// Shutdown 一次性取消全部后台会话，有界等待真实收尾；一个不合作会话不能延迟其他会话收到取消。
+func (b *BackgroundBackend) Shutdown(ctx context.Context) error {
+	b.closeOnce.Do(func() {
+		b.cancel()
+		b.mu.Lock()
+		b.closed = true
+		entries := b.sessions
+		b.sessions = map[string]*backgroundSession{}
 		b.mu.Unlock()
-		return
-	}
-	b.closed = true
-	entries := b.sessions
-	b.sessions = map[string]*backgroundSession{}
-	b.mu.Unlock()
-	for _, e := range entries {
-		e.close()
+		for _, e := range entries {
+			e.cancel()
+		}
+		go func() {
+			var wg sync.WaitGroup
+			for _, e := range entries {
+				wg.Go(e.close)
+			}
+			wg.Wait()
+			<-b.done
+			if b.restoreDone != nil {
+				<-b.restoreDone
+			}
+			close(b.closeDone)
+		}()
+	})
+	select {
+	case <-b.closeDone:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 

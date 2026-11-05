@@ -38,6 +38,43 @@ func attachBackground(t *testing.T, hub *BackgroundBackend, ctx context.Context,
 	return session
 }
 
+func TestBackgroundShutdownCancelsAllAndReportsUnwinding(t *testing.T) {
+	entered := make(chan struct{}, 2)
+	canceled := make(chan struct{}, 2)
+	release := make(chan struct{})
+	defer close(release)
+	hub, _ := backgroundFixture(t, &fakeEngine{run: func(ctx context.Context, _ *agent.TurnRequest) (*agent.TurnResult, error) {
+		entered <- struct{}{}
+		<-ctx.Done()
+		canceled <- struct{}{}
+		<-release
+		return nil, ctx.Err()
+	}})
+	for _, id := range []string{"one", "two"} {
+		session := attachBackground(t, hub, t.Context(), "owner", id, newRecorder())
+		send(session, "run")
+	}
+	for range 2 {
+		select {
+		case <-entered:
+		case <-time.After(time.Second):
+			t.Fatal("not started")
+		}
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	if err := hub.Shutdown(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal(err)
+	}
+	for range 2 {
+		select {
+		case <-canceled:
+		case <-time.After(time.Second):
+			t.Fatal("one blocked session delayed cancellation")
+		}
+	}
+}
+
 // 模型执行、会话和用户生命周期一致；任何一个 WebSocket 的取消都不应中断原轮次。
 func TestBackgroundDetachKeepsExecutionAndReplaysWithoutNewModelCall(t *testing.T) {
 	started := make(chan struct{})

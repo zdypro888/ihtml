@@ -116,3 +116,45 @@ TaskConfig通过ControlStore、ControlNamespace、BudgetPool和Budgets绑定可�
 观测采用128容量有界异步队列，默认每次sink期限100ms、保留30天，失败不改变业务结果、不重放Handler。local_dropped/local_failed/local_pending明确是本运行时指标，会随进程重建重置；它是best effort遥测，不是可靠业务账本或完整审计承诺。关闭限时drain，适配器须响应context。已持久记录可跨重建查询；重复ID只接受同一事实，时间按UTC毫秒规范化以兼容Mongo精度。
 
 `task_trace`分页、`task_metrics`最多汇总1024条快照，next/truncated不能被当作全量统计。时间窗口统一[From,To)，并发写入分页不是完整实时事件流。宿主额外提供本人当前权限代次的只读HTTP观测目录，不接受客户端scope、不返回正文。单独发布者可用PrepareTaskObservation归一化元数据后接同一sink；观测hook失败不改变外部事件的持久结果。
+
+## 持久装配、格式与适配器验收
+
+`StorageMode` 默认 `memory`，不会因为注入一个 Store 就宣称完整持久化。显式 `durable` 要求同时提供 Store、Results、ControlStore、Contexts、Events、Observations，缺失即拒绝启动；可选 Outbox 仍由宿主按实际事务边界接入。`Readiness` / `CheckTaskReadiness` 检查实际装配与适配器健康，不启动维护、模型或业务。durable 表示禁止内存回退，实际介质的持久承诺由被注入的提供者负责。
+
+`agent/mongostore` 提供 TaskStore、ResultStore、ControlStore、ContextStore、EventStore、ObservationStore、OutboxStore，复用 Mongo 原生 CAS、不可变分块和事务。宿主固定连接、集合、Subject/Conversation/Scope；`EnsureIndexes(ctx)` 创建协议索引，保留原数据布局。BeforeCreate 可登记可信维护命名空间；它必须响应 context，不能执行业务。该包不创建新数据库服务、不另读凭据、不识别业务 API。
+
+独立 `storageVersion` 与 CAS Revision、工具 Contract.Version 分开。当前写版本1，读取兼容旧版本0/缺失字段；未来版本拒绝读取、领取与覆盖，主动回收也不修改未来格式。`MigrateStorage(ctx, collections, strict)` 是显式、可重复入口：先停止旧写入者，再升级专用集合的版本；strict 保留既有 validator 并增加版本准入，阻止不带版本的旧二进制重新写入。**未执行严格迁移时不能承诺任意新旧二进制混写安全**。不要将业务共享集合随意交给此迁移入口。Eino 的 session/checkpoint 继续使用其原适配和兼容检查，不建立第二套恢复引擎。
+
+`agent/storetest.Run` 提供 Task/Result/Control/Context/Event 的可复用一致性验收，`RunOutbox` 提供领取、所有者、修订、应答丢失重投的协议验收。Factory 必须使用隔离命名空间；真实业务与 outbox 的事务原子性仍需提供者的集成测试证明。
+
+## 有期限退出、只读核对与工具契约
+
+`Drain(ctx)` 冻结新受理，等待已受理调用及登记真正退出；已在入库的调用也计入屏障，Drain 本身不取消它。`Shutdown(ctx)` 取消本地工作并在期限内等待；返回超时表示仍未退出。`Close` 兼容原无期限真实收尾语义。后台会话提供相同 Shutdown 能力，先取消全部会话，再并行等待收尾。不能强杀忽略 context 的 Go Handler。
+
+`AwaitResult(ctx, scope, id, allowed)` 直接报告存储错误和取消，替代仅依赖无错误 Done channel 的远端等待。Completed 和旧 OnComplete 都是本地提示：回调最多允许一个受阻执行者，繁忙时丢弃提示并在 `Status().CallbackDropped` / `task_budget.runtime` 明确报告，不能用于可靠业务交付；可靠通知使用等待记录/outbox。
+
+`task_reconcile` / `Reconcile` 仅使用当前获准、版本一致的原工具 RecoverResult，传入原可信 invocation key 和冻结参数。它创建只读证据调用，保存独立不可变结果并以 CAS 绑定原记录的 ResolutionRef；原执行状态与原结果不被改写，原 Handler 不再执行。没有可核对回执时保留原未知事实，需人工/AI依据真实证据继续判断，不能强制改为成功。
+
+OutputSchema 由标准 JSON Schema 编译器执行校验，精确支持 json.Number，禁止引用读取网络或宿主文件。非法 schema 在接纳前拒绝；Handler 返回但输出不合约时仍保存原文和 completed 执行事实，并单独标记 contract_violation。ResourceFencing 声明要求真实 ResolveResources；运行时授予 fence 不等于外部提供者已经检查 fence。
+
+## 结果引用、流式读取与可信外部输入
+
+`OpenResultInput` 返回受当前 scope、工具权限和摘要约束的 io.ReadCloser，支持二进制，每次范围至多64KiB；完整读取在 EOF 核验 SHA256，提前关闭由存储适配器保证块摘要。`ResolveResultInput` 的 JSON Pointer 使用标准路径解码和流式 Decoder，只物化选中值；为验证完整 JSON 和摘要仍需读完整正文，单个大标量和选中子树仍占相应内存。Eino ResultBackend 按行读取所需范围并限制输出64KiB，不能用它访问宿主文件。
+
+`ResolveToolInputReferences` 允许宿主显式指定可填充参数前缀，最多16个不重叠指针；不支持表达式或修改路由/权限。不可变引用参加原确认和幂等绑定，解析结果仍须经过原 schema、权限及目标确认。旧 HTTP 工具展开正文限制64KiB；真正的大正文消费者应直接使用流式读取能力。
+
+事件源可 CloseSource、RenewSource 和 ArchiveEventSource，关闭后仍接受同键同事实的重投。续期不复活关闭或过期源。归档先持久设为 archiving 冻结新订阅，再通过共享预留屏障等待已有订阅交付/退出；失败时保留正文和新修订，宿主读取当前修订后可继续归档。归档只清正文，保留序号、键、指纹，直到完整保留期结束。关闭/归档会向等待返回 source_closed 和可选 successor_id，AI自行决定后续。
+
+`AllocateEventSegment` 用共享 CAS 分配源内位置，满段后使用新源；并发预留可留下空洞，不能超填或将原 outbox 换到另一源。每源/作用域存储容量仍明确有界，不新增默认 QPS 或累计调用额度。
+
+可选 `TaskWebhook` 不会自动挂载。宿主固定 Publisher、scope、源和类型并提供 Verify；内置 VerifyTaskWebhookHMAC 将 method、escaped path、时间戳、Idempotency-Key、原正文按换行连接后校验 HMAC；签名覆盖幂等键和入口，不能捕获签名后换键或换入口重放。事件键/指纹复用原子事件存储作为 durable inbox，只有持久成功才返回202，重用键改变事实返回409。密钥由宿主现有凭据配置注入；不接受模型指定 URL、凭据或发布源。
+
+## Outbox 与标准遥测
+
+投递记录保存 Attempts、RetryAt、FailureCode、Dead。暂时失败指数退避，过期、冲突、源关闭/满额等永久阻塞进入死信；失败项离开就绪队列。TaskOutboxFailureStore 记录失败，TaskOutboxAdminStore 提供脱敏分页与按修订显式重投；过期事实不能通过重投延长寿命，重投不能改载荷或重做业务。DeliverTaskOutboxBatch 有界处理多个已提交事实，TaskOutboxGroup 复用同一投递器覆盖多个真实原子边界。
+
+Mongo OutboxStore 支持实际事务 AppendInTransaction，也支持可信 EmbeddedPath 的同文档 AtomicFields。事务方法拒绝非事务 context；嵌入模式要求宿主在 pending 时移除父记录 TTL，ACK 后恢复期限，避免丢弃未交付事实。根模式只对 delivered 记录设 TTL。它们保证本地事实与事件原子提交，**不把 HTTP/远端副作用宣称为本地事务或通用 exactly-once**。
+
+标准 OpenTelemetry 使用宿主 provider，默认 no-op，不私建 exporter。模型、工具、等待认领及 outbox 投递产生 span；事件次数、耗时和供应商实际返回的 token 用量产生指标。等待和 outbox 可携带 W3C traceparent/tracestate 跨实例续接，不保存 baggage、参数或结果正文。遥测与权威账本仍分离；未配置 exporter 不代表线上已具备集中观测。
+
+实现继续复用 Eino ADK/Runner、中断恢复、原生 session/checkpoint、文件/stream 协议、现有 Mongo 与 OTel。顺序、并行、等待、恢复和业务补偿均由 AI 依据事实和授权判断；没有新增 API 名称专用的调度规则。QPS、累计模型/工具/token/费用额度仍默认关闭；宿主显式开启硬费用/token额度时才必须提供可靠报价。

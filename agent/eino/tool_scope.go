@@ -65,6 +65,9 @@ func newTurnToolMiddleware(ctx context.Context, sessionID string, tools []ai.Too
 	toolInfos := make(map[string]*schema.ToolInfo, len(tools))
 	toolsByName := make(map[string]ai.Tool, len(tools))
 	for _, item := range tools {
+		if _, err := ai.CompileToolContract(item); err != nil {
+			return nil, err
+		}
 		toolsByName[item.Name] = item
 		if item.LoadMode == ai.ToolLoadImmediate {
 			continue

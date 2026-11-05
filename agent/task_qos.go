@@ -145,7 +145,7 @@ func (r *TaskRuntime) checkQoS(row *TaskControlState, lease *TaskBudgetLease) er
 			}
 		}
 		for _, active := range row.Leases {
-			if !active.Running {
+			if !active.Running && active.Kind != "wait" {
 				continue
 			}
 			if claimsConflict(prior.Claims, active.Claims) {
@@ -158,7 +158,7 @@ func (r *TaskRuntime) checkQoS(row *TaskControlState, lease *TaskBudgetLease) er
 		}
 	}
 	for _, active := range row.Leases {
-		if active.ID != lease.ID && active.Running && claimsConflict(lease.Claims, active.Claims) {
+		if active.ID != lease.ID && (active.Running || active.Kind == "wait") && claimsConflict(lease.Claims, active.Claims) {
 			return &TaskBudgetError{Kind: "resource_busy", RetryAfterMS: r.cfg.PollInterval.Milliseconds()}
 		}
 	}

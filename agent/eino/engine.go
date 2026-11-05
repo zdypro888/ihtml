@@ -32,6 +32,7 @@ import (
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 	"github.com/eino-contrib/jsonschema"
+	"go.opentelemetry.io/otel/attribute"
 
 	ai "github.com/zdypro888/ihtml/agent"
 	"github.com/zdypro888/ihtml/agent/internal/textfmt"
@@ -168,6 +169,8 @@ func (e *Engine) RunTurn(ctx context.Context, req *ai.TurnRequest) (turnResult *
 	if req == nil {
 		return nil, errors.New("turn request is nil")
 	}
+	ctx, turnSpan := ai.RuntimeSpan(ctx, "agent.turn", attribute.String("session.id", req.SessionID))
+	defer turnSpan.End()
 	copyRequest := *req
 	req = &copyRequest
 	if req.DisableTools {
@@ -225,7 +228,7 @@ func (e *Engine) RunTurn(ctx context.Context, req *ai.TurnRequest) (turnResult *
 		if req.MaxOutputTokens > 0 {
 			limit = req.MaxOutputTokens
 		}
-		model = &goalBudgetModel{inner: model, runtime: req.Tasks, quote: e.cfg.QuoteModel, request: ModelBudgetRequest{Model: modelName, MaxOutputTokens: limit}}
+		model = &goalBudgetModel{inner: model, runtime: req.Tasks, scope: ai.TaskScope(req), quote: e.cfg.QuoteModel, request: ModelBudgetRequest{Model: modelName, MaxOutputTokens: limit}}
 	}
 	var summaryUsage ai.Usage
 	var toolExposure ai.ToolExposure
