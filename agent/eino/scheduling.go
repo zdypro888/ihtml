@@ -24,7 +24,7 @@ func modelToolDescription(t ai.Tool) string {
 		parts = append(parts, "执行约定：外部影响未声明，按工具具体说明处理，不能假定是只读或可安全并发。")
 	}
 	if t.ApprovalRequired {
-		parts = append(parts, "此调用需要独立确认，不能借用同轮其他调用的确认。")
+		parts = append(parts, "此调用需要明确确认；可以纳入展示了确切调用与参数的固定批准清单，不能借用未覆盖本调用的确认。")
 	}
 	if t.Completion == ai.ToolCompletionAsynchronous {
 		parts = append(parts, "成功返回表示任务已持久化并被异步受理，不表示任务已经执行完成；后续进度和最终结果以任务状态为准。沿原任务查询或等待，依赖结果的步骤须等真实完成；不要重复提交。")

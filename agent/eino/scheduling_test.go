@@ -22,8 +22,8 @@ func TestModelToolSchedulingContracts(t *testing.T) {
 		want []string
 	}{
 		{"read", ai.Tool{Effect: ai.ToolEffectRead}, []string{"只读查询", "输入已确定", "等待前一步"}},
-		{"write", ai.Tool{Effect: ai.ToolEffectWrite, ApprovalRequired: true}, []string{"会产生外部影响", "同一资源的修改按序", "需要独立确认"}},
-		{"dispatch", ai.Tool{Effect: ai.ToolEffectExecute, Completion: ai.ToolCompletionAsynchronous, ApprovalRequired: true}, []string{"需要独立确认", "异步受理", "须等真实完成", "不要重复提交"}},
+		{"write", ai.Tool{Effect: ai.ToolEffectWrite, ApprovalRequired: true}, []string{"会产生外部影响", "同一资源的修改按序", "固定批准清单", "不能借用未覆盖本调用"}},
+		{"dispatch", ai.Tool{Effect: ai.ToolEffectExecute, Completion: ai.ToolCompletionAsynchronous, ApprovalRequired: true}, []string{"固定批准清单", "异步受理", "须等真实完成", "不要重复提交"}},
 		{"unknown", ai.Tool{}, []string{"外部影响未声明", "不能假定"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
