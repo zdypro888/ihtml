@@ -1751,3 +1751,21 @@ test('batch host rejection prevents every member from being sent',async(t)=>{
  assert.equal(await page.evaluate(()=>sockets[0].sent.some(f=>f.type==='confirm_tools')),false);
 
 });
+
+// 任意业务工具使用相同汇总机制，不按接口名、HTTP 路径或特定字段识别批量操作。
+test('batch grouping is shared by unrelated tools and keeps each tool scope separate',async(t)=>{
+ const page=await fixture(t);
+ await page.evaluate(async()=>{
+  const original=fetch;window.fetch=async(...args)=>{const r=await original(...args);const read=r.text;r.text=async()=>JSON.stringify({...JSON.parse(await read()),batch_confirmations:true});return r};
+  window.a=ihtml.mountChat('#a');await a.ready();await a.chat.send('several batches');
+  const s=sockets[0];let seq=1;s.emit({type:'turn_start',run_id:'generic',seq:seq++});
+  for(const name of ['rename_folder','adjust_switch','remove_record'])for(let i=0;i<2;i++)s.emit({type:'confirmation_required',run_id:'generic',seq:seq++,tool_call:{id:name+i,name,title:name,method:'TOOL',path:'/arbitrary/'+name+'/'+i,confirmation_group:'same-original-turn',approval_resume:'manual_tool_only',confirmation_nonce:name+i,confirmation_token:'SIGNED',confirmation_expires:Math.floor(Date.now()/1000)+600,body:{arbitraryTarget:i}}});
+  s.emit({type:'assistant_done',run_id:'generic',seq:seq++,message:'Review'});
+ });
+ assert.equal(await page.locator('.ihtml-tool-batch').count(),3);
+ await page.locator('.ihtml-tool-batch').first().locator(':scope > .t-actions button').click();
+ const frame=await page.evaluate(()=>sockets[0].sent.find(f=>f.type==='confirm_tools'));
+ assert.equal(frame.tool_calls.length,2);
+ assert.ok(frame.tool_calls.every(call=>call.name==='rename_folder'));
+ assert.equal(await page.locator('.ihtml-tool[data-status="pending"]').count(),4);
+});
