@@ -256,6 +256,8 @@ type TurnRequest struct {
 	// WakeID 是可信事件的稳定恢复身份，不能从用户 JSON 直接采用。
 	WakeID       string
 	WakeAdmitted bool
+	// DisableTools 明确关闭本轮全部工具能力，包括受管控制原语与skills；空业务目录不等于关闭工具。
+	DisableTools bool
 	// Tools 本轮可用工具集（已按用户权限裁剪）。
 	Tools []Tool
 	// Skills 是已按语义相关性和用户/渠道作用域裁剪的候选执行方法。

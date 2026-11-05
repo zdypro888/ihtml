@@ -167,6 +167,13 @@ func (e *Engine) RunTurn(ctx context.Context, req *ai.TurnRequest) (turnResult *
 	if req == nil {
 		return nil, errors.New("turn request is nil")
 	}
+	copyRequest := *req
+	req = &copyRequest
+	if req.DisableTools {
+		req.Tools = nil
+		req.Skills = nil
+		req.AllowTaskSuspend = false
+	}
 	mode, err := normalizeTurnMode(req.Mode)
 	if err != nil {
 		return nil, err
@@ -176,9 +183,7 @@ func (e *Engine) RunTurn(ctx context.Context, req *ai.TurnRequest) (turnResult *
 			return nil, err
 		}
 	}
-	copyRequest := *req
-	req = &copyRequest
-	if mode == ai.TurnModeDeep && req.Tasks != nil {
+	if mode == ai.TurnModeDeep && req.Tasks != nil && !req.DisableTools {
 		if req.InvocationScope == "" {
 			req.InvocationScope = rand.Text()
 		}
@@ -190,7 +195,7 @@ func (e *Engine) RunTurn(ctx context.Context, req *ai.TurnRequest) (turnResult *
 	if strings.TrimSpace(req.Model) != "" {
 		modelName = strings.TrimSpace(req.Model)
 	}
-	if e.cfg.Provider == ProviderOpenAI && strings.HasPrefix(modelName, "gpt-6.1-terra") && e.cfg.OpenAIAPI != "responses" && (len(req.Tools) > 0 || len(req.Skills) > 0) {
+	if e.cfg.Provider == ProviderOpenAI && strings.HasPrefix(modelName, "gpt-6.1-terra") && e.cfg.OpenAIAPI != "responses" && (len(req.Tools) > 0 || len(req.Skills) > 0 || mode == ai.TurnModeDeep && req.Tasks != nil && !req.DisableTools) {
 		return nil, errors.New("gpt-6.1-terra tool calling requires openai_api=responses")
 	}
 	model, err := e.modelFor(ctx, req.Model)
@@ -517,7 +522,7 @@ func (e *Engine) newDeepAgent(
 	if invocationScope == "" {
 		invocationScope = req.SessionID
 	}
-	if req.Tasks != nil && len(req.Tools) > 0 {
+	if req.Tasks != nil && !req.DisableTools {
 		kernel, err := taskTools(req)
 		if err != nil {
 			return nil, nil, err
@@ -643,8 +648,8 @@ func (e *Engine) newDeepAgent(
 		// nbco has durable tasks, goals and workflows. Deep's ephemeral coding
 		// checklist adds two model turns to simple operational actions without
 		// improving recoverability.
-		WithoutWriteTodos:      !e.cfg.EnableWriteTodos,
-		WithoutGeneralSubAgent: !e.cfg.EnableGeneralSubAgent,
+		WithoutWriteTodos:      req.DisableTools || !e.cfg.EnableWriteTodos,
+		WithoutGeneralSubAgent: req.DisableTools || !e.cfg.EnableGeneralSubAgent,
 		ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{
 			// 同轮工具使用 Eino 原生并发；确认中间件仍逐调用绑定授权。
 			Tools:               immediateTools,

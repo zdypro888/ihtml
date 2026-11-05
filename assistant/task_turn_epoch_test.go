@@ -57,12 +57,12 @@ func TestRemoteStopCancelsPlanningAndFencesOldQueuedMessages(t *testing.T) {
 				}
 			})
 			remote := openSession(t, cfg, "alice", newRecorder())
-			send(first, "active")
+			toolsEnabled := false
+			first.HandleEvent(t.Context(), &ihtml.ChatClientEvent{Type: ihtml.ChatClientUserMessage, ToolsEnabled: &toolsEnabled, Messages: []ihtml.ChatMessage{{Role: "user", Content: "active"}}})
 			waitSignal(t, entered)
 			send(first, "old queued")
 			remote.HandleEvent(t.Context(), &ihtml.ChatClientEvent{Type: ihtml.ChatClientCancel})
 			waitSignal(t, cancelled)
-			toolsEnabled := false
 			first.HandleEvent(t.Context(), &ihtml.ChatClientEvent{Type: ihtml.ChatClientUserMessage, ToolsEnabled: &toolsEnabled, Messages: []ihtml.ChatMessage{{Role: "user", Content: "fresh explicit message"}}})
 			close(release)
 			events := rec.wait(t, ihtml.ChatStreamAssistantDone, 1)

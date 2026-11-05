@@ -784,6 +784,11 @@ func (s *session) run(ctx context.Context, cancel context.CancelFunc, ev *ihtml.
 	}
 	copyRequest := *req
 	req = &copyRequest
+	req.DisableTools = req.DisableTools || ev.ToolsEnabled != nil && !*ev.ToolsEnabled
+	if req.DisableTools {
+		req.Tasks = nil
+		req.AllowTaskSuspend = false
+	}
 	if waking {
 		req.WakeID = wake.record.ID
 		if req.InvocationScope == "" {
@@ -838,7 +843,7 @@ func (s *session) run(ctx context.Context, cancel context.CancelFunc, ev *ihtml.
 		}
 		defer release()
 	}
-	if len(req.Tools) > 0 && s.tasks != nil {
+	if s.tasks != nil && !req.DisableTools {
 		req.Tasks = s.tasks
 		s.mu.Lock()
 		req.AllowTaskSuspend = s.tasks.Scope() != "" && !s.taskWakeStopped
@@ -850,7 +855,7 @@ func (s *session) run(ctx context.Context, cancel context.CancelFunc, ev *ihtml.
 			req.Tasks.EndTurn(agent.TaskScope(req), req.InvocationScope, runErr == nil && executionCtx.Err() == nil)
 		}()
 	}
-	if ev.ToolsEnabled != nil && !*ev.ToolsEnabled {
+	if req.DisableTools {
 		req.Skills = nil
 	}
 	onDelta, onEvent := req.OnDelta, req.OnEvent
@@ -899,7 +904,7 @@ func safeComplete(fn func(context.Context, *ihtml.ChatSessionContext, *agent.Tur
 }
 
 func (s *session) governTools(tools []agent.Tool, ev *ihtml.ChatClientEvent, p *projection, req *agent.TurnRequest) ([]agent.Tool, error) {
-	if ev.ToolsEnabled != nil && !*ev.ToolsEnabled {
+	if req.DisableTools || ev.ToolsEnabled != nil && !*ev.ToolsEnabled {
 		return nil, nil
 	}
 	guard := s.backend.cfg.ToolExecutionGuard
