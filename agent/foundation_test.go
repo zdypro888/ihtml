@@ -320,3 +320,35 @@ func TestRateLimitedHeadDoesNotBlockUnrelatedEligibleWork(t *testing.T) {
 	a.releaseBudget("a")
 	b.releaseBudget("b")
 }
+
+// 禁用用带更高版本的零策略发布；重建实例不继承旧桶/冷却，旧实例也不能复活限流。
+func TestSharedRateCanBeExplicitlyDisabledWithoutResurrection(t *testing.T) {
+	control := NewMemoryTaskControlStore()
+	cfg := TaskConfig{ControlStore: control, BudgetPool: "disable-rate", Budgets: []TaskBudgetLimit{{Key: "shared", MaxActive: 10, MaxConcurrent: 10, MaxWaiting: 10}}, QoS: TaskQoSConfig{Policies: []TaskResourcePolicy{{Key: "shared", RatePerSecond: 0.1, Burst: 1, Version: 1}}}}
+	old := taskRuntimeFixture(t, cfg)
+	until := time.Now().Add(time.Hour)
+	if err := old.acquireBudget(t.Context(), "scope", "epoch", "old", "task", until); err != nil {
+		t.Fatal(err)
+	}
+	if err := old.CooldownResource(t.Context(), "shared", until); err != nil {
+		t.Fatal(err)
+	}
+	old.releaseBudget("old")
+	cfg.QoS.Policies = []TaskResourcePolicy{{Key: "shared", Version: 2}}
+	disabled := taskRuntimeFixture(t, cfg)
+	for _, id := range []string{"one", "two"} {
+		if err := disabled.acquireBudget(t.Context(), "scope", "epoch", id, "task", until); err != nil {
+			t.Fatal(err)
+		}
+		if err := disabled.updateBudget(t.Context(), id, "run", until); err != nil {
+			t.Fatal("disabled bucket/cooldown still enforced", err)
+		}
+		disabled.releaseBudget(id)
+	}
+	if err := old.acquireBudget(t.Context(), "scope", "epoch", "stale", "task", until); !errors.Is(err, ErrTaskPolicyConflict) {
+		t.Fatal("old instance resurrected limiter", err)
+	}
+	if err := old.CooldownResource(t.Context(), "shared", until); !errors.Is(err, ErrTaskPolicyConflict) {
+		t.Fatal("old instance restored cooldown", err)
+	}
+}

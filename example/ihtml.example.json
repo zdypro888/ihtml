@@ -50,7 +50,7 @@
     },
     "safety": {
       "confirm_writes": true,
-      "writes_per_minute": 240
+      "writes_per_minute": 0
     },
     "history": {
       "namespace": "example-app",

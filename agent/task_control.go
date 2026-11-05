@@ -278,7 +278,7 @@ func (r *TaskRuntime) acquireBudget(ctx context.Context, scope, epoch, id, kind 
 			resources = append(resources, limit.Key)
 		}
 		for _, policy := range r.cfg.QoS.Policies {
-			if !seenResource(resources, policy.Key) {
+			if policy.RatePerSecond > 0 && !seenResource(resources, policy.Key) {
 				resources = append(resources, policy.Key)
 			}
 		}

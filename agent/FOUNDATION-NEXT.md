@@ -29,6 +29,8 @@ Watermill Forwarder 的事务 outbox 以 SQL 适配为主；宿主当前为 Mong
 
 ## 宿主使用约束
 
+频率限流和累计调用/token/费用额度默认关闭；只在宿主显式提供正数时启用。连接/并发/存储容量和单次执行期限是独立的运行边界，仍然保留。
+
 预算、资源键、策略版本和价格来自可信宿主，不是 AI 可修改的参数。`task_budget` 返回当前账户预留以及容量、限流、冷却的只读快照，不构成预留。
 
 费用与 token 上限采用保守预留：Eino Config.QuoteModel 必须提供真实上界，包括供应商隐藏输入、输出设置、缓存计费和客户端重试。未提供可靠报价而配置了 token/费用硬额度时，拒绝模型调用；不把 Eino 默认字符估算当成账单上界。超时、无 usage 或进程退出不退款，避免不确定费用反复透支。模型调用次数是运行时模型接口调用次数，不冒充供应商传输重试次数。
@@ -39,7 +41,7 @@ Watermill Forwarder 的事务 outbox 以 SQL 适配为主；宿主当前为 Mong
 
 资源键必须包含正确的租户/提供者资源身份。协调租约只约束使用同一存储协议的执行者；真正阻止失租者陈旧写入，提供者必须校验 `TaskResourceGrants(ctx)` 中的 fence 和 IfVersion。声明 ResourceFencing 不会让不支持条件写入的远端接口突然具备该能力。运行时不替业务实现幂等，不自动重试 Handler。
 
-策略改动必须提高 BudgetPolicyVersion（容量）或 TaskResourcePolicy.Version（速率）。同版本不同配置拒绝接纳。新速率策略从空桶开始，避免重新部署反复领取 burst。共享池上限 5000 租约、每类最多 4096 个持久策略资源，协调文档总序列化上限 8MiB；容量不足显式拒绝，不静默删除策略或未交付事实。
+策略改动必须提高 BudgetPolicyVersion（容量）或 TaskResourcePolicy.Version（速率）。同版本不同配置拒绝接纳。关闭已有共享限流时递增 version，并将 rate_per_second、burst 同设为 0；保留关闭版本并清除旧桶和冷却，防止旧实例复活限流。新资源默认不配置限流。新速率策略从空桶开始，避免重新部署反复领取 burst。共享池上限 5000 租约、每类最多 4096 个持久策略资源，协调文档总序列化上限 8MiB；容量不足显式拒绝，不静默删除策略或未交付事实。
 
 outbox 需要业务在实际提交边界显式接入。宿主用 `NewTaskOutboxEntry` 在事务重试循环外固定事实，再在原业务 Mongo 事务中调用 AppendInTransaction。普通 HTTP 返回、远端 API 或单独写一次 outbox 不构成原子提交。未支持事务的 Mongo 部署明确拒绝该写入；不会自动包裹所有旧接口、重放业务或引入隐式事务。
 

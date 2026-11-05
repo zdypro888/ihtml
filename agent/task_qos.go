@@ -15,7 +15,8 @@ import (
 var ErrTaskPolicyConflict = errors.New("agent: resource policy conflict")
 
 // TaskResourcePolicy 使用宿主规范化的资源键，令牌桶算法复用 x/time/rate。
-// Version 必须随策略变更单调递增；旧实例不能以旧配置扩大新策略。
+// 默认不配置策略，不限速。RatePerSecond/Burst 同为 0 是显式关闭策略。
+// Version 必须随启停或参数变更单调递增；旧实例不能以旧配置扩大新策略。
 type TaskResourcePolicy struct {
 	Key           string  `json:"key" yaml:"key"`
 	RatePerSecond float64 `json:"rate_per_second" yaml:"rate_per_second"`
@@ -135,7 +136,7 @@ func (r *TaskRuntime) checkQoS(row *TaskControlState, lease *TaskBudgetLease) er
 			if q.Cooldown[key].After(now) {
 				eligible = false
 			}
-			if p, ok := q.Policies[key]; ok {
+			if p, ok := q.Policies[key]; ok && p.RatePerSecond > 0 {
 				limiter := rate.NewLimiter(rate.Limit(p.RatePerSecond), p.Burst)
 				limiter.ReserveN(q.EmptyAt[key], p.Burst)
 				if !limiter.AllowN(now, 1) {
@@ -167,7 +168,7 @@ func (r *TaskRuntime) checkQoS(row *TaskControlState, lease *TaskBudgetLease) er
 			return &TaskBudgetError{Resource: key, Kind: "cooldown", RetryAfterMS: max(1, time.Until(until).Milliseconds())}
 		}
 		policy, ok := q.Policies[key]
-		if !ok {
+		if !ok || policy.RatePerSecond == 0 {
 			continue
 		}
 		limiter := rate.NewLimiter(rate.Limit(policy.RatePerSecond), policy.Burst)
@@ -208,18 +209,27 @@ func claimsConflict(a, b []TaskResourceRequest) bool {
 // CooldownResource 接收可信提供者的 Retry-After，不能由模型创建任意资源键。
 func (r *TaskRuntime) CooldownResource(ctx context.Context, key string, until time.Time) error {
 	known := false
+	var configured TaskResourcePolicy
 	for _, p := range r.cfg.QoS.Policies {
-		if p.Key == key {
+		if p.Key == key && p.RatePerSecond > 0 {
 			known = true
+			configured = p
 		}
 	}
 	if !known || until.After(time.Now().Add(24*time.Hour)) {
 		return ErrTaskConflict
 	}
 	_, err := r.editControl(ctx, r.poolControlKey(), func(row *TaskControlState) error {
+		if err := r.configureQoS(row); err != nil {
+			return err
+		}
 		q, err := readQoS(row)
 		if err != nil {
 			return err
+		}
+		// 旧实例不能给已关闭的策略重新写入冷却。
+		if q.Policies[key] != configured {
+			return ErrTaskPolicyConflict
 		}
 		if until.After(q.Cooldown[key]) {
 			q.Cooldown[key] = until
@@ -267,9 +277,6 @@ func (r *TaskRuntime) configureQoS(row *TaskControlState) error {
 		return &TaskBudgetError{Kind: "policy_capacity"}
 	}
 	for _, policy := range r.cfg.QoS.Policies {
-		if policy.Key == "" || policy.Version < 1 || policy.RatePerSecond <= 0 || policy.Burst < 1 || policy.Burst > 100000 {
-			return ErrTaskConflict
-		}
 		old, exists := q.Policies[policy.Key]
 		if exists && (old.Version > policy.Version || old.Version == policy.Version && !reflect.DeepEqual(old, policy)) {
 			return ErrTaskPolicyConflict
@@ -277,7 +284,13 @@ func (r *TaskRuntime) configureQoS(row *TaskControlState) error {
 		if !exists || old.Version < policy.Version {
 			// 策略更换从空桶开始，不能通过滚动发布反复获得新的 burst。
 			q.Policies[policy.Key] = policy
-			q.EmptyAt[policy.Key] = now
+			if policy.RatePerSecond > 0 {
+				q.EmptyAt[policy.Key] = now
+			} else {
+				// 关闭策略仍保留单调版本；旧实例不能重新启用，并清除旧桶和冷却。
+				delete(q.EmptyAt, policy.Key)
+				delete(q.Cooldown, policy.Key)
+			}
 		}
 	}
 	if len(q.Policies) > 4096 {
@@ -331,10 +344,17 @@ func ValidateTaskQoSConfig(c TaskQoSConfig) error {
 	}
 	seen := map[string]bool{}
 	for _, p := range c.Policies {
-		if p.Key == "" || len(p.Key) > 256 || seen[p.Key] || p.Version < 1 || math.IsNaN(p.RatePerSecond) || math.IsInf(p.RatePerSecond, 0) || p.RatePerSecond <= 0 || p.RatePerSecond > 100000 || float64(p.Burst)/p.RatePerSecond > 365*24*3600 || p.Burst < 1 || p.Burst > 100000 {
+		if p.Key == "" || len(p.Key) > 256 || seen[p.Key] || p.Version < 1 {
 			return ErrTaskPolicyConflict
 		}
 		seen[p.Key] = true
+		// 带新版本的双零策略显式关闭共享限流；保留 tombstone 防止旧配置复活。
+		if p.RatePerSecond == 0 && p.Burst == 0 {
+			continue
+		}
+		if math.IsNaN(p.RatePerSecond) || math.IsInf(p.RatePerSecond, 0) || p.RatePerSecond <= 0 || p.RatePerSecond > 100000 || float64(p.Burst)/p.RatePerSecond > 365*24*3600 || p.Burst < 1 || p.Burst > 100000 {
+			return ErrTaskPolicyConflict
+		}
 	}
 	return nil
 }

@@ -68,7 +68,7 @@ func TestFileConfigMapsStrictClaudeDefaults(t *testing.T) {
 	if cfg.EnableDeepAgent || cfg.AllowModelSelect || cfg.MaxIterations != 16 || cfg.MaxModelCallsPerTurn != 24 || cfg.MaxSubtasksPerTurn != 3 {
 		t.Fatalf("agent defaults = deep:%v select:%v iterations:%d calls:%d subtasks:%d", cfg.EnableDeepAgent, cfg.AllowModelSelect, cfg.MaxIterations, cfg.MaxModelCallsPerTurn, cfg.MaxSubtasksPerTurn)
 	}
-	if cfg.RequestTimeout != 3*time.Minute || cfg.MaxTurnDuration != 2*time.Minute || !cfg.ConfirmWrites || cfg.WritesPerMinute != 240 {
+	if cfg.RequestTimeout != 3*time.Minute || cfg.MaxTurnDuration != 2*time.Minute || !cfg.ConfirmWrites || cfg.WritesPerMinute != 0 {
 		t.Fatalf("runtime defaults = timeout:%s turn:%s confirm:%v writes:%d", cfg.RequestTimeout, cfg.MaxTurnDuration, cfg.ConfirmWrites, cfg.WritesPerMinute)
 	}
 	if cfg.MaxHistorySessions != 128 || cfg.MaxHistoryEvents != 256 || cfg.MaxHistoryBytes != 2<<20 || cfg.HistoryTTL != 12*time.Hour {

@@ -471,7 +471,7 @@ Template 只定义可复用结构。新业务 Item 通过 `Item.Meta["slot"] == 
 | 审计留痕 | `WithAudit(fn)` —— 全部写操作（含 AI 发起）同步回调 `AuditEvent{User,Action,By,Note,Detail}` |
 | 访问策略 | `WithAccessPolicy(fn) → Access{ReadOnly, ChatDisabled}` —— 只读视图/按用户禁 AI，HTTP 与 AI 工具双层拦截 |
 | 宿主直调 | `Handler.ServiceForRequest(r)` 返回已绑定用户的 `ScopedService`，复用身份重验、访问策略和写限流；`Handler` 自身的 Service 方法是受信任管理 API |
-| 限流配额 | `WithLimits{MaxSSEPerUser:8, MaxWSPerUser:4, ChatTurnsPerMinute:20, WritesPerMinute:240, MaxKVKeysPerUser:256}`（默认即生效；对话轮次=真金白银） |
+| 限流配额 | `WithLimits{MaxSSEPerUser:8, MaxWSPerUser:4, ChatTurnsPerMinute:0, WritesPerMinute:0, MaxKVKeysPerUser:256}`（频率限流默认关闭，正数显式启用；连接/KV 容量保留运行边界） |
 | 指标 | `WithMetrics(m)` 或零依赖 `Handler.Stats()`：sse_connections/ws_sessions/chat_turns/writes/rate_limited… |
 | 备份迁移 | `ExportUser/ImportUser/PurgeUser`（Go API）+ `GET /api/export`；v3 契约完整包含 Items/Pages/Templates/KV/Revisions，导入先按当前硬资源边界全量校验并原子替换。升级前应先离线清理旧 Store 中的超限/无效状态，否则新版会 fail-closed，而非静默截断。`PurgeUser` 清空业务载荷但为防旧 CAS 复活会保留版本墓碑；SQL 版本表仍含用户键，不等同于完整物理擦除/GDPR 流程 |
 | 优雅停机 | `Handler.Close()`（断 SSE/WS）；SSE 55 分钟强制到期配合 LB 排空；资源 ETag 304 协商缓存 |

@@ -190,7 +190,7 @@ type Config struct {
 	HistoryTTL time.Duration
 
 	// WritesPerMinute 是 chat 工具的独立写限额，避免工具调用绕过 HTTP 限流。
-	// 0 使用默认值 240，负数禁用。批量工具调用按一次写计数。
+	// 默认关闭（0 或负数），正数显式启用。批量工具调用按一次写计数。
 	WritesPerMinute int
 	// WriteInterceptor 在每次真正执行写工具前调用，可接入共享配额/审计网关。
 	// 返回错误则拒绝该次写入。

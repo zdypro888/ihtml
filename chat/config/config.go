@@ -585,7 +585,7 @@ func (l *Loader) resolve(ctx context.Context, raw aiFileConfig) (Result, error) 
 	if raw.Safety.ConfirmWrites != nil {
 		confirmWrites = *raw.Safety.ConfirmWrites
 	}
-	writesPerMinute, err := boundedInt(raw.Safety.WritesPerMinute, 240, 1, 10000, "ai.safety.writes_per_minute")
+	writesPerMinute, err := boundedInt(raw.Safety.WritesPerMinute, 0, 0, 10000, "ai.safety.writes_per_minute")
 	if err != nil {
 		return Result{}, err
 	}

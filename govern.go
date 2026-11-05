@@ -83,12 +83,13 @@ func WithAccessPolicyE(fn func(r *http.Request, user string) (Access, error)) Op
 	return func(o *options) { o.access = fn }
 }
 
-// Limits 是连接与频率限制。字段为 0 时使用默认值, 为负时不限制。
+// Limits 区分运行容量与可选限流：连接/KV 容量为 0 时用默认值；频率为 0 时关闭，正数显式开启。
+// 负数继续表示不限制，兼容已有宿主配置。
 type Limits struct {
 	MaxSSEPerUser      int // 每用户 SSE 连接数, 默认 8
 	MaxWSPerUser       int // 每用户对话 WebSocket 连接数, 默认 4
-	ChatTurnsPerMinute int // 每用户每分钟对话轮次(模型调用是真金白银), 默认 20
-	WritesPerMinute    int // 每用户每分钟写操作次数, 默认 240
+	ChatTurnsPerMinute int // 每用户每分钟对话轮次，默认关闭
+	WritesPerMinute    int // 每用户每分钟写操作次数，默认关闭
 	MaxKVKeysPerUser   int // 每用户 KV 键数量(排除内核保留键), 默认 256
 }
 
@@ -102,8 +103,8 @@ func (l Limits) normalized() Limits {
 	return Limits{
 		MaxSSEPerUser:      def(l.MaxSSEPerUser, 8),
 		MaxWSPerUser:       def(l.MaxWSPerUser, 4),
-		ChatTurnsPerMinute: def(l.ChatTurnsPerMinute, 20),
-		WritesPerMinute:    def(l.WritesPerMinute, 240),
+		ChatTurnsPerMinute: l.ChatTurnsPerMinute,
+		WritesPerMinute:    l.WritesPerMinute,
 		MaxKVKeysPerUser:   def(l.MaxKVKeysPerUser, 256),
 	}
 }

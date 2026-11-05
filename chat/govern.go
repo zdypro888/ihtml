@@ -7,8 +7,6 @@ import (
 	"time"
 )
 
-const defaultChatWritesPerMinute = 240
-
 const hostInterceptorTimeout = 5 * time.Second
 
 var errHostInterceptor = errors.New("chat: host interceptor failed")
@@ -30,9 +28,8 @@ type writeWindow struct {
 }
 
 func newUserWriteLimiter(limit int) *userWriteLimiter {
-	if limit == 0 {
-		limit = defaultChatWritesPerMinute
-	} else if limit < 0 {
+	// 仅正数开启频率限制；零值不隐式增加整分钟写入额度。
+	if limit < 0 {
 		limit = 0
 	}
 	return &userWriteLimiter{
