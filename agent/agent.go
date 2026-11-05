@@ -253,6 +253,11 @@ type TurnRequest struct {
 	// Tasks 是宿主会话持有的通用后台执行器；nil 不暴露后台调度工具。
 	// 不能由浏览器参数构造，不与其他用户或权限会话共用。
 	Tasks *TaskRuntime
+	// AllowTaskSuspend 由具备恢复事件消费器的宿主声明；不向无唤醒实现的调用方许诺自动继续。
+	AllowTaskSuspend bool
+	// WakeID 是可信事件的稳定恢复身份，不能从用户 JSON 直接采用。
+	WakeID       string
+	WakeAdmitted bool
 	// Tools 本轮可用工具集（已按用户权限裁剪）。
 	Tools []Tool
 	// Skills 是已按语义相关性和用户/渠道作用域裁剪的候选执行方法。
@@ -286,6 +291,9 @@ type TurnRequest struct {
 
 // TurnResult 一轮对话结果。
 type TurnResult struct {
+	// Waiting 表示 AI 主动挂起，宿主按持久条件恢复新的受管轮次，不继承写权限。
+	Waiting *TaskWaitRecord
+
 	// PendingApproval means the run is suspended, not successfully completed.
 	PendingApproval *PendingApproval
 	// Text 模型最终答复（给用户看的）。

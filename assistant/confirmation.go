@@ -146,13 +146,31 @@ func (s *session) prepareTool(ctx context.Context, tool agent.Tool, args json.Ra
 		return "", err
 	}
 	emitted := false
-	p.callback(func() {
+	deliver := func() {
 		key := tool.Name + "\x00" + string(confirmation.CanonicalBody(args))
 		p.pendingSteps[key]++
 		p.send(ihtml.ChatStreamEvent{Type: ihtml.ChatStreamConfirmationRequired, ToolCall: &view,
 			ToolID: call.ID, ToolName: tool.Name, ToolStatus: ihtml.ChatToolPending, ToolSummary: "Awaiting manual confirmation; not executed."})
 		emitted = !p.emitFailed
-	})
+	}
+	if agent.IsBackgroundTask(ctx) {
+		// 后台提案可晚于模型挂起返回；沿原 RunID 发卡，不借旧轮次授予任何执行权限。
+		p.mu.Lock()
+		if ctx.Err() == nil && p.err == nil && !p.emitFailed {
+			late := p.finished
+			if late {
+				p.send(ihtml.ChatStreamEvent{Type: ihtml.ChatStreamTurnStart, RestoredApproval: true, TaskID: agent.TaskID(ctx)})
+			}
+			deliver()
+			if late {
+				p.send(ihtml.ChatStreamEvent{Type: ihtml.ChatStreamAssistantDone, FinishReason: "manual_tool_only", Message: "后台调用已准备好，请确认当前展示的固定清单。"})
+			}
+		}
+		p.mu.Unlock()
+	} else {
+		p.callback(deliver)
+	}
+
 	if !emitted {
 		s.pendingMu.Lock()
 		delete(s.pendingTools, call.ConfirmationNonce)

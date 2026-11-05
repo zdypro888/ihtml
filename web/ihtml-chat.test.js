@@ -1785,3 +1785,22 @@ test('background call completion notifies without starting or finishing a model 
  assert.match(await page.locator('#a').innerText(),/opaque-task/);
  assert.equal(await page.locator('#a .ihtml-msg.assistant').count(),await page.evaluate(()=>cardsBefore));
 });
+
+// 模型挂起后准备完成的确认卡仍汇入原批次；迟到正文不能改写已完成答复。
+test('late background confirmations keep the original batch after model suspension',async(t)=>{
+ const page=await fixture(t);
+ await page.evaluate(async()=>{
+  const original=fetch;window.fetch=async(...args)=>{const r=await original(...args);const read=r.text;r.text=async()=>JSON.stringify({...JSON.parse(await read()),batch_confirmations:true});return r};
+  window.a=ihtml.mountChat('#a');await a.ready();await a.chat.send('start in background');
+  sockets[0].emit({type:'turn_start',run_id:'suspended-origin',seq:1});
+  sockets[0].emit({type:'assistant_done',run_id:'suspended-origin',seq:2,message:'Waiting for events',finish_reason:'task_waiting'});
+  sockets[0].emit({type:'assistant_delta',run_id:'suspended-origin',seq:3,delta:'STALE_BODY'});
+  for(let i=0;i<2;i++)sockets[0].emit({type:'confirmation_required',run_id:'suspended-origin',seq:4+i,tool_call:{id:'late-'+i,name:'arbitrary_update',title:'Update',method:'PUT',path:'/arbitrary/'+i,confirmation_group:'suspended-origin',approval_resume:'manual_tool_only',confirmation_nonce:'late-nonce-'+i,confirmation_token:'SIGNED',confirmation_expires:Math.floor(Date.now()/1000)+600,body:{target:i}}});
+ });
+ assert.equal(await page.locator('#a .ihtml-tool-batch').count(),1);
+ assert.equal(await page.locator('#a .ihtml-tool-batch .ihtml-tool').count(),2);
+ assert.doesNotMatch(await page.locator('#a').innerText(),/STALE_BODY/);
+ await page.locator('#a .ihtml-tool-batch > .t-actions button').click();
+ const frame=await page.evaluate(()=>sockets[0].sent.find(f=>f.type==='confirm_tools'));
+ assert.equal(frame.tool_calls.length,2);
+});

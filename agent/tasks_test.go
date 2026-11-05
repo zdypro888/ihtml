@@ -181,8 +181,8 @@ func TestTaskRuntimeBoundsFailuresAndNeverReplays(t *testing.T) {
 			if err != nil || again.ID != row.ID || calls.Load() != 1 {
 				t.Fatal(again, err, calls.Load())
 			}
-			if _, err = r.Start(t.Context(), "owner", "turn", "new", tool, json.RawMessage(`{}`)); err == nil {
-				t.Fatal("capacity not bounded")
+			if _, err = r.Start(t.Context(), "owner", "turn", "new", tool, json.RawMessage(`{}`)); err != nil {
+				t.Fatal("completed history consumed active capacity", err)
 			}
 		})
 	}

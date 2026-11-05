@@ -35,7 +35,12 @@ type Config struct {
 	// Tasks 启用本会话的通用后台工具调用；不会改变原工具的授权和业务完成语义。
 	// OnComplete/Completed 提供完成通知，回调不得关闭自身会话。
 	Tasks *agent.TaskConfig
-	// PrepareTurn receives only the newest client user message, not the browser's
+	// TasksProvider 为当前可信会话提供独立的持久存储/Scope，不接受客户端数据库或命名空间。
+	TasksProvider func(context.Context, *ihtml.ChatSessionContext) (agent.TaskConfig, error)
+	TaskWakeGuard func(context.Context, *ihtml.ChatSessionContext) error
+	// TaskWakeAcknowledged 核对宿主与对话保存同一事务的已完成恢复标记，避免崩溃窗口重复模型轮次。
+	TaskWakeAcknowledged func(context.Context, *ihtml.ChatSessionContext, string) (bool, error)
+	// PrepareTurn receives the newest user message or a trusted TaskWakeID(ctx) event, not the browser's
 	// transcript. The host owns identity, permissions, model selection, History,
 	// SessionID, EngineSession and InvocationScope. Return a fresh request.
 	PrepareTurn func(context.Context, *ihtml.ChatSessionContext, *ihtml.ChatClientEvent) (*agent.TurnRequest, error)
@@ -227,9 +232,20 @@ func (b *Backend) NewSession(ctx context.Context, sctx *ihtml.ChatSessionContext
 	ctx, cancel := context.WithCancel(ctx)
 	s := &session{backend: b, sctx: copyContext, ctx: ctx, cancel: cancel,
 		wake: make(chan struct{}, 1), done: make(chan struct{}), pendingTools: make(map[string]*pendingTool)}
-	if b.cfg.Tasks != nil {
+	if b.cfg.Tasks != nil || b.cfg.TasksProvider != nil {
 		var err error
-		taskConfig := *b.cfg.Tasks
+		taskConfig := agent.TaskConfig{}
+		if b.cfg.Tasks != nil {
+			taskConfig = *b.cfg.Tasks
+		}
+		if b.cfg.TasksProvider != nil {
+			host := s.sctx
+			taskConfig, err = b.cfg.TasksProvider(ctx, &host)
+			if err != nil {
+				cancel()
+				return nil, err
+			}
+		}
 		onComplete := taskConfig.OnComplete
 		taskConfig.OnComplete = func(info agent.TaskInfo) {
 			// 通知只发送句柄与调用状态；模型按需读取真实回执，不自动编排新的动作。
@@ -271,6 +287,7 @@ func (b *Backend) NewSession(ctx context.Context, sctx *ihtml.ChatSessionContext
 			return nil, err
 		}
 		s.runner = runner
+		s.startTaskWake()
 		return s, nil
 	}
 	if b.cfg.Confirmation != nil {
@@ -278,6 +295,7 @@ func (b *Backend) NewSession(ctx context.Context, sctx *ihtml.ChatSessionContext
 		s.cancelDone = make(chan struct{})
 		go s.cancelToolLoop()
 	}
+	s.startTaskWake()
 	go s.loop()
 	return s, nil
 }
@@ -296,6 +314,9 @@ type session struct {
 	tasks              *agent.TaskRuntime
 	asyncConfirmations int
 	confirmationTasks  sync.WaitGroup
+	taskWakeDone       chan struct{}
+	taskWakeStopped    bool
+	taskWakes          map[string]taskWakeState
 	sctx               ihtml.ChatSessionContext
 	ctx                context.Context
 	cancel             context.CancelFunc
@@ -325,6 +346,9 @@ func (s *session) Close() {
 		s.runner.Close()
 		if s.tasks != nil {
 			s.tasks.Close()
+			if s.taskWakeDone != nil {
+				<-s.taskWakeDone
+			}
 		}
 		return
 	}
@@ -343,12 +367,13 @@ func (s *session) HandleEvent(ctx context.Context, ev *ihtml.ChatClientEvent) {
 	if ev == nil || ctx == nil || ctx.Err() != nil {
 		return
 	}
+	if ev.Type == ihtml.ChatClientUserMessage {
+		s.restartTaskWakes(ctx)
+	}
 	if s.runner != nil {
 		if ev.Type == ihtml.ChatClientCancel {
-			if s.tasks != nil {
-				s.tasks.CancelAll()
-			}
 			s.runner.Stop()
+			s.stopTaskWakes()
 			s.mu.Lock()
 			s.queueRejected = false
 			s.mu.Unlock()
@@ -369,9 +394,12 @@ func (s *session) HandleEvent(ctx context.Context, ev *ihtml.ChatClientEvent) {
 		return
 	}
 	if ev.Type == ihtml.ChatClientCancel {
-		if s.tasks != nil {
-			s.tasks.CancelAll()
+		s.mu.Lock()
+		if s.active != nil {
+			s.active()
 		}
+		s.mu.Unlock()
+		s.stopTaskWakes()
 		s.mu.Lock()
 		s.releaseDroppedConfirmationsLocked()
 		s.queue = nil
@@ -481,7 +509,13 @@ func (s *session) queueFull() {
 func (s *session) loop() {
 	defer close(s.done)
 	if s.tasks != nil {
-		defer func() { s.tasks.Close(); s.confirmationTasks.Wait() }()
+		defer func() {
+			if s.taskWakeDone != nil {
+				<-s.taskWakeDone
+			}
+			s.tasks.Close()
+			s.confirmationTasks.Wait()
+		}()
 	}
 	defer s.cleanupPendingTools()
 	s.restoreApprovals()
@@ -561,6 +595,26 @@ func (s *session) emit(ev ihtml.ChatStreamEvent) (err error) {
 }
 
 func (s *session) run(ctx context.Context, cancel context.CancelFunc, ev *ihtml.ChatClientEvent) {
+	wake, waking := ctx.Value(taskWakeQueueKey{}).(taskWakeState)
+	if waking {
+		s.mu.Lock()
+		stopped := s.taskWakeStopped
+		s.mu.Unlock()
+		if stopped {
+			return
+		}
+		var stopWake context.CancelFunc
+		ctx, stopWake = context.WithCancel(ctx)
+		defer stopWake()
+		s.mu.Lock()
+		current, exists := s.taskWakes[ev.RequestID]
+		if exists && current.consumer == wake.consumer {
+			current.cancel = stopWake
+			s.taskWakes[ev.RequestID] = current
+		}
+		s.mu.Unlock()
+		ctx = agent.WithTaskWake(ctx, wake.record.ID, wake.record.Depth)
+	}
 	p := newProjection(s, ctx, cancel)
 	s.mu.Lock()
 	s.activeOutput = p
@@ -610,15 +664,24 @@ func (s *session) run(ctx context.Context, cancel context.CancelFunc, ev *ihtml.
 		if runErr == nil && ctx.Err() != nil {
 			runErr = ctx.Err()
 		}
+		if waking {
+			s.finishTaskWake(ev, runErr == nil)
+		}
+		// 内部事件尚未获得轮次准入时只保留等待，不制造空的 AI 回复或忙碌错误通知。
+		if waking && !p.started {
+			return
+		}
 		p.end(result, runErr)
 	}()
 	models, err := s.backend.Models(ctx)
 	p.mu.Lock()
 	p.modelReady = models.ModelReady
-	p.started = true
-	p.send(ihtml.ChatStreamEvent{Type: ihtml.ChatStreamTurnStart})
-	if rejected || p.pendingNotice {
-		p.sendQueueFull()
+	if !waking {
+		p.started = true
+		p.send(ihtml.ChatStreamEvent{Type: ihtml.ChatStreamTurnStart})
+		if rejected || p.pendingNotice {
+			p.sendQueueFull()
+		}
 	}
 	p.mu.Unlock()
 	if err != nil {
@@ -661,6 +724,12 @@ func (s *session) run(ctx context.Context, cancel context.CancelFunc, ev *ihtml.
 	}
 	copyRequest := *req
 	req = &copyRequest
+	if waking {
+		req.WakeID = wake.record.ID
+		if req.InvocationScope == "" {
+			req.InvocationScope = "wake/" + wake.record.ID
+		}
+	}
 	executionCtx := ctx
 	if lifetime := s.backend.cfg.TurnLifetime; lifetime != nil {
 		host := s.sctx
@@ -693,6 +762,9 @@ func (s *session) run(ctx context.Context, cancel context.CancelFunc, ev *ihtml.
 	}
 	if len(req.Tools) > 0 && s.tasks != nil {
 		req.Tasks = s.tasks
+		s.mu.Lock()
+		req.AllowTaskSuspend = s.tasks.Scope() != "" && !s.taskWakeStopped
+		s.mu.Unlock()
 		if req.InvocationScope == "" {
 			req.InvocationScope = p.id
 		}
@@ -706,6 +778,29 @@ func (s *session) run(ctx context.Context, cancel context.CancelFunc, ev *ihtml.
 	onDelta, onEvent := req.OnDelta, req.OnEvent
 	req.OnDelta = func(text string) { p.delta(text, onDelta) }
 	req.OnEvent = func(step agent.Step) { p.step(step, onEvent) }
+	if waking {
+		s.mu.Lock()
+		stopped := s.taskWakeStopped
+		s.mu.Unlock()
+		if stopped {
+			runErr = context.Canceled
+			return
+		}
+		if runErr = s.tasks.UpdateWake(executionCtx, s.tasks.Scope(), wake.record.ID, wake.consumer, "admit"); runErr != nil {
+			if errors.Is(runErr, agent.ErrTaskWakeBudget) {
+				p.mu.Lock()
+				p.started = true
+				p.send(ihtml.ChatStreamEvent{Type: ihtml.ChatStreamTurnStart})
+				p.mu.Unlock()
+			}
+			return
+		}
+		req.WakeAdmitted = true
+		p.mu.Lock()
+		p.started = true
+		p.send(ihtml.ChatStreamEvent{Type: ihtml.ChatStreamTurnStart})
+		p.mu.Unlock()
+	}
 	if ctx.Err() == nil {
 		result, runErr = s.backend.cfg.Engine.RunTurn(executionCtx, req)
 		if runErr == nil && executionCtx.Err() != nil {

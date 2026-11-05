@@ -17,8 +17,26 @@ func (s *session) scheduleConfirmedTask(ctx context.Context, event *ihtml.ChatCl
 	s.pendingMu.Lock()
 	item := s.pendingTools[event.ToolCall.ConfirmationNonce]
 	s.pendingMu.Unlock()
-	if item == nil || !item.background {
+	if item == nil {
 		return false
+	}
+	if !item.background {
+		// 同步批准也记入同一账本，但保持原队列顺序；持久化不改变模型选择的执行方式。
+		copied := *event
+		card := *event.ToolCall
+		copied.ToolCall = &card
+		tool := item.tool
+		started := false
+		tool.Handler = func(callCtx context.Context, _ json.RawMessage) (string, error) {
+			started = true
+			return s.runConfirmedTool(callCtx, func() {}, &copied, false)
+		}
+		parent := context.WithValue(item.invocation, batchIntermediateContextKey{}, ctx.Value(batchIntermediateContextKey{}))
+		_, err := s.tasks.Call(parent, item.taskScope, "confirmed/"+item.invocationScope, card.ConfirmationNonce+"/"+rand.Text(), tool, item.args)
+		if err != nil && !started {
+			s.runConfirmedTool(ctx, func() {}, &copied, true)
+		}
+		return true
 	}
 	copied := *event
 	card := *event.ToolCall

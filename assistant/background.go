@@ -25,16 +25,20 @@ type BackgroundConfig struct {
 	IdleTTL        time.Duration
 	MaxSessions    int
 	MaxReplayBytes int
+	// RestoreSessions 由宿主从持久等待登记解析当前仍获准的会话，不接受模型提供的身份。
+	RestoreSessions func(context.Context) ([]ihtml.ChatSessionContext, error)
+	RestoreInterval time.Duration
 }
 
 type BackgroundBackend struct {
-	cfg      BackgroundConfig
-	ctx      context.Context
-	cancel   context.CancelFunc
-	mu       sync.Mutex
-	sessions map[string]*backgroundSession
-	closed   bool
-	done     chan struct{}
+	cfg         BackgroundConfig
+	ctx         context.Context
+	cancel      context.CancelFunc
+	mu          sync.Mutex
+	sessions    map[string]*backgroundSession
+	closed      bool
+	done        chan struct{}
+	restoreDone chan struct{}
 }
 
 type backgroundSession struct {
@@ -85,6 +89,10 @@ func NewBackgroundBackend(cfg BackgroundConfig) (*BackgroundBackend, error) {
 	ctx, cancel := context.WithCancel(cfg.Lifetime)
 	b := &BackgroundBackend{cfg: cfg, ctx: ctx, cancel: cancel, sessions: map[string]*backgroundSession{}, done: make(chan struct{})}
 	go b.sweep()
+	if cfg.RestoreSessions != nil {
+		b.restoreDone = make(chan struct{})
+		go b.restoreSessions()
+	}
 	return b, nil
 }
 
@@ -131,6 +139,10 @@ func (b *BackgroundBackend) NewSession(ctx context.Context, sc *ihtml.ChatSessio
 		}
 		// 保留宿主绑定值，取消仅跟随后端生命周期，不能跟随某一条 HTTP/WS 连接。
 		values := context.WithoutCancel(ctx)
+		// 重启恢复由服务生命周期调用 NewSession；可信身份绑定仍来自恢复的 Request。
+		if sc.Request != nil {
+			values = context.WithoutCancel(sc.Request.Context())
+		}
 		root, cancel := context.WithCancel(values)
 		stop := context.AfterFunc(b.ctx, cancel)
 		source := *sc
@@ -362,6 +374,9 @@ func (e *backgroundSession) close() {
 func (b *BackgroundBackend) Close() {
 	b.cancel()
 	<-b.done
+	if b.restoreDone != nil {
+		<-b.restoreDone
+	}
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
@@ -373,5 +388,40 @@ func (b *BackgroundBackend) Close() {
 	b.mu.Unlock()
 	for _, e := range entries {
 		e.close()
+	}
+}
+
+// 恢复仅重新接入可信会话与事件消费器；不重建原工具调用或自动批准写入。
+func (b *BackgroundBackend) restoreSessions() {
+	defer close(b.restoreDone)
+	interval := b.cfg.RestoreInterval
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		ctx, stop := context.WithTimeout(b.ctx, 10*time.Second)
+		rows, err := b.cfg.RestoreSessions(ctx)
+		if err == nil {
+			for _, sc := range rows {
+				if ctx.Err() != nil {
+					break
+				}
+				if sc.Emit == nil {
+					sc.Emit = func(ihtml.ChatStreamEvent) error { return nil }
+				}
+				attachment, e := b.NewSession(ctx, &sc)
+				if e == nil {
+					attachment.Close()
+				}
+			}
+		}
+		stop()
+		select {
+		case <-b.ctx.Done():
+			return
+		case <-ticker.C:
+		}
 	}
 }

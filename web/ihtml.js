@@ -7538,7 +7538,7 @@
         if (!runID) return this.turn;
         let t = this.turnsByRun.get(runID);
         if (!t && ev.type === 'turn_start') {
-          if (!(this.turn?.acceptNextRun) && (ev.restored_approval || ev.background_replay)) {
+          if ((!(this.turn?.acceptNextRun) || ev.restored_approval && ev.task_id) && (ev.restored_approval || ev.background_replay)) {
             const foreground = this.turn;
             t = this.beginTurn('deep');
             this.turn = foreground && !foreground.done ? foreground : t;
@@ -7555,6 +7555,7 @@
           }
         }
         if (!t) return null;
+        if (t.done && t.pendingCount === 0 && !['turn_start','confirmation_required'].includes(ev.type)) return null;
         const seq = Number(ev.seq) || 0;
         const previous = t.runSeq.get(runID) || 0;
         if (seq && seq <= previous) return null;
@@ -7563,8 +7564,12 @@
       },
       releaseTurnRuns(t) {
         if (!t || t.pendingCount > 0) return;
-        for (const [runID, owner] of this.turnsByRun) if (owner === t) this.turnsByRun.delete(runID);
-        while (this.turnsByRun.size > 128) this.turnsByRun.delete(this.turnsByRun.keys().next().value);
+        // 保留有界的已结束 RunID 关联，让后台提案在模型挂起后仍汇入原确认清单。
+        // eventTurn 会拒绝已结束轮次的迟到正文；保留关联不等于允许改写旧答复。
+        if (this.turnsByRun.size > 128) for (const [runID, owner] of this.turnsByRun) {
+          if (this.turnsByRun.size <= 128) break;
+          if (owner !== this.turn && owner.done && owner.pendingCount === 0) this.turnsByRun.delete(runID);
+        }
       },
       onEvent(ev) {
         if (!ev || typeof ev !== 'object' || typeof ev.type !== 'string') return;
@@ -7614,7 +7619,12 @@
           case 'assistant_budget': break;
           case 'tool_start': this.upsertTool(ev, 'running', t); break;
           case 'tool_result': this.upsertTool(ev, ev.tool_status || 'success', t); break;
-          case 'confirmation_required': this.upsertTool(ev, 'pending', t); break;
+          case 'confirmation_required': {
+            // 无工具的挂起轮次可能移除了过程容器；恢复原容器才能同步显示迟到确认的 actions。
+            if (!t.process.isConnected && t.card.isConnected) t.card.insertBefore(t.process, t.actions);
+            this.upsertTool(ev, 'pending', t);
+            break;
+          }
           case 'turn_paused':
             cancelAssistantRender(t);
             this.clearTransientStatus(t);

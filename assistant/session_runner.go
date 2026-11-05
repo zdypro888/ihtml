@@ -258,5 +258,19 @@ func sessionExecution(session, parent context.Context) (context.Context, context
 	if parent.Err() != nil {
 		cancel(context.Cause(parent))
 	}
-	return ctx, cancel, func() { stop(); cancel(context.Canceled) }
+	return sessionParentValues{Context: ctx, parent: parent}, cancel, func() { stop(); cancel(context.Canceled) }
+}
+
+// 入队事件保留父上下文中的可信跟踪值；会话已有身份值优先，取消/期限始终由原合并生命周期控制。
+// 避免队列复制 JSON 后丢失服务端事件来源，再把恢复事件误当成浏览器用户消息。
+type sessionParentValues struct {
+	context.Context
+	parent context.Context
+}
+
+func (c sessionParentValues) Value(key any) any {
+	if value := c.Context.Value(key); value != nil {
+		return value
+	}
+	return c.parent.Value(key)
 }

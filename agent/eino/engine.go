@@ -342,6 +342,12 @@ func (e *Engine) RunTurn(ctx context.Context, req *ai.TurnRequest) (turnResult *
 	}
 	if result != nil {
 		result.Usage.InputTokens += summaryUsage.InputTokens
+		if result.Waiting != nil && result.PendingApproval == nil && managedSession {
+			// 等待恢复由独立账本和宿主事件负责，不能留下会阻塞下一轮的原生批准 checkpoint。
+			if cleanupErr := e.runtime.Delete(ctx, approvalCheckpointID(engineSession)); cleanupErr != nil {
+				return result, cleanupErr
+			}
+		}
 		result.Usage.OutputTokens += summaryUsage.OutputTokens
 		toolExposure.ContextCompactions += result.ToolExposure.ContextCompactions
 		result.ToolExposure = toolExposure
@@ -541,6 +547,10 @@ func (e *Engine) newDeepAgent(
 	// the call blindly.
 	patchMiddleware, err := patchtoolcalls.New(ctx, &patchtoolcalls.Config{
 		PatchedContentGenerator: func(_ context.Context, toolName, toolCallID string) (string, error) {
+			if toolName == "task_suspend" && req.WakeID != "" {
+				return "宿主已依据持久等待条件恢复当前事件；请使用本轮事件事实和当前工具核对原请求，不重复登记此前的等待。", nil
+			}
+
 			return fmt.Sprintf("工具调用 %s（ID 为 %s）在会话中断前没有留下结果，执行状态未知。不要假定成功或失败；如仍与当前请求相关，先用只读能力核实当前状态，再决定是否继续。", toolName, toolCallID), nil
 		},
 	})
@@ -983,6 +993,14 @@ func collect(iter *adk.AsyncIterator[*adk.AgentEvent], onEvent func(ai.Step), on
 					continue
 				}
 				payload, ok := point.Info.(string)
+				var suspended struct {
+					Kind string            `json:"kind"`
+					Wait ai.TaskWaitRecord `json:"wait"`
+				}
+				if ok && json.Unmarshal([]byte(payload), &suspended) == nil && suspended.Kind == "task_wait" && suspended.Wait.ID != "" {
+					res.Waiting = &suspended.Wait
+					continue
+				}
 				var item ai.ApprovalTool
 				if !ok || json.Unmarshal([]byte(payload), &item) != nil || item.ToolName == "" || !json.Valid(item.Args) {
 					terminalErr = errors.New("unsupported native interrupt")
@@ -991,7 +1009,9 @@ func collect(iter *adk.AsyncIterator[*adk.AgentEvent], onEvent func(ai.Step), on
 				item.InterruptID = point.ID
 				pendingApproval.Tools = append(pendingApproval.Tools, item)
 			}
-			if pendingApproval.CheckPointID == "" || len(pendingApproval.Tools) == 0 {
+			if res.Waiting != nil && len(pendingApproval.Tools) == 0 {
+				res.FinishReason = "task_waiting"
+			} else if pendingApproval.CheckPointID == "" || len(pendingApproval.Tools) == 0 {
 				terminalErr = errors.New("incomplete approval checkpoint")
 			} else {
 				res.PendingApproval = pendingApproval
@@ -1096,6 +1116,21 @@ func collect(iter *adk.AsyncIterator[*adk.AgentEvent], onEvent func(ai.Step), on
 	}
 	if terminalErr != nil {
 		return preservePartialAgentError(res, pending, terminalErr)
+	}
+	if res.Waiting != nil && res.PendingApproval == nil {
+		for i := range res.Steps {
+			if res.Steps[i].ToolName == "task_suspend" && res.Steps[i].Result == "" {
+				encoded, _ := json.Marshal(map[string]any{"status": "waiting", "wait_id": res.Waiting.ID})
+				res.Steps[i].Result = string(encoded)
+				res.Steps[i].Completion = ai.ToolCompletionAsynchronous
+				if onEvent != nil {
+					onEvent(res.Steps[i])
+				}
+			}
+		}
+		res.Text = "已保存等待条件，事件到达后将继续核对原请求。"
+		res.FinishReason = "task_waiting"
+		return res, nil
 	}
 	if res.PendingApproval != nil {
 		for i := range res.Steps {

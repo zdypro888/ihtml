@@ -354,3 +354,21 @@ func TestSessionRunnerInlineParentCauseAndPanic(t *testing.T) {
 	}
 	runnerReceive(t, r.Done())
 }
+
+// 补充队列事件的来源值不能覆盖会话的可信身份；取消仍按原父/会话生命周期传播。
+func TestSessionExecutionPreservesEventValuesWithoutReplacingIdentity(t *testing.T) {
+	type key string
+	owner := context.WithValue(t.Context(), key("identity"), "trusted-owner")
+	parent, cancel := context.WithCancel(context.WithValue(context.WithValue(t.Context(), key("identity"), "different-parent"), key("event"), "trusted-event"))
+	execution, _, finish := sessionExecution(owner, parent)
+	defer finish()
+	if execution.Value(key("identity")) != "trusted-owner" || execution.Value(key("event")) != "trusted-event" {
+		t.Fatal("event provenance or session identity changed")
+	}
+	cancel()
+	select {
+	case <-execution.Done():
+	case <-time.After(time.Second):
+		t.Fatal("parent cancellation lost")
+	}
+}

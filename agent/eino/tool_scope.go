@@ -23,7 +23,7 @@ import (
 const (
 	// Bump when the durable Deep Agent's tool or lifecycle contract changes so
 	// managed sessions cannot replay traces produced by an incompatible runtime.
-	deepAgentRuntimeVersion = "native-deep-toolsearch-v10"
+	deepAgentRuntimeVersion = "native-deep-toolsearch-v11"
 
 	toolSearchToolName = "tool_search"
 )
@@ -34,14 +34,15 @@ const (
 type turnToolMiddleware struct {
 	adk.TypedBaseChatModelAgentMiddleware[*schema.Message]
 
-	dynamicNames map[string]struct{}
-	toolInfos    map[string]*schema.ToolInfo
-	tools        map[string]ai.Tool
-	exposure     *ai.ToolExposure
-	sessionID    string
-	tasks        *ai.TaskRuntime
-	taskScope    string
-	taskApproval bool
+	dynamicNames   map[string]struct{}
+	toolInfos      map[string]*schema.ToolInfo
+	tools          map[string]ai.Tool
+	exposure       *ai.ToolExposure
+	sessionID      string
+	tasks          *ai.TaskRuntime
+	taskScope      string
+	taskApproval   bool
+	suspendAllowed map[string]bool
 
 	mu            sync.Mutex
 	selected      map[string]struct{}
@@ -152,6 +153,16 @@ func (m *turnToolMiddleware) AfterModelRewriteState(
 		return ctx, state, nil
 	}
 
+	m.mu.Lock()
+	if m.suspendAllowed == nil {
+		m.suspendAllowed = map[string]bool{}
+	}
+	for _, call := range message.ToolCalls {
+		if call.Function.Name == "task_suspend" {
+			m.suspendAllowed[call.ID] = len(message.ToolCalls) == 1
+		}
+	}
+	m.mu.Unlock()
 	kept := make([]schema.ToolCall, 0, len(message.ToolCalls))
 	seenInMessage := make(map[string]struct{}, len(message.ToolCalls))
 	removed := 0
@@ -267,6 +278,14 @@ func (m *turnToolMiddleware) guardInvokable(next compose.InvokableToolEndpoint) 
 		if input == nil {
 			return next(ctx, input)
 		}
+		if input.Name == "task_suspend" {
+			m.mu.Lock()
+			single := m.suspendAllowed[input.CallID]
+			m.mu.Unlock()
+			if !single {
+				return &compose.ToolOutput{Result: `{"state":"not_registered","message":"Suspend must be the only tool in this model step; obtain the other results first."}`}, nil
+			}
+		}
 		if m.tasks != nil && input.Name == taskStartTool {
 			return m.startTask(ctx, input)
 		}
@@ -278,7 +297,7 @@ func (m *turnToolMiddleware) guardInvokable(next compose.InvokableToolEndpoint) 
 		}
 		key, sideEffect := m.effectCallKey(input.Name, input.Arguments)
 		if !sideEffect {
-			return next(ctx, input)
+			return m.recordInvocation(ctx, input, next)
 		}
 		return m.invokeSideEffectOnce(ctx, input, key, next)
 	}
@@ -314,7 +333,7 @@ func (m *turnToolMiddleware) invokeSideEffectOnce(
 		sum := sha256.Sum256([]byte(m.sessionID + "\x00" + key))
 		callCtx = ai.WithToolInvocationKey(ctx, fmt.Sprintf("%x", sum[:]))
 	}
-	output, err := next(callCtx, input)
+	output, err := m.recordInvocation(callCtx, input, next)
 	current.err = err
 	if output != nil {
 		current.result = output.Result
