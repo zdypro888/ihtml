@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -73,10 +75,12 @@ func TestToolHistoryPersistsBeforeDeliveryAndFailurePreventsIssuedCard(t *testin
 			s, err := b.NewSession(context.Background(), &ihtml.ChatSessionContext{User: "owner", Emit: func(ev ihtml.ChatStreamEvent) error {
 				if ev.Type == ihtml.ChatStreamConfirmationRequired {
 					mu.Lock()
-					_, ok := records[ev.ToolCall.ID]
+					saved, ok := records[ev.ToolCall.ID]
 					mu.Unlock()
 					if !ok {
 						t.Error("card emitted before durable history")
+					} else if saved.UpdatedAt == nil || ev.ToolUpdatedAt == nil || !saved.UpdatedAt.Equal(*ev.ToolUpdatedAt) || saved.RunID != ev.RunID || saved.Sequence != ev.Seq {
+						t.Error("live and persisted operation metadata differ")
 					}
 					if ev.ToolCall.Body.(map[string]any)["record"] != "public" {
 						t.Error("callback mutated signed call")
@@ -166,5 +170,47 @@ func TestToolHistoryOversizeCannotBypassPersistence(t *testing.T) {
 	}}}, sctx: ihtml.ChatSessionContext{Emit: func(ihtml.ChatStreamEvent) error { emitted = true; return nil }}}
 	if err := s.emit(ihtml.ChatStreamEvent{Type: ihtml.ChatStreamConfirmationRequired, ToolCall: &ihtml.ProposedToolCall{ID: "original", Body: strings.Repeat("x", 600<<10)}}); err == nil || emitted {
 		t.Fatal("oversized proposal bypassed durable history", err, emitted)
+	}
+}
+
+// 与浏览器共用协议向量，验证持久快照及实时分页合并具有同样的状态、范围和结果语义。
+func TestToolHistorySharedMergeConformance(t *testing.T) {
+	raw, err := os.ReadFile("testdata/operation_merge.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var vectors []struct {
+		Name           string
+		Previous, Next ToolHistoryRecord
+		Expected       map[string]any
+	}
+	if err = json.Unmarshal(raw, &vectors); err != nil {
+		t.Fatal(err)
+	}
+	var subset func(*testing.T, map[string]any, map[string]any)
+	subset = func(t *testing.T, actual, expected map[string]any) {
+		t.Helper()
+		for key, want := range expected {
+			if child, ok := want.(map[string]any); ok {
+				got, _ := actual[key].(map[string]any)
+				subset(t, got, child)
+			} else if want == false && actual[key] == nil {
+				// omitempty 的 false 与浏览器显式 false 具有相同协议语义。
+				continue
+			} else if !reflect.DeepEqual(actual[key], want) {
+				t.Fatalf("%s: got %#v want %#v", key, actual[key], want)
+			}
+		}
+	}
+	for _, v := range vectors {
+		t.Run(v.Name, func(t *testing.T) {
+			raw, err := json.Marshal(MergeToolHistory(v.Previous, v.Next))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var actual map[string]any
+			_ = json.Unmarshal(raw, &actual)
+			subset(t, actual, v.Expected)
+		})
 	}
 }

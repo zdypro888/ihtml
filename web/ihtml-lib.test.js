@@ -1207,3 +1207,10 @@ test('host presentation facts replace guessed request facts with readable signed
  assert.deepEqual(view.facts,[{label:'完整账号名单',value:names},{label:'范围',value:'全部文件'}]);
  assert.ok(view.request.includes('proxySelection'));
 });
+
+// Go 持久快照与浏览器归并读取同一组协议向量，防止两端各自修补状态逻辑。
+test('public operation merge matches shared persistence conformance vectors',()=>{
+ const vectors=require('../assistant/testdata/operation_merge.json');
+ const subset=(actual,expected)=>{for(const [key,value]of Object.entries(expected)){if(value&&typeof value==='object'&&!Array.isArray(value))subset(actual[key],value);else assert.deepEqual(actual[key],value,key)}};
+ for(const vector of vectors){const before=JSON.stringify(vector);subset(chatTrace.mergeOperationRecord(vector.previous,vector.next),vector.expected);assert.equal(JSON.stringify(vector),before,vector.name)}
+});

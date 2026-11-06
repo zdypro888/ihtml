@@ -285,15 +285,17 @@ type ChatStreamEvent struct {
 	ToolID            string          `json:"tool_id,omitempty"`
 	ConfirmationNonce string          `json:"confirmation_nonce,omitempty"`
 	ToolResult        json.RawMessage `json:"tool_result,omitempty"`
-	ToolName          string          `json:"tool_name,omitempty"`
-	ToolTitle         string          `json:"tool_title,omitempty"`
-	ToolStatus        string          `json:"tool_status,omitempty"`
-	ToolInput         string          `json:"tool_input,omitempty"`
-	ToolSummary       string          `json:"tool_summary,omitempty"`
-	ToolDebug         json.RawMessage `json:"tool_debug,omitempty"`
-	Plan              []ChatPlanItem  `json:"plan,omitempty"`
-	Agent             *ChatAgentStage `json:"agent,omitempty"`
-	Budget            *ChatTurnBudget `json:"budget,omitempty"`
+	// ToolUpdatedAt 是公开操作事实的统一时间，实时显示与持久快照复用，不能在回放时重新生成。
+	ToolUpdatedAt *time.Time      `json:"tool_updated_at,omitempty"`
+	ToolName      string          `json:"tool_name,omitempty"`
+	ToolTitle     string          `json:"tool_title,omitempty"`
+	ToolStatus    string          `json:"tool_status,omitempty"`
+	ToolInput     string          `json:"tool_input,omitempty"`
+	ToolSummary   string          `json:"tool_summary,omitempty"`
+	ToolDebug     json.RawMessage `json:"tool_debug,omitempty"`
+	Plan          []ChatPlanItem  `json:"plan,omitempty"`
+	Agent         *ChatAgentStage `json:"agent,omitempty"`
+	Budget        *ChatTurnBudget `json:"budget,omitempty"`
 	// FinishReason and Usage are populated on assistant_done when the provider
 	// exposes them. FinishReason is provider-defined; clients should display it
 	// only as diagnostic metadata and must tolerate unknown values.

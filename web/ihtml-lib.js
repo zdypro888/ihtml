@@ -1173,7 +1173,42 @@
       };
     }
 
-    return { toolView, safeText, reviewView };
+    // 公开操作记录的同一合并协议用于实时更新、分页与重连；不读取工具名或授权令牌。
+    function operationUpdateAllowed(old, next) {
+      if (!old || !old.id) return true;
+      if (old.id !== next.id) return false;
+      if (old.runId && old.runId === next.runId && old.sequence > 0 && next.sequence > 0 && next.sequence <= old.sequence) return false;
+      if (old.updatedAt && next.updatedAt && Date.parse(next.updatedAt) < Date.parse(old.updatedAt)) return false;
+      if (['success','error','cancelled'].includes(old.status) && next.status !== old.status) return false;
+      return !(old.status === 'running' && next.status === 'pending' || ['accepted','unknown'].includes(old.status) && ['pending','running'].includes(next.status));
+    }
+    function mergeOperationRecord(previous, incoming) {
+      const next = JSON.parse(JSON.stringify(incoming));
+      if (!previous || !previous.id) return next;
+      const old = JSON.parse(JSON.stringify(previous));
+      if (old.id !== next.id) return old;
+      if (!old.proposalRecorded && next.proposalRecorded) {
+        old.call = next.call;old.proposalRecorded = true;old.receiptOnly = false;
+      }
+      if (!operationUpdateAllowed(old, next)) return old;
+      if (old.status === next.status) {
+        if (next.result == null) next.result = old.result;
+        if (!next.summary) next.summary = old.summary;
+      }
+      if (old.proposalRecorded) {next.call = old.call;next.proposalRecorded = true;next.receiptOnly = false;}
+      else {
+        const call = {...old.call};
+        for (const [key,value] of Object.entries(next.call || {})) if (call[key] == null || call[key] === '') call[key] = value;
+        next.call = call;
+      }
+      if(!next.updatedAt)next.updatedAt=old.updatedAt;
+      if(!next.runId)next.runId=old.runId;
+      if(next.runId===old.runId&&!next.sequence)next.sequence=old.sequence;
+      next.afterMessageId = old.afterMessageId;
+      return next;
+    }
+
+    return { toolView, safeText, reviewView, mergeOperationRecord, operationUpdateAllowed };
   })();
 
   /* ---------- fmt: 数字/金额/时间格式化(AI 生成代码的标准件) ---------- */

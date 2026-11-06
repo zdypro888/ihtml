@@ -1,0 +1,498 @@
+[
+  {
+    "name": "partial reference preserves unsigned request",
+    "previous": {
+      "id": "op",
+      "call": {
+        "id": "op",
+        "name": "arbitrary",
+        "method": "POST",
+        "path": "/objects",
+        "body": {
+          "target": "original"
+        }
+      },
+      "status": "running",
+      "runId": "run",
+      "sequence": 2,
+      "updatedAt": "2026-11-06T08:00:02Z",
+      "afterMessageId": "anchor"
+    },
+    "next": {
+      "id": "op",
+      "call": {
+        "id": "op",
+        "name": "arbitrary",
+        "method": ""
+      },
+      "status": "success",
+      "result": {
+        "saved": true
+      },
+      "sequence": 3,
+      "runId": "run"
+    },
+    "expected": {
+      "status": "success",
+      "call": {
+        "id": "op",
+        "name": "arbitrary",
+        "method": "POST",
+        "path": "/objects",
+        "body": {
+          "target": "original"
+        }
+      },
+      "afterMessageId": "anchor",
+      "result": {
+        "saved": true
+      }
+    }
+  },
+  {
+    "name": "stale same status cannot replace result",
+    "previous": {
+      "id": "op",
+      "call": {
+        "id": "op",
+        "name": "arbitrary",
+        "method": "POST",
+        "path": "/objects",
+        "body": {
+          "target": "original"
+        }
+      },
+      "status": "success",
+      "runId": "run",
+      "sequence": 4,
+      "updatedAt": "2026-11-06T08:00:04Z",
+      "afterMessageId": "anchor",
+      "result": {
+        "saved": true
+      },
+      "summary": "saved"
+    },
+    "next": {
+      "id": "op",
+      "call": {
+        "id": "op",
+        "name": "arbitrary",
+        "method": "POST",
+        "path": "/objects",
+        "body": {
+          "target": "original"
+        }
+      },
+      "status": "success",
+      "runId": "run",
+      "sequence": 3,
+      "updatedAt": "2026-11-06T08:00:04Z",
+      "afterMessageId": "anchor",
+      "result": {
+        "saved": false
+      },
+      "summary": "saved"
+    },
+    "expected": {
+      "sequence": 4,
+      "result": {
+        "saved": true
+      }
+    }
+  },
+  {
+    "name": "new same status enriches result",
+    "previous": {
+      "id": "op",
+      "call": {
+        "id": "op",
+        "name": "arbitrary",
+        "method": "POST",
+        "path": "/objects",
+        "body": {
+          "target": "original"
+        }
+      },
+      "status": "success",
+      "runId": "run",
+      "sequence": 4,
+      "updatedAt": "2026-11-06T08:00:04Z",
+      "afterMessageId": "anchor",
+      "result": {
+        "saved": true
+      },
+      "summary": "saved"
+    },
+    "next": {
+      "id": "op",
+      "call": {
+        "id": "op",
+        "name": "arbitrary",
+        "method": "POST",
+        "path": "/objects",
+        "body": {
+          "target": "original"
+        }
+      },
+      "status": "success",
+      "runId": "run",
+      "sequence": 5,
+      "updatedAt": "2026-11-06T08:00:05Z",
+      "afterMessageId": "anchor",
+      "result": {
+        "saved": true,
+        "reference": "new"
+      },
+      "summary": "saved"
+    },
+    "expected": {
+      "sequence": 5,
+      "result": {
+        "saved": true,
+        "reference": "new"
+      }
+    }
+  },
+  {
+    "name": "terminal cannot regress",
+    "previous": {
+      "id": "op",
+      "call": {
+        "id": "op",
+        "name": "arbitrary",
+        "method": "POST",
+        "path": "/objects",
+        "body": {
+          "target": "original"
+        }
+      },
+      "status": "success",
+      "runId": "run",
+      "sequence": 4,
+      "updatedAt": "2026-11-06T08:00:04Z",
+      "afterMessageId": "anchor",
+      "result": {
+        "saved": true
+      },
+      "summary": "saved"
+    },
+    "next": {
+      "id": "op",
+      "call": {
+        "id": "op",
+        "name": "arbitrary",
+        "method": "POST",
+        "path": "/objects",
+        "body": {
+          "target": "original"
+        }
+      },
+      "status": "running",
+      "runId": "run",
+      "sequence": 6,
+      "updatedAt": "2026-11-06T08:00:06Z",
+      "afterMessageId": "anchor"
+    },
+    "expected": {
+      "status": "success",
+      "result": {
+        "saved": true
+      }
+    }
+  },
+  {
+    "name": "accepted can complete",
+    "previous": {
+      "id": "op",
+      "call": {
+        "id": "op",
+        "name": "arbitrary",
+        "method": "POST",
+        "path": "/objects",
+        "body": {
+          "target": "original"
+        }
+      },
+      "status": "accepted",
+      "runId": "run",
+      "sequence": 2,
+      "updatedAt": "2026-11-06T08:00:02Z",
+      "afterMessageId": "anchor"
+    },
+    "next": {
+      "id": "op",
+      "call": {
+        "id": "op",
+        "name": "arbitrary",
+        "method": "POST",
+        "path": "/objects",
+        "body": {
+          "target": "original"
+        }
+      },
+      "status": "success",
+      "runId": "run",
+      "sequence": 4,
+      "updatedAt": "2026-11-06T08:00:04Z",
+      "afterMessageId": "anchor",
+      "result": {
+        "saved": true
+      },
+      "summary": "saved"
+    },
+    "expected": {
+      "status": "success",
+      "result": {
+        "saved": true
+      }
+    }
+  },
+  {
+    "name": "unknown can complete",
+    "previous": {
+      "id": "op",
+      "call": {
+        "id": "op",
+        "name": "arbitrary",
+        "method": "POST",
+        "path": "/objects",
+        "body": {
+          "target": "original"
+        }
+      },
+      "status": "unknown",
+      "runId": "run",
+      "sequence": 2,
+      "updatedAt": "2026-11-06T08:00:02Z",
+      "afterMessageId": "anchor"
+    },
+    "next": {
+      "id": "op",
+      "call": {
+        "id": "op",
+        "name": "arbitrary",
+        "method": "POST",
+        "path": "/objects",
+        "body": {
+          "target": "original"
+        }
+      },
+      "status": "success",
+      "runId": "run",
+      "sequence": 4,
+      "updatedAt": "2026-11-06T08:00:04Z",
+      "afterMessageId": "anchor",
+      "result": {
+        "saved": true
+      },
+      "summary": "saved"
+    },
+    "expected": {
+      "status": "success"
+    }
+  },
+  {
+    "name": "late proposal enriches without rewinding",
+    "previous": {
+      "id": "op",
+      "call": {
+        "id": "op"
+      },
+      "status": "success",
+      "runId": "run",
+      "sequence": 4,
+      "updatedAt": "2026-11-06T08:00:04Z",
+      "afterMessageId": "anchor",
+      "result": {
+        "saved": true
+      },
+      "summary": "saved",
+      "receiptOnly": true
+    },
+    "next": {
+      "id": "op",
+      "call": {
+        "id": "op",
+        "name": "arbitrary",
+        "method": "POST",
+        "path": "/objects",
+        "body": {
+          "target": "original"
+        }
+      },
+      "status": "pending",
+      "runId": "run",
+      "sequence": 2,
+      "updatedAt": "2026-11-06T08:00:02Z",
+      "afterMessageId": "anchor",
+      "proposalRecorded": true
+    },
+    "expected": {
+      "status": "success",
+      "proposalRecorded": true,
+      "receiptOnly": false,
+      "call": {
+        "id": "op",
+        "name": "arbitrary",
+        "method": "POST",
+        "path": "/objects",
+        "body": {
+          "target": "original"
+        }
+      },
+      "result": {
+        "saved": true
+      }
+    }
+  },
+  {
+    "name": "frozen scope cannot be replaced",
+    "previous": {
+      "id": "op",
+      "call": {
+        "id": "op",
+        "name": "arbitrary",
+        "method": "POST",
+        "path": "/objects",
+        "body": {
+          "target": "original"
+        }
+      },
+      "status": "running",
+      "runId": "run",
+      "sequence": 2,
+      "updatedAt": "2026-11-06T08:00:02Z",
+      "afterMessageId": "anchor",
+      "proposalRecorded": true
+    },
+    "next": {
+      "id": "op",
+      "call": {
+        "id": "op",
+        "path": "/different",
+        "body": {
+          "target": "different"
+        }
+      },
+      "status": "success",
+      "runId": "run",
+      "sequence": 4,
+      "updatedAt": "2026-11-06T08:00:04Z",
+      "afterMessageId": "anchor",
+      "result": {
+        "saved": true
+      },
+      "summary": "saved"
+    },
+    "expected": {
+      "call": {
+        "id": "op",
+        "name": "arbitrary",
+        "method": "POST",
+        "path": "/objects",
+        "body": {
+          "target": "original"
+        }
+      },
+      "status": "success",
+      "proposalRecorded": true
+    }
+  },
+  {
+    "name": "empty replay preserves receipt",
+    "previous": {
+      "id": "op",
+      "call": {
+        "id": "op",
+        "name": "arbitrary",
+        "method": "POST",
+        "path": "/objects",
+        "body": {
+          "target": "original"
+        }
+      },
+      "status": "success",
+      "runId": "run",
+      "sequence": 4,
+      "updatedAt": "2026-11-06T08:00:04Z",
+      "afterMessageId": "anchor",
+      "result": {
+        "saved": true
+      },
+      "summary": "saved"
+    },
+    "next": {
+      "id": "op",
+      "call": {
+        "id": "op"
+      },
+      "status": "success"
+    },
+    "expected": {
+      "result": {
+        "saved": true
+      },
+      "summary": "saved",
+      "call": {
+        "id": "op",
+        "name": "arbitrary",
+        "method": "POST",
+        "path": "/objects",
+        "body": {
+          "target": "original"
+        }
+      }
+    }
+  },
+  {
+    "name": "older cross run timestamp cannot replace result",
+    "previous": {
+      "id": "op",
+      "call": {
+        "id": "op",
+        "name": "arbitrary",
+        "method": "POST",
+        "path": "/objects",
+        "body": {
+          "target": "original"
+        }
+      },
+      "status": "success",
+      "runId": "run",
+      "sequence": 4,
+      "updatedAt": "2026-11-06T08:00:04Z",
+      "afterMessageId": "anchor",
+      "result": {
+        "saved": true
+      },
+      "summary": "saved"
+    },
+    "next": {
+      "id": "op",
+      "call": {
+        "id": "op",
+        "name": "arbitrary",
+        "method": "POST",
+        "path": "/objects",
+        "body": {
+          "target": "original"
+        }
+      },
+      "status": "success",
+      "runId": "other",
+      "sequence": 99,
+      "updatedAt": "2026-11-06T08:00:01Z",
+      "afterMessageId": "anchor",
+      "result": {
+        "saved": false
+      },
+      "summary": "saved"
+    },
+    "expected": {
+      "result": {
+        "saved": true
+      },
+      "runId": "run"
+    }
+  }
+]

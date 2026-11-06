@@ -627,6 +627,10 @@ func (s *session) emit(ev ihtml.ChatStreamEvent) (err error) {
 			s.cancel()
 		}
 	}()
+	if trackedToolHistoryEvent(ev) && ev.ToolUpdatedAt == nil {
+		now := time.Now().UTC()
+		ev.ToolUpdatedAt = &now
+	}
 	if err := s.persistToolHistory(ev); err != nil {
 		return err
 	}
@@ -1027,6 +1031,8 @@ func newProjection(s *session, ctx context.Context, cancel context.CancelFunc) *
 
 // All send calls hold mu across sequence assignment and synchronous emission.
 func (p *projection) send(ev ihtml.ChatStreamEvent) {
+	p.seq++
+	ev.RunID, ev.TurnID, ev.Seq = p.id, p.id+"_turn", p.seq
 	if p.emitFailed {
 		// 网络失败后仍保留后续实际终态；不能因已停止发帧而把历史永久留在执行中。
 		if err := p.session.persistToolHistory(ev); err != nil {
@@ -1034,8 +1040,6 @@ func (p *projection) send(ev ihtml.ChatStreamEvent) {
 		}
 		return
 	}
-	p.seq++
-	ev.RunID, ev.TurnID, ev.Seq = p.id, p.id+"_turn", p.seq
 	ev.ModelReady = p.modelReady
 	if err := p.session.emit(ev); err != nil {
 		p.err = err

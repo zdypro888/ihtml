@@ -633,7 +633,10 @@ SDK 将同一签名提案轮次中同类操作汇总为一张卡：展示公共�
 
 `assistant.Config.PersistToolHistory(ctx, session, record)` 在公开操作事件发出前调用；宿主必须将同一操作 ID 的快照可靠写入自己的存储。失败会阻止确认卡交付。`assistant.ToolHistoryEvent` 和 `MergeToolHistory` 共用公开投影、原提案保留及状态合并规则，不按业务工具名编排。确认提案来自宿主已经脱敏的 Preview，结果只来自 PresentToolResult；原始 Handler 返回值不能直接写入显示快照。取消或断线后，已有实际终态仍有独立、最长五秒的保存窗口，不恢复模型或工具执行。
 
-历史宿主提供 `initialMessages: [{id, role, content, operationId?}]` 和 `initialOperations: [{id, afterMessageId, call, status, summary, result, proposalRecorded, receiptOnly?, updatedAt}]`。`operationId` 显式关联兼容文本，避免重复显示；同文摘要不会被用作操作身份。`call` 保留公开确认范围、facts、review 与请求说明，但签名、nonce 和批准语义始终剥离。`receiptOnly:true` 表示旧记录没有原提案，UI 明确说明缺失，不猜测原范围。
+历史宿主提供 `initialMessages: [{id, role, content, operationId?}]` 和 `initialOperations: [{id, afterMessageId, call, status, summary, result, proposalRecorded, receiptOnly?, updatedAt, runId?, sequence?}]`。`operationId` 显式关联兼容文本，避免重复显示；同文摘要不会被用作操作身份。`call` 保留公开确认范围、facts、review 与请求说明，但签名、nonce 和批准语义始终剥离。`receiptOnly:true` 表示旧记录没有原提案，UI 明确说明缺失，不猜测原范围。
+
+实时事件通过 `tool_updated_at` 与持久快照共享同一更新时间；`runId/sequence` 标识同一 run 内的顺序。浏览器对实时事件、重连与历史分页统一归并，同 Go `MergeToolHistory`：保留原提案范围与结果，拒绝旧序号/旧时间和终态降级，迟到提案只补范围。缺少排序字段的旧数据不清掉已有排序依据。`assistant/testdata/operation_merge.json` 是两端共同执行的协议向量；签名授权始终独立于公开快照，历史加载不能获得批准能力。
+
 
 `operationHistory: {cursor, load: async ({cursor, signal}) => ({items, cursor})}` 分页加载更早的操作；首屏与每页共用校验（最多512项、8MiB）。相同消息锚点的分页会合入原批次，逐项结果直接显示在展开的卡片中。宿主负责游标、所有权、过期与持久化；SDK 不将显示历史作为模型上下文或执行凭据。有效签名卡只能从重新鉴权的实时服务端事件恢复。
 

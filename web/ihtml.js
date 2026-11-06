@@ -68,7 +68,7 @@
             ids.add(record.id);
             const source=record.call||{},call={id:record.id};
             for (const key of ['confirmation_group','name','title','method','path','risk','reason','presentation','review','body','query','confirmation_expires']) if (source[key]!==undefined) call[key]=source[key];
-            const safe=JSON.parse(JSON.stringify({id:record.id,afterMessageId:typeof record.afterMessageId==='string'?record.afterMessageId:'',call,status:['pending','running','accepted','success','error','unknown','cancelled','expired'].includes(record.status)?record.status:'unknown',summary:typeof record.summary==='string'?record.summary:'',result:record.result,proposalRecorded:record.proposalRecorded===true,receiptOnly:record.receiptOnly===true,updatedAt:typeof record.updatedAt==='string'?record.updatedAt:''},(key,value)=>isTechnicalSecretKey(key)?undefined:value));
+            const safe=JSON.parse(JSON.stringify({id:record.id,afterMessageId:typeof record.afterMessageId==='string'?record.afterMessageId:'',call,status:['pending','running','accepted','success','error','unknown','cancelled','expired'].includes(record.status)?record.status:'unknown',summary:typeof record.summary==='string'?record.summary:'',result:record.result,proposalRecorded:record.proposalRecorded===true,receiptOnly:record.receiptOnly===true,updatedAt:typeof record.updatedAt==='string'?record.updatedAt:'',runId:typeof record.runId==='string'?record.runId.slice(0,128):'',sequence:Number.isSafeInteger(record.sequence)&&record.sequence>0?record.sequence:0},(key,value)=>isTechnicalSecretKey(key)?undefined:value));
             bytes+=new TextEncoder().encode(JSON.stringify(safe)).length;
             if (bytes>8*1024*1024) throw new TypeError('ihtml: operation history exceeds 8 MiB');
             return safe;
@@ -5732,33 +5732,33 @@
       // 历史与实时操作复用同一张卡和批次统计；显示快照始终不拥有执行权限。
       appendOperationHistory(records) {
         if (!records.length) return;
-        this.historyTools ||= new Map();this.historyTurns ||= new Map();
+        this.operationRecords ||= new Map();this.historyTurns ||= new Map();
         const groups=new Map();for(const record of records){const key=record.afterMessageId||'';if(!groups.has(key))groups.set(key,[]);groups.get(key).push(record);}
         const previousTurn=this.turn;
         for(const [anchor,items] of groups){
           let t=this.historyTurns.get(anchor);
-          if(!t){
-            t=this.beginTurn('deep');t.done=true;t.historical=true;t.elapsedUnknown=true;
-            t.card.querySelector('.author')?.remove();t.card.classList.add('ihtml-operation-history');
-            t.card.prepend(el('div','t-history-label',T('tool_history_readonly')));
-            const after=this.messageAnchors?.get(anchor)||this.operationHistoryStart;if(after?.isConnected)after.after(t.card);
-            this.historyTurns.set(anchor,t);
-          }
           for(const record of items){
-            const existing=this.historyTools.get(record.id);
+            const existing=this.operationRecords.get(record.id);
             if(existing){
-              // 分页可能补齐旧回执缺失的原提案，但不能覆盖已收到的实时执行证据或授权。
-              if(existing.historical && !existing.historyRecord.proposalRecorded && record.proposalRecorded){
-                existing.call={...record.call,id:record.id};existing.historyRecord=record;
-                if(!existing.receivedLiveEvidence){existing.lastEvent={...existing.lastEvent,tool_summary:record.summary,tool_result:record.result};this.setToolStatus(existing,record.status,existing.ownerTurn);}
-                this.renderToolRecord(existing,existing.lastEvent,existing.ownerTurn);
-              }
+              const merged=chatTraceCore.mergeOperationRecord(existing.publicRecord||existing.historyRecord,record);
+              existing.publicRecord=merged;existing.historyRecord=merged;
+              if(existing.historical)existing.call={...merged.call,id:record.id};
+              existing.lastEvent={...existing.lastEvent,tool_summary:merged.summary,tool_result:merged.result,tool_updated_at:merged.updatedAt};
+              this.setToolStatus(existing,merged.status,existing.ownerTurn);
+              this.renderToolRecord(existing,existing.lastEvent,existing.ownerTurn);
               continue;
             }
+            if(!t){
+              t=this.beginTurn('deep');t.done=true;t.historical=true;t.elapsedUnknown=true;
+              t.card.querySelector('.author')?.remove();t.card.classList.add('ihtml-operation-history');
+              t.card.prepend(el('div','t-history-label',T('tool_history_readonly')));
+              const after=this.messageAnchors?.get(anchor)||this.operationHistoryStart;if(after?.isConnected)after.after(t.card);
+              this.historyTurns.set(anchor,t);
+            }
             this.upsertTool({type:'tool_result',tool_call:{...record.call,id:record.id},tool_status:record.status,tool_summary:record.summary,tool_result:record.result,history_record:record},record.status,t);
-            this.historyTools.set(record.id,t.tools.get(record.id));
+            this.operationRecords.set(record.id,t.tools.get(record.id));
           }
-          t.process.hidden=true;t.actions.hidden=false;
+          if(t){t.process.hidden=true;t.actions.hidden=false;}
         }
         this.turn=previousTurn;
       },
@@ -6154,7 +6154,7 @@
         chatSessionID(true); // 换会话号 = 服务端上下文重开
         this.clearTurnTimers();
         this.log.replaceChildren();
-        this.historyTools?.clear();this.historyTurns?.clear();this.messageAnchors?.clear();
+        this.operationRecords?.clear();this.historyTurns?.clear();this.messageAnchors?.clear();
         this.setFollowing(true);
         this.availabilityNote = null;
         this.turn = null;
@@ -6252,7 +6252,7 @@
         this.close();
         if (this.log) {
           this.log.replaceChildren();
-          this.historyTools?.clear();this.historyTurns?.clear();this.messageAnchors?.clear();this.operationPager=null;this.operationCursor='';
+          this.operationRecords?.clear();this.historyTurns?.clear();this.messageAnchors?.clear();this.operationPager=null;this.operationCursor='';
           this.notice(T('welcome'));
         }
       },
@@ -6973,6 +6973,8 @@
         this.scroll();
       },
 
+      // 展示只读取公开快照，授权仍保留在独立签名调用中，分页不能授予执行能力。
+      toolDisplayCall(rec) {return {...rec.call,...rec.publicRecord?.call};},
       toolView(call, ev) {
         let view = null;
         if (chatTraceCore && typeof chatTraceCore.toolView === 'function') {
@@ -7066,7 +7068,7 @@
         const parent = rec.batchGroup ? rec.batchGroup.items : t.actions;
         if (rec.card.parentNode !== parent) parent.appendChild(rec.card);
         if (rec.countdown) { clearInterval(rec.countdown); rec.countdown = 0; }
-        const view = this.toolView(rec.call, ev || {});
+        const view = this.toolView(this.toolDisplayCall(rec), ev || {});
         rec.view = view;
         rec.title.textContent = view.title;
         // toolView is the single redaction boundary for every visible field.
@@ -7115,9 +7117,10 @@
           }
           rec.body.appendChild(facts);
         }
-        if (rec.historyRecord?.receiptOnly) rec.body.appendChild(el('p','t-reason',T('tool_history_missing_proposal')));
-        if (rec.historyRecord?.updatedAt) {
-          const when = new Date(rec.historyRecord.updatedAt);
+        if ((rec.publicRecord||rec.historyRecord)?.receiptOnly) rec.body.appendChild(el('p','t-reason',T('tool_history_missing_proposal')));
+        const recordedAt = ev.tool_updated_at || rec.publicRecord?.updatedAt || rec.historyRecord?.updatedAt;
+        if (recordedAt) {
+          const when = new Date(recordedAt);
           if (Number.isFinite(when.getTime())) { const time = el('time','t-meta',when.toLocaleString(opts.locale || navigator.language));time.dateTime=when.toISOString();rec.body.appendChild(time); }
         }
         if (rec.status === 'unknown' && typeof opts.verificationLinks === 'function') {
@@ -7134,7 +7137,7 @@
             if (nav.childNodes.length) rec.body.appendChild(nav);
           } catch { /* verification UI must never alter execution */ }
         }
-        const review = chatTraceCore && typeof chatTraceCore.reviewView === 'function' ? chatTraceCore.reviewView(rec.call.review, T, opts.reviewFieldLabel) : null;
+        const review = chatTraceCore && typeof chatTraceCore.reviewView === 'function' ? chatTraceCore.reviewView(this.toolDisplayCall(rec).review, T, opts.reviewFieldLabel) : null;
         if (review && (review.rows.length || review.scope || review.blockingReason)) {
           const section = el('section', 't-review');
           if (review.scope) section.appendChild(el('strong', '', review.scope));
@@ -7298,7 +7301,7 @@
             t.toolGroups.set(key, g);
           }
           g.records = records;
-          const views = records.map(rec => this.toolView(rec.call, rec.lastEvent || {}));
+          const views = records.map(rec => this.toolView(this.toolDisplayCall(rec), rec.lastEvent || {}));
           const common = views[0].facts.filter(fact => views.every(view => view.facts.some(other => other.label === fact.label && other.value === fact.value)));
           g.title.textContent = T('tool_batch_title', {n: records.length});
           g.operation.textContent = views[0].title;
@@ -7390,6 +7393,12 @@
         }
       },
       // 只有服务端执行/撤销回执形成确定状态；本地超时或撤销失败仍可被真实回执纠正。
+      // 同一公开记录输入供实时帧和历史页使用；剥离授权只用于显示合并，不改执行卡的签名副本。
+      operationRecord(ev,status,rec) {
+        if(ev.history_record)return ev.history_record;
+        const call=ev.tool_call||rec?.call||{};
+        return normalizeOperationHistory([{id:call.id||ev.tool_id||rec?.call?.id||rec?.id,call,status,summary:ev.tool_summary,result:ev.tool_result,updatedAt:ev.tool_updated_at,runId:ev.run_id,sequence:ev.seq,proposalRecorded:ev.type==='confirmation_required'}])[0];
+      },
       settledToolStatus(rec) {
         const source = rec?.lastEvent?.type;
         if (source === 'tool_result' && ['accepted', 'success', 'error', 'cancelled'].includes(rec.status)) return rec.status;
@@ -7400,15 +7409,15 @@
         const call = ev.tool_call && typeof ev.tool_call === 'object' ? ev.tool_call : {};
         const nonce = String(call.confirmation_nonce || '');
         // 实时权威事件按原操作 ID 更新历史卡。只有重新下发完整签名提案才开放批准入口。
-        const archived = !ev.history_record && this.historyTools?.get(call.id || ev.tool_id);
+        const candidate = !ev.history_record && this.operationRecords?.get(call.id || ev.tool_id);
+        // 工具 ID 可被模型复用；不同签名 nonce 是不同授权，不能由全局记录索引串卡。
+        const archived = candidate && (!nonce || !candidate.call.confirmation_nonce || candidate.call.confirmation_nonce === nonce) ? candidate : null;
         if (archived) {
-          // 旧提案/开始回放不能回退已核实的历史结果，也不能先替换其原始范围或授权。
-          if (['success','error','cancelled'].includes(archived.status) && status!==archived.status) return;
-          if (['accepted','unknown'].includes(archived.status) && ['pending','running'].includes(status)) return;
-          if (archived.status==='running' && status==='pending') return;
+          const next=this.operationRecord(ev,status,archived);
+          const applicable=chatTraceCore.operationUpdateAllowed(archived.publicRecord||archived.historyRecord,next);
           archived.receivedLiveEvidence=true;
-          if (ev.type === 'confirmation_required' && call.confirmation_token && nonce) {
-            archived.historical = false;archived.call = call;this.historyTools.delete(archived.id);
+          if (applicable && ev.type === 'confirmation_required' && call.confirmation_token && nonce) {
+            archived.historical = false;archived.call = call;
           }
           if (archived.ownerTurn !== t) return this.upsertTool(ev,status,archived.ownerTurn);
         }
@@ -7417,11 +7426,6 @@
         if (nonce) {
           const original = this.findConfirmationRecord({ tool_id: call.id || ev.tool_id, confirmation_nonce: nonce });
           if (original) {
-            // 已有终态后，迟到的中间回执不能回退展示；过期/未知仍允许真实回执纠正。
-            const settled = this.settledToolStatus(original);
-            if (['success', 'error', 'cancelled'].includes(settled) && status !== settled) return;
-            if (settled && ['pending', 'running'].includes(status)) return;
-            if (original.status === 'running' && status === 'pending') return;
             if (original.ownerTurn !== t) {
               this.upsertTool(ev, status, original.ownerTurn);
               this.syncChatControls();
@@ -7476,20 +7480,18 @@
         if (nonce) t.anonymousToolAliases.set(nonce, id);
         // 已签发卡是不可变提案；执行引用序列化出的空 method/path/risk/reason 也不能覆盖它。
         // 新授权使用新 nonce 单独建卡，执行结果只更新状态和结果投影。
-        if (ev.tool_call && !rec.call.confirmation_nonce && !rec.historical) rec.call = Object.assign({}, rec.call, ev.tool_call);
-        const priorEvent=rec.lastEvent, duplicateSettled=ev.type==='tool_result'&&this.settledToolStatus(rec)===status;
-        if (ev.type === 'tool_start' || ev.type === 'tool_result') {
-          rec.interactionError = '';
-          // 新执行证据替换上一阶段结果，不能继续展示撤销失败或旧回执的摘要。
-          rec.lastEvent = Object.assign({}, rec.lastEvent, {tool_summary: '', error: '', tool_result: undefined});
-        }
+        if (ev.tool_call && !rec.call.confirmation_nonce && !rec.historical) for(const [key,value] of Object.entries(ev.tool_call)){if(rec.call[key]==null||rec.call[key]==='')rec.call[key]=value;}
+        const next=this.operationRecord(ev,status,rec), prior=rec.publicRecord||rec.historyRecord;
+        const applicable=chatTraceCore.operationUpdateAllowed(prior,next);
+        const merged=chatTraceCore.mergeOperationRecord(prior,next);
+        rec.publicRecord=merged;
+        this.operationRecords ||= new Map();this.operationRecords.set(merged.id,rec);
+        if(rec.historical){rec.historyRecord=merged;rec.call={...merged.call,id:merged.id};}
+        if(!applicable){this.renderToolRecord(rec,rec.lastEvent,t);return;}
+        if (ev.type === 'tool_start' || ev.type === 'tool_result') rec.interactionError='';
         const previous = rec.status;
-        rec.lastEvent = Object.assign({}, rec.lastEvent, ev, { tool_call: rec.call });
-        // ACK/重连可能只重复终态标识；空引用不代表原结果被撤回。
-        if(duplicateSettled){
-          if(ev.tool_result==null)rec.lastEvent.tool_result=priorEvent.tool_result;
-          if(!ev.tool_summary)rec.lastEvent.tool_summary=priorEvent.tool_summary;
-        }
+        status=merged.status;
+        rec.lastEvent = Object.assign({},rec.lastEvent,ev,{tool_call:rec.call,tool_summary:merged.summary||'',tool_result:merged.result,tool_updated_at:merged.updatedAt});
         if (ev.type === 'tool_start') {
           this.clearTransientStatus(t);
           this.finalizeThinking(t, t.activeThinkingID);
@@ -7686,6 +7688,7 @@
         rec.cancelSent = false;
         rec.interactionError = '';
         const t = rec.ownerTurn;
+        rec.publicRecord=chatTraceCore.mergeOperationRecord(rec.publicRecord||rec.historyRecord,this.operationRecord(ev,'cancelled',rec));
         this.setToolStatus(rec, 'cancelled', t);
         this.releaseAnonymousTool(t, rec.id);
         rec.lastEvent = Object.assign({}, rec.lastEvent, ev, { tool_summary: ev.tool_summary || T('cancelled_not_run') });

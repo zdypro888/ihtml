@@ -1952,12 +1952,27 @@ test('live and historical operations share grouping disclosure scope and result 
   const call=(status,i)=>({id:status+i,name:'arbitrary_operation',title:'Same operation',method:'PUT',path:'/objects',body:{target:'one'},reason:'Exact original scope',confirmation_group:status,confirmation_nonce:'nonce-'+status+i,confirmation_token:'signed-'+status+i});
   const receipt=status=>['pending','running'].includes(status)?undefined:{state:status,reference:'original'};
   window.a=ihtml.mountChat('#a',{locale:'en'});await a.ready();await a.chat.send('original');const s=sockets[0];s.emit({type:'turn_start',run_id:'same',seq:1});let seq=2;
-  for(const status of statuses)for(let i=0;i<2;i++)s.emit({type:status==='pending'?'confirmation_required':status==='running'?'tool_start':'tool_result',run_id:'same',seq:seq++,tool_call:call(status,i),tool_status:status,tool_summary:'Original receipt',tool_result:receipt(status)});
+  for(const status of statuses)for(let i=0;i<2;i++)s.emit({type:status==='pending'?'confirmation_required':status==='running'?'tool_start':'tool_result',run_id:'same',seq:seq++,tool_call:call(status,i),tool_status:status,tool_updated_at:'2026-11-06T08:00:00Z',tool_summary:'Original receipt',tool_result:receipt(status)});
   s.emit({type:'assistant_done',run_id:'same',seq:seq++,message:'same public records'});
-  window.b=ihtml.mountChat('#b',{locale:'en',initialOperations:statuses.flatMap(status=>[0,1].map(i=>({id:status+i,status,proposalRecorded:true,summary:'Original receipt',result:receipt(status),call:call(status,i)})))});await b.ready();
+  window.b=ihtml.mountChat('#b',{locale:'en',initialOperations:statuses.flatMap(status=>[0,1].map(i=>({id:status+i,status,updatedAt:'2026-11-06T08:00:00Z',proposalRecorded:true,summary:'Original receipt',result:receipt(status),call:call(status,i)})))});await b.ready();
  },batchEnabled);
- const read=selector=>page.locator(selector).evaluate(root=>[...root.querySelectorAll('.ihtml-tool-batch')].map(g=>({open:g.open,summary:g.querySelector('.t-batch-head').textContent,cards:[...g.querySelectorAll('.ihtml-tool')].map(c=>({status:c.dataset.status,open:c.open,title:c.querySelector('.t-title').textContent,scope:[...c.querySelectorAll('.tbody > .t-reason,.tbody > .t-facts')].map(e=>e.textContent),result:[...c.querySelectorAll('.tbody > .t-tech-section pre')].map(e=>e.textContent),technical:[...c.querySelectorAll('.t-tech pre')].map(e=>e.textContent)}))})));
+ const read=selector=>page.locator(selector).evaluate(root=>[...root.querySelectorAll('.ihtml-tool-batch')].map(g=>({open:g.open,summary:g.querySelector('.t-batch-head').textContent,cards:[...g.querySelectorAll('.ihtml-tool')].map(c=>({status:c.dataset.status,open:c.open,time:c.querySelector('time')?.dateTime,title:c.querySelector('.t-title').textContent,scope:[...c.querySelectorAll('.tbody > .t-reason,.tbody > .t-facts')].map(e=>e.textContent),result:[...c.querySelectorAll('.tbody > .t-tech-section pre')].map(e=>e.textContent),technical:[...c.querySelectorAll('.t-tech pre')].map(e=>e.textContent)}))})));
  const live=await read('#a'),history=await read('#b');assert.equal(live.length,batchEnabled?8:7);assert.deepEqual(history,live);
- const singles=selector=>page.locator(selector+' .ihtml-trace-actions > .ihtml-tool').evaluateAll(cards=>cards.map(c=>({status:c.dataset.status,open:c.open,title:c.querySelector('.t-title').textContent})));assert.deepEqual(await singles('#b'),await singles('#a'));
+ const singles=selector=>page.locator(selector+' .ihtml-trace-actions > .ihtml-tool').evaluateAll(cards=>cards.map(c=>({status:c.dataset.status,open:c.open,time:c.querySelector('time')?.dateTime,title:c.querySelector('.t-title').textContent})));assert.deepEqual(await singles('#b'),await singles('#a'));
  assert.equal(await page.locator('#a .ihtml-tool-batch > .t-actions button:visible').count(),batchEnabled?1:0);assert.equal(await page.locator('#b .t-actions button:visible').count(),0);
  }});
+
+// 迟到分页与实时结果交错时仍是同一记录；补回提案只补范围，不回退状态或增加空历史块。
+test('history pagination and live receipts share monotonic merge without duplicate wrappers',async(t)=>{
+ const page=await fixture(t);
+ await page.evaluate(async()=>{
+  window.pages=[{items:[{id:'op',afterMessageId:'different-anchor',status:'running',runId:'run',sequence:3,updatedAt:'2026-11-06T08:00:03Z',call:{id:'op'}}],cursor:'proposal'},{items:[{id:'op',afterMessageId:'different-anchor',status:'pending',proposalRecorded:true,updatedAt:'2026-11-06T08:00:01Z',call:{id:'op',name:'arbitrary',title:'Frozen scope',body:{target:'original-target'}}}],cursor:''}];
+  window.a=ihtml.mountChat('#a',{locale:'en',initialMessages:[{id:'u',role:'user',content:'original'}],initialOperations:[{id:'op',afterMessageId:'u',status:'running',receiptOnly:true,runId:'run',sequence:2,updatedAt:'2026-11-06T08:00:02Z',call:{id:'op',name:'arbitrary'}}],operationHistory:{cursor:'older',load:async()=>pages.shift()}});await a.ready();await a.chat.send('read');
+  const s=sockets[0];s.emit({type:'turn_start',run_id:'run',seq:1});s.emit({type:'tool_result',run_id:'run',seq:4,tool_call:{id:'op'},tool_status:'success',tool_result:{saved:true},tool_summary:'verified receipt',tool_updated_at:'2026-11-06T08:00:04Z'});s.emit({type:'assistant_done',run_id:'run',seq:5,message:'done'});
+ });
+ await page.locator('.t-history-more').click();await page.waitForFunction(()=>pages.length===1&&document.querySelector('.t-history-more')&&!document.querySelector('.t-history-more').disabled);
+ assert.equal(await page.locator('.ihtml-operation-history').count(),1);assert.equal(await page.locator('.ihtml-tool[data-status="success"]').count(),1);
+ await page.locator('.t-history-more').click();await page.waitForFunction(()=>!document.querySelector('.t-history-more'));
+ assert.equal(await page.locator('.ihtml-operation-history').count(),1);assert.equal(await page.locator('.ihtml-tool').count(),1);assert.equal(await page.locator('.ihtml-tool').getAttribute('data-status'),'success');
+ await page.locator('.ihtml-tool > summary').click();const text=await page.locator('.ihtml-tool').innerText();assert.match(text,/original-target/);assert.match(text,/saved/);assert.match(text,/verified receipt/);assert.equal(await page.locator('.ihtml-operation-history button').count(),0);
+});

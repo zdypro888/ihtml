@@ -19,6 +19,8 @@ type ToolHistoryRecord struct {
 	ProposalRecorded bool                   `json:"proposalRecorded"`
 	ReceiptOnly      bool                   `json:"receiptOnly,omitempty"`
 	UpdatedAt        *time.Time             `json:"updatedAt,omitempty"`
+	RunID            string                 `json:"runId,omitempty"`
+	Sequence         int64                  `json:"sequence,omitempty"`
 }
 
 // trackedToolHistoryEvent 区分“不属于历史”与“历史快照无效”，不能把保存失败当成可忽略事件。
@@ -71,8 +73,12 @@ func ToolHistoryEvent(event ihtml.ChatStreamEvent) (ToolHistoryRecord, bool) {
 		}
 	}
 	out.Result = append(json.RawMessage(nil), event.ToolResult...)
-	updatedAt := time.Now().UTC()
-	out.UpdatedAt = &updatedAt
+	out.RunID, out.Sequence = event.RunID, event.Seq
+	out.UpdatedAt = event.ToolUpdatedAt
+	if out.UpdatedAt == nil {
+		updatedAt := time.Now().UTC()
+		out.UpdatedAt = &updatedAt
+	}
 	// JSON 往返脱离事件中的 map/slice，持久化回调不能修改仍将发送的签名提案。
 	raw, err := json.Marshal(out)
 	if err != nil || len(raw) > 512<<10 {
@@ -92,6 +98,16 @@ func MergeToolHistory(previous, next ToolHistoryRecord) ToolHistoryRecord {
 	if previous.ID != next.ID {
 		return previous
 	}
+	// 原提案可迟于终态到达；只补齐公开范围，不能借补齐过程回退执行事实。
+	if !previous.ProposalRecorded && next.ProposalRecorded {
+		previous.Call, previous.ProposalRecorded, previous.ReceiptOnly = next.Call, true, false
+	}
+	if previous.RunID != "" && previous.RunID == next.RunID && previous.Sequence > 0 && next.Sequence > 0 && next.Sequence <= previous.Sequence {
+		return previous
+	}
+	if previous.UpdatedAt != nil && next.UpdatedAt != nil && next.UpdatedAt.Before(*previous.UpdatedAt) {
+		return previous
+	}
 	// 重连的迟到提案或开始事件不是新执行证据；未知/已受理仍可由真实结果纠正。
 	if (previous.Status == ihtml.ChatToolSuccess || previous.Status == ihtml.ChatToolError || previous.Status == ihtml.ChatToolCancelled) && next.Status != previous.Status {
 		return previous
@@ -107,12 +123,34 @@ func MergeToolHistory(previous, next ToolHistoryRecord) ToolHistoryRecord {
 		if next.Summary == "" {
 			next.Summary = previous.Summary
 		}
-		if next.Call.Name == "" {
-			next.Call = previous.Call
-		}
 	}
 	if previous.ProposalRecorded {
 		next.Call, next.ProposalRecorded = previous.Call, true
+		next.ReceiptOnly = false
+	} else {
+		// 非确认工具也有完整请求描述；结果引用只补缺字段，不清空或替换原调用范围。
+		oldJSON, _ := json.Marshal(previous.Call)
+		newJSON, _ := json.Marshal(next.Call)
+		var fields, additions map[string]json.RawMessage
+		_ = json.Unmarshal(oldJSON, &fields)
+		_ = json.Unmarshal(newJSON, &additions)
+		for key, value := range additions {
+			if prior, exists := fields[key]; !exists || string(prior) == `""` || string(prior) == "null" {
+				fields[key] = value
+			}
+		}
+		merged, _ := json.Marshal(fields)
+		_ = json.Unmarshal(merged, &next.Call)
+	}
+	// 缺少元数据的旧回执不能清掉排序依据，否则后续迟到帧可能重新覆盖已保存结果。
+	if next.UpdatedAt == nil {
+		next.UpdatedAt = previous.UpdatedAt
+	}
+	if next.RunID == "" {
+		next.RunID = previous.RunID
+	}
+	if next.RunID == previous.RunID && next.Sequence == 0 {
+		next.Sequence = previous.Sequence
 	}
 	next.AfterMessageID = previous.AfterMessageID
 	return next
