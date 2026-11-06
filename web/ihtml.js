@@ -7467,9 +7467,13 @@
         const archived = candidate && (!nonce || !candidate.call.confirmation_nonce || candidate.call.confirmation_nonce === nonce) ? candidate : null;
         if (archived) {
           const next=this.operationRecord(ev,status,archived);
-          const applicable=chatTraceCore.operationUpdateAllowed(archived.publicRecord||archived.historyRecord,next);
+          const prior=archived.publicRecord||archived.historyRecord;
+          const applicable=chatTraceCore.operationUpdateAllowed(prior,next);
+          // 同一提案的历史快照已经包含该序号，重放无需更新展示，却仍须恢复独立的签名授权。
+          // 只允许相同运行/序号且仍待确认的原操作；终态、执行中及旧序号不能被重新开放。
+          const samePendingRevision=prior?.status==='pending'&&next.status==='pending'&&prior.runId&&prior.runId===next.runId&&prior.sequence>0&&prior.sequence===next.sequence;
           archived.receivedLiveEvidence=true;
-          if (applicable && ev.type === 'confirmation_required' && call.confirmation_token && nonce) {
+          if ((applicable||samePendingRevision) && prior?.status==='pending' && ev.type === 'confirmation_required' && call.confirmation_token && nonce) {
             archived.historical = false;archived.call = call;
           }
           if (archived.ownerTurn !== t) return this.upsertTool(ev,status,archived.ownerTurn);
@@ -7806,6 +7810,14 @@
       },
       onEvent(ev) {
         if (!ev || typeof ev !== 'object' || typeof ev.type !== 'string') return;
+        if(ev.background_replay&&Array.isArray(ev.replay_completions)){
+          // 同一传输代次的完成位置与持久消息 RunID 对齐；只覆盖同一流程已保存快照之前的运行。
+          // 新完成但尚未入历史的轮次、仍活动的轮次都不能被当成旧正文丢弃。
+          const completed=ev.replay_completions,through=new Map();
+          const owner=c=>this.turnsByRun.get(c.run_id)||this.turnsByFlow?.get(c.flow_id);
+          for(const c of completed){const t=owner(c);if(t&&this.completedHistoryRuns?.has(c.run_id))through.set(t,Math.max(through.get(t)||0,Number(c.sequence)||0))}
+          for(const c of completed){const t=owner(c);if(t&&c.sequence>0&&c.sequence<=(through.get(t)||0))this.completedHistoryRuns.add(c.run_id)}
+        }
         if (ev.background_session && Number(ev.background_seq)>0) {
           if (this.backgroundSession!==ev.background_session) {this.backgroundSession=ev.background_session;this.backgroundSeq=0;}
           if (Number(ev.background_seq)<=this.backgroundSeq) return;

@@ -2083,6 +2083,35 @@ test('completed historical runs suppress old answers while preserving late autho
  assert.equal(await page.locator('.ihtml-operation-history').count(),1);assert.doesNotMatch(await page.locator('.ihtml-operation-history').innerText(),/STALE_REPLAY/);assert.equal(await page.locator('.ihtml-tool[data-status="pending"]').isVisible(),true);assert.equal(await page.locator('.ihtml-tool[data-status="pending"] .t-actions button.ok').isVisible(),true);
 });
 
+// 回放的完成边界覆盖旧工具轮次，但不吞掉快照之后的活动/已完成新轮次。
+test('replay completion boundaries preserve saved final answers across intermediate tool runs',async(t)=>{
+ const page=await fixture(t);await page.evaluate(async()=>{
+  backgroundExecution=true;window.a=ihtml.mountChat('#a',{initialMessages:[{id:'u',role:'user',content:'Original goal'},{id:'final',role:'assistant',flowId:'f',runId:'final',content:'SAVED_FINAL'}],initialOperations:[{id:'write',afterMessageId:'u',flowId:'f',runId:'receipt',sequence:2,status:'accepted',proposalRecorded:true,call:{id:'write',name:'arbitrary_write'},result:{id:'job'}}]});await a.ready();while(!sockets.length)await new Promise(r=>setTimeout(r,0));
+  window.emit=(type,run_id,seq,background_seq,rest={})=>sockets[0].emit({type,run_id,seq,background_seq,flow_id:'f',background_replay:true,...rest});
+  emit('turn_start','receipt',1,2,{replay_completions:[{run_id:'receipt',flow_id:'f',sequence:4},{run_id:'final',flow_id:'f',sequence:7},{run_id:'newer',flow_id:'f',sequence:10}]});
+  emit('tool_result','receipt',2,3,{tool_call:{id:'write'},tool_status:'accepted'});emit('assistant_done','receipt',3,4,{continuation_pending:true,message:'OLD_RECEIPT'});emit('turn_start','final',1,5);emit('assistant_done','final',2,7,{message:'SAVED_FINAL'});
+ });
+ const flow=page.locator('.ihtml-operation-history');assert.equal(await flow.locator(':scope > .answer').isVisible(),true);assert.equal(await flow.locator(':scope > .answer').innerText(),'SAVED_FINAL');assert.equal(await flow.locator('.ihtml-answer-history').count(),0);assert.equal(await flow.locator('.ihtml-process').evaluate(e=>e.open),false);
+ await page.evaluate(()=>{emit('turn_start','newer',1,8);emit('assistant_done','newer',2,10,{message:'NEW_FINAL_NOT_IN_HISTORY'})});
+ assert.equal(await flow.locator(':scope > .answer').innerText(),'NEW_FINAL_NOT_IN_HISTORY');assert.equal(await flow.locator('.t-prior-answer').textContent(),'SAVED_FINAL');
+});
+
+// 历史提案与可信重放为同一版本：不重复展示状态，但必须恢复原批准入口。
+test('equal revision signed proposal restores historical approval without regressing settled operations',async(t)=>{
+ const page=await fixture(t);await page.evaluate(async()=>{
+  backgroundExecution=true;
+  const call={id:'pending',name:'arbitrary_write',title:'Original scope',body:{target:'one'},confirmation_nonce:'n',confirmation_token:'SIGNED',confirmation_expires:Math.floor(Date.now()/1000)+600};window.call=call;
+  window.a=ihtml.mountChat('#a',{initialMessages:[{id:'u',role:'user',content:'Original request'},{id:'a',role:'assistant',flowId:'f',runId:'r',content:'Review'}],initialOperations:['pending','success','running'].map((status,i)=>({id:i?'other-'+i:'pending',afterMessageId:'u',flowId:'f',runId:'r',sequence:3+i,status,proposalRecorded:true,call:{...call,id:i?'other-'+i:'pending'}}))});await a.ready();while(!sockets.length)await new Promise(r=>setTimeout(r,0));
+ });
+ assert.equal(await page.locator('.t-actions button.ok:visible').count(),0,'public history alone grants no authority');
+ await page.evaluate(()=>{for(let i=0;i<3;i++)sockets[0].emit({type:'confirmation_required',run_id:'r',flow_id:'f',seq:3+i,background_replay:true,tool_call:{...call,id:i?'other-'+i:'pending'}})});
+ assert.equal(await page.locator('.ihtml-tool[data-status="pending"] .t-actions button.ok').isVisible(),true);
+ assert.equal(await page.locator('.ihtml-tool[data-status="success"] .t-actions button.ok:visible').count(),0);
+ assert.equal(await page.locator('.ihtml-tool[data-status="running"] .t-actions button.ok:visible').count(),0);
+ await page.locator('.ihtml-tool[data-status="pending"] .t-actions button.ok').click();
+ assert.equal(await page.evaluate(()=>sockets[0].sent.filter(e=>e.type==='confirm_tool'&&e.tool_call.id==='pending'&&e.tool_call.confirmation_token==='SIGNED').length),1);
+});
+
 // 对照真实确认、自动续办和重新挂载的显示状态；历史不能凭正文相同隐藏新的权威答复。
 for(const mode of ['light','dark'])for(const width of [390,1100])test(`answer versions keep live and restored presentation identical ${mode} ${width}`,async(t)=>{
  const page=await fixture(t,{width,height:900});

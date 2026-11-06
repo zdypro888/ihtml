@@ -185,6 +185,13 @@ func (b *BackgroundBackend) NewSession(ctx context.Context, sc *ihtml.ChatSessio
 	e.clients[client] = true
 	e.touched = time.Now()
 	replay := append([]ihtml.ChatStreamEvent(nil), e.events...)
+	// 完成位置属于当前传输代次；客户端据已保存 RunID 找到快照边界，不猜工具类型或正文。
+	completions := []ihtml.ChatReplayCompletion{}
+	for _, event := range replay {
+		if event.Type == ihtml.ChatStreamAssistantDone || event.Type == ihtml.ChatStreamTurnError {
+			completions = append(completions, ihtml.ChatReplayCompletion{RunID: event.RunID, FlowID: event.FlowID, Sequence: event.BackgroundSeq})
+		}
+	}
 	seen := map[string]bool{}
 	prefix := []ihtml.ChatStreamEvent{}
 	for _, event := range replay {
@@ -196,6 +203,9 @@ func (b *BackgroundBackend) NewSession(ctx context.Context, sc *ihtml.ChatSessio
 		}
 	}
 	replay = append(prefix, replay...)
+	if len(replay) > 0 {
+		replay[0].ReplayCompletions = completions
+	}
 	e.mu.Unlock()
 	for _, event := range replay {
 		event.BackgroundReplay = true

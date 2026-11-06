@@ -148,6 +148,14 @@ func TestBackgroundReplaySnapshotsAndOwnerIsolation(t *testing.T) {
 	replay := newRecorder()
 	attachBackground(t, hub, t.Context(), "owner", "one", replay)
 	events := replay.wait(t, ihtml.ChatStreamAssistantDone, 1)
+	// 首帧携带本次回放的完成位置，历史客户端才能跳过快照之前的工具执行轮次。
+	if len(events) == 0 || len(events[0].ReplayCompletions) != 1 {
+		t.Fatal("missing replay completion boundary", events)
+	}
+	completion := events[0].ReplayCompletions[0]
+	if completion.RunID == "" || completion.Sequence == 0 {
+		t.Fatal("invalid replay completion", completion)
+	}
 	snapshots := 0
 	var seq uint64
 	for _, event := range events {
@@ -160,6 +168,9 @@ func TestBackgroundReplaySnapshotsAndOwnerIsolation(t *testing.T) {
 			if event.Delta != "abc" {
 				t.Fatal("delta replay was not a full snapshot", event)
 			}
+		}
+		if event.Type == ihtml.ChatStreamAssistantDone && (event.RunID != completion.RunID || event.BackgroundSeq != completion.Sequence) {
+			t.Fatal("completion is not the original ordered event", event, completion)
 		}
 	}
 	if snapshots != 1 {

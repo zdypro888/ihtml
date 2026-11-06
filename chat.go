@@ -247,6 +247,14 @@ type ChatTurnBudget struct {
 // assistant_plan / assistant_agent / assistant_budget / tool_start /
 // confirmation_required / cancel_tool_result / tool_result / assistant_done /
 // turn_error。
+// ChatReplayCompletion 标识本次有序回放内的运行完成位置，仅用于对齐已保存的展示快照。
+// 不携带授权；无法在回放中找到已保存轮次时，客户端仍须正常接收后续运行。
+type ChatReplayCompletion struct {
+	RunID    string `json:"run_id"`
+	FlowID   string `json:"flow_id,omitempty"`
+	Sequence uint64 `json:"sequence"`
+}
+
 type ChatStreamEvent struct {
 	// FlowID 关联同一用户目标的多个运行轮次，仅用于公开展示，不授予执行权限。
 	FlowID string `json:"flow_id,omitempty"`
@@ -258,13 +266,15 @@ type ChatStreamEvent struct {
 	BackgroundSession string `json:"background_session,omitempty"`
 	BackgroundSeq     uint64 `json:"background_seq,omitempty"`
 	BackgroundReplay  bool   `json:"background_replay,omitempty"`
-	Type              string `json:"type"`
-	TaskID            string `json:"task_id,omitempty"`
-	TaskState         string `json:"task_state,omitempty"`
-	RunID             string `json:"run_id,omitempty"`
-	TurnID            string `json:"turn_id,omitempty"`
-	Seq               int64  `json:"seq,omitempty"`
-	Delta             string `json:"delta,omitempty"`
+	// ReplayCompletions 只随本次回放首帧下发，避免旧工具轮次覆盖较新的已保存说明。
+	ReplayCompletions []ChatReplayCompletion `json:"replay_completions,omitempty"`
+	Type              string                 `json:"type"`
+	TaskID            string                 `json:"task_id,omitempty"`
+	TaskState         string                 `json:"task_state,omitempty"`
+	RunID             string                 `json:"run_id,omitempty"`
+	TurnID            string                 `json:"turn_id,omitempty"`
+	Seq               int64                  `json:"seq,omitempty"`
+	Delta             string                 `json:"delta,omitempty"`
 	// ContentFormat applies only to assistant_delta.delta and
 	// assistant_done.message. Empty preserves the legacy auto-detected format;
 	// clients must render unknown values as plain text. HTML is always untrusted
