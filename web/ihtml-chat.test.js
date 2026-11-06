@@ -1917,7 +1917,7 @@ test('historical batch summaries collapse compactly and preserve manual expansio
  await batch.locator(':scope > summary').click();assert.equal(await batch.evaluate(e=>e.open),false);assert.equal(await page.locator('.ihtml-operation-history button:visible').count(),0);
 });
 
-// 历史错误与未知也应默认折叠，实时待确认/告警的展开规则不能泄漏到只读历史。
+// 同一操作状态决定两端展开方式；历史只读不恢复按钮，错误与未知回执在两端都可收起核对。
 test('historical cards use the same active and settled disclosure states without restoring authority',async(t)=>{
  const page=await fixture(t);await page.evaluate(async()=>{
   window.a=ihtml.mountChat('#a',{initialOperations:['error','unknown','pending','expired'].map((status,i)=>({id:'attention-'+i,status,proposalRecorded:true,result:{note:'original receipt '+i},call:{name:'different_'+i,title:'Original operation '+i}}))});await a.ready();
