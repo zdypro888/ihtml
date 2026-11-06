@@ -2098,11 +2098,8 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
 .ihtml-process.is-empty > summary::after { display: none; }
 .ihtml-process .p-title { flex: 1 1 140px; font-weight: 500; }
 .ihtml-process .p-meta { flex: 0 1 auto; font-variant-numeric: tabular-nums; font-size: 11px; }
-.ihtml-process .pbody > .ihtml-tool,
 .ihtml-process .pbody > .ihtml-think { background: transparent; border-color: transparent; border-radius: 4px; }
-.ihtml-process .pbody > .ihtml-tool > summary { padding: 5px 22px 5px 0; min-height: 32px; }
 .ihtml-process .pbody > .ihtml-think > summary { padding-left: 0; }
-.ihtml-process .pbody > .ihtml-tool:not([open]) .t-summary { display: none; }
 .ihtml-trace-actions .ihtml-tool[data-status="pending"] > summary .t-summary { display: none; }
 .ihtml-trace-actions .t-reason { margin-top: 0; }
 @media (prefers-reduced-motion: reduce) {

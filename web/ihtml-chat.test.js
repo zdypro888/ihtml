@@ -475,7 +475,7 @@ test('manual_tool_only cancellation matches id and nonce, waits for ACK, fails c
   await page.locator('#a .t-actions button:not(.ok):not(.t-refresh)').click();
   await page.waitForFunction(() => !a.chat.busy);
   assert.equal(await page.locator('#a .ihtml-tool[data-status="error"]').count(), 2);
-  assert.equal(await page.locator('#a .t-actions:not(:has(.t-refresh))').count(), 0);
+  assert.equal(await page.locator('#a .t-actions:not(:has(.t-refresh)) button:visible').count(), 0);
 });
 
 test('connectionAuth in flight is revoked; clear renews session and destroy permits remount', async (t) => {
@@ -1918,11 +1918,12 @@ test('historical batch summaries collapse compactly and preserve manual expansio
 });
 
 // 历史错误与未知也应默认折叠，实时待确认/告警的展开规则不能泄漏到只读历史。
-test('historical attention states collapse by default and stay readable without authority',async(t)=>{
+test('historical cards use the same active and settled disclosure states without restoring authority',async(t)=>{
  const page=await fixture(t);await page.evaluate(async()=>{
   window.a=ihtml.mountChat('#a',{initialOperations:['error','unknown','pending','expired'].map((status,i)=>({id:'attention-'+i,status,proposalRecorded:true,result:{note:'original receipt '+i},call:{name:'different_'+i,title:'Original operation '+i}}))});await a.ready();
  });
- assert.equal(await page.locator('.ihtml-operation-history .ihtml-tool[open]').count(),0);
+ assert.equal(await page.locator('.ihtml-operation-history .ihtml-tool[open]').count(),2);
+ assert.equal(await page.locator('.ihtml-operation-history .ihtml-tool[data-status="pending"]').evaluate(e=>e.open),true);
  assert.equal(await page.locator('.ihtml-operation-history .ihtml-tool').count(),4);
  const first=page.locator('.ihtml-operation-history .ihtml-tool').first();await first.locator('summary.t-head').click();assert.match(await first.innerText(),/original receipt 0/);
  assert.equal(await page.locator('.ihtml-operation-history .t-actions button:visible').count(),0);
@@ -1941,3 +1942,22 @@ test('live batch confirmation stays open until settled and then collapses automa
  assert.equal(await batch.evaluate(e=>e.open),false);assert.match(await batch.locator('.t-batch-status').innerText(),/1/);
  await batch.locator(':scope > summary').click();assert.equal(await batch.locator('.t-batch-list').isVisible(),true);assert.equal(await batch.locator(':scope > .t-actions button').isVisible(),false);
 });
+
+// 同一份公开操作快照经实时事件或历史输入，都必须产生同一种卡片与分组；只读仅去掉授权控件。
+test('live and historical operations share grouping disclosure scope and result placement for every status',async(t)=>{
+ const page=await fixture(t);for(const batchEnabled of [true,false]){await page.evaluate(async(batchEnabled)=>{
+  window.a?.destroy?.();window.b?.destroy?.();sockets.length=0;
+  const original=window.fetch;window.fetch=async(...args)=>{const r=await original(...args),read=r.text;r.text=async()=>JSON.stringify({...JSON.parse(await read()),batch_confirmations:batchEnabled});return r};
+  const statuses=['pending','running','success','accepted','error','unknown','cancelled','expired'];
+  const call=(status,i)=>({id:status+i,name:'arbitrary_operation',title:'Same operation',method:'PUT',path:'/objects',body:{target:'one'},reason:'Exact original scope',confirmation_group:status,confirmation_nonce:'nonce-'+status+i,confirmation_token:'signed-'+status+i});
+  const receipt=status=>['pending','running'].includes(status)?undefined:{state:status,reference:'original'};
+  window.a=ihtml.mountChat('#a',{locale:'en'});await a.ready();await a.chat.send('original');const s=sockets[0];s.emit({type:'turn_start',run_id:'same',seq:1});let seq=2;
+  for(const status of statuses)for(let i=0;i<2;i++)s.emit({type:status==='pending'?'confirmation_required':status==='running'?'tool_start':'tool_result',run_id:'same',seq:seq++,tool_call:call(status,i),tool_status:status,tool_summary:'Original receipt',tool_result:receipt(status)});
+  s.emit({type:'assistant_done',run_id:'same',seq:seq++,message:'same public records'});
+  window.b=ihtml.mountChat('#b',{locale:'en',initialOperations:statuses.flatMap(status=>[0,1].map(i=>({id:status+i,status,proposalRecorded:true,summary:'Original receipt',result:receipt(status),call:call(status,i)})))});await b.ready();
+ },batchEnabled);
+ const read=selector=>page.locator(selector).evaluate(root=>[...root.querySelectorAll('.ihtml-tool-batch')].map(g=>({open:g.open,summary:g.querySelector('.t-batch-head').textContent,cards:[...g.querySelectorAll('.ihtml-tool')].map(c=>({status:c.dataset.status,open:c.open,title:c.querySelector('.t-title').textContent,scope:[...c.querySelectorAll('.tbody > .t-reason,.tbody > .t-facts')].map(e=>e.textContent),result:[...c.querySelectorAll('.tbody > .t-tech-section pre')].map(e=>e.textContent),technical:[...c.querySelectorAll('.t-tech pre')].map(e=>e.textContent)}))})));
+ const live=await read('#a'),history=await read('#b');assert.equal(live.length,batchEnabled?8:7);assert.deepEqual(history,live);
+ const singles=selector=>page.locator(selector+' .ihtml-trace-actions > .ihtml-tool').evaluateAll(cards=>cards.map(c=>({status:c.dataset.status,open:c.open,title:c.querySelector('.t-title').textContent})));assert.deepEqual(await singles('#b'),await singles('#a'));
+ assert.equal(await page.locator('#a .ihtml-tool-batch > .t-actions button:visible').count(),batchEnabled?1:0);assert.equal(await page.locator('#b .t-actions button:visible').count(),0);
+ }});

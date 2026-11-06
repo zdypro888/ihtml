@@ -7062,7 +7062,8 @@
         if (!rec || !t) return;
         const hadFocus = rec.body.contains(doc.activeElement);
         rec.attention = rec.attention || ['pending', 'error', 'unknown'].includes(rec.status);
-        const parent = rec.batchGroup ? rec.batchGroup.items : (rec.historical || rec.attention ? t.actions : t.pBody);
+        // 所有操作进入同一展示区；实时调用不能藏在过程区、历史却另铺一套卡片。
+        const parent = rec.batchGroup ? rec.batchGroup.items : t.actions;
         if (rec.card.parentNode !== parent) parent.appendChild(rec.card);
         if (rec.countdown) { clearInterval(rec.countdown); rec.countdown = 0; }
         const view = this.toolView(rec.call, ev || {});
@@ -7095,7 +7096,7 @@
           primary.id = rec.domID + '-primary';
           rec.body.appendChild(primary);
         }
-        if ((rec.status === 'pending' || rec.historical) && view.reason) {
+        if (view.reason) {
           const reason = el('div', 't-reason');
           reason.append(el('strong', '', view.reasonLabel), doc.createTextNode(view.reason));
           rec.body.appendChild(reason);
@@ -7114,8 +7115,8 @@
           }
           rec.body.appendChild(facts);
         }
-        if (rec.historical && rec.historyRecord.receiptOnly) rec.body.appendChild(el('p','t-reason',T('tool_history_missing_proposal')));
-        if (rec.historical && rec.historyRecord.updatedAt) {
+        if (rec.historyRecord?.receiptOnly) rec.body.appendChild(el('p','t-reason',T('tool_history_missing_proposal')));
+        if (rec.historyRecord?.updatedAt) {
           const when = new Date(rec.historyRecord.updatedAt);
           if (Number.isFinite(when.getTime())) { const time = el('time','t-meta',when.toLocaleString(opts.locale || navigator.language));time.dateTime=when.toISOString();rec.body.appendChild(time); }
         }
@@ -7209,11 +7210,10 @@
 
         const techBody = el('div', 't-tech-body');
         const hasRequest = this.appendTechnicalSection(techBody, T('request_summary'), view.request, rec, 'request');
-        // 历史中的执行结果是核心内容，展开单项后直接可见，不再藏在第二层技术详情里。
-        if (rec.historical) this.appendTechnicalSection(rec.body, T('result_data'), view.result, rec, 'result');
-        const hasResult = !rec.historical && this.appendTechnicalSection(techBody, T('result_data'), view.result, rec, 'result');
+        // 结果是同一张操作卡的核心事实，实时和回放都只需展开一次即可读取。
+        this.appendTechnicalSection(rec.body, T('result_data'), view.result, rec, 'result');
         const hasDebug = this.appendTechnicalSection(techBody, T('diagnostic_data'), view.debug, rec, 'debug');
-        if (view.hasTechnical && (hasRequest || hasResult || hasDebug)) {
+        if (view.hasTechnical && (hasRequest || hasDebug)) {
           const tech = el('details', 't-tech');
           const techSummary = el('summary', '', T('technical_details'));
           techSummary.setAttribute('aria-label', T('technical_details') + ' · ' + view.title);
@@ -7244,10 +7244,7 @@
           refresh.onclick = (event) => {event.preventDefault(); this.send(T('refresh_confirmation_request'));};
           bar.appendChild(refresh); rec.body.appendChild(bar);
         }
-        // 历史中的失败/未知是只读事实，不沿用实时告警的强制展开；状态仍留在摘要，手动展开保留。
-        if (rec.historical) rec.card.open = !!rec.pinned;
-        else if (rec.status === 'pending' || rec.status === 'error' || rec.status === 'unknown' || rec.expired) rec.card.open = true;
-        else if (['success', 'accepted', 'cancelled'].includes(rec.status) && !rec.pinned) rec.card.open = false;
+        rec.card.open = this.toolDisclosureOpen([rec.status], rec.manualOpen, !!rec.batchGroup);
         this.syncToolSummary(rec);
         this.syncToolGroups(t);
         if (hadFocus) queueMicrotask(() => {
@@ -7256,13 +7253,19 @@
           if (target && target.isConnected) target.focus({ preventScroll: true });
         });
       },
-      // 同轮同类签名操作汇总为一张卡；完整参数仍在可展开清单内，不根据展示摘要扩大授权。
+      // 来源不参与展示状态：待确认、进行中及待刷新确认默认展开，执行回执默认收起；显式选择优先。
+      toolDisclosureOpen(statuses, manualOpen, nested = false) {
+        return typeof manualOpen === 'boolean' ? manualOpen : !nested && statuses.some(status => ['pending','running','expired'].includes(status));
+      },
+      // 同轮同类操作使用同一分组；签名和宿主能力仅决定能否整批批准，不决定历史或实时的样式。
       syncToolGroups(t) {
-        if (!t || !t.historical && !this.modelInfo?.batch_confirmations) return;
+        if (!t) return;
         t.toolGroups ||= new Map();
         const buckets = new Map();
         for (const rec of t.tools.values()) {
-          if ((!rec.historical && !rec.call.confirmation_nonce) || !rec.call.name || rec.call.approval_resume === 'checkpoint') continue;
+          if (!rec.call.name || rec.call.approval_resume === 'checkpoint') continue;
+          // 宿主未支持整批批准时仍保留逐项待确认入口；实际执行结束后可按普通回执分组。
+          if (rec.status === 'pending' && !this.modelInfo?.batch_confirmations) continue;
           const key = JSON.stringify([rec.call.confirmation_group || '', rec.call.name, rec.call.method || '', rec.call.risk || '', rec.call.reason || '']);
           if (!buckets.has(key)) buckets.set(key, []);
           buckets.get(key).push(rec);
@@ -7270,7 +7273,7 @@
         // 分页可补齐旧记录的分组信息；移除失效分组，避免留下旧汇总和新汇总两张卡。
         for(const [key,g] of t.toolGroups){
           if((buckets.get(key)||[]).length>=2)continue;
-          for(const rec of g.records)if(rec.batchGroup===g){rec.batchGroup=null;(rec.historical||rec.attention?t.actions:t.pBody).appendChild(rec.card);}
+          for(const rec of g.records)if(rec.batchGroup===g){rec.batchGroup=null;t.actions.appendChild(rec.card);}
           g.card.remove();t.toolGroups.delete(key);
         }
         for (const [key, records] of buckets) {
@@ -7309,10 +7312,9 @@
           }
           const counts = {pending: 0, running: 0, success: 0, accepted: 0, error: 0, unknown: 0, cancelled: 0, expired: 0};
           records.forEach((rec, i) => {
-            const fresh = rec.batchGroup !== g;
             rec.batchGroup = g;
             if (rec.card.parentNode !== g.items) g.items.appendChild(rec.card);
-            if (fresh && !rec.pinned) rec.card.open = false;
+            rec.card.open = this.toolDisclosureOpen([rec.status], rec.manualOpen, true);
             if (Object.hasOwn(counts, rec.status)) counts[rec.status]++;
             const differing = views[i].facts.filter(fact => !common.some(other => other.label === fact.label && other.value === fact.value));
             const label = differing.map(fact => fact.label + '：' + fact.value).join(' · ');
@@ -7320,11 +7322,19 @@
           });
           g.counts.textContent = g.error || Object.entries(counts).filter(([, count]) => count > 0).map(([status, count]) => (TOOL_STATUS_LABEL[status] || status) + ' ' + count).join(' · ');
           g.counts.title = g.counts.textContent;
-          g.card.open = g.manualOpen ?? (!t.historical && records.some(rec => ['pending', 'running', 'error', 'unknown', 'expired'].includes(rec.status)));
-          const pending = records.filter(rec => !rec.historical && rec.status === 'pending' && !rec.expired);
+          g.card.open = this.toolDisclosureOpen(records.map(rec => rec.status), g.manualOpen ?? (records.some(rec => rec.manualOpen === true) ? true : undefined));
+          const pending = records.filter(rec => !rec.historical && rec.status === 'pending' && !rec.expired && rec.call.confirmation_nonce && rec.call.confirmation_token);
           g.confirm.textContent = T('tool_batch_confirm', {n: pending.length});
-          g.confirm.hidden = pending.length === 0;
+          g.confirm.hidden = pending.length === 0 || !this.modelInfo?.batch_confirmations;
           g.confirm.disabled = destroyed || readOnly || authRefreshing || !this.enabled || this.active || this.sending || !!this.confirmationBusy || pending.some(rec => rec.call.review?.blocking_reason || rec.cancelPending || rec.confirmPending);
+        }
+        // 配置加载、分页和执行状态会改变分组创建时机；位置始终按原操作顺序，不能按组建成时间排列。
+        const ordered = [...new Set([...t.tools.values()].map(rec => rec.batchGroup?.card || rec.card))];
+        const current = [...t.actions.children].filter(node => ordered.includes(node));
+        if (current.some((node, index) => node !== ordered[index])) {
+          const focused = doc.activeElement;
+          for (const node of ordered) t.actions.appendChild(node);
+          if (focused && t.actions.contains(focused)) focused.focus({preventScroll:true});
         }
       },
       // 全部宿主确认钩子通过后才发送固定卡片数组；后端原子入队，各项仍独立验签与记录结果。
@@ -7458,7 +7468,7 @@
             countedPending: false, countedError: false, countdown: 0, cancelAckTimer: 0,
             cancelPending: false, cancelSent: false, confirmPending: false, interactionError: '', lastEvent: {},
           };
-          summary.addEventListener('click', () => { rec.pinned = !card.open; if (rec.pinned) this.setFollowing(false); });
+          summary.addEventListener('click', () => { rec.manualOpen = rec.pinned = !card.open; if (rec.pinned) this.setFollowing(false); });
           card.addEventListener('toggle', () => this.syncToolSummary(rec));
           t.tools.set(id, rec);
           t.toolCount++;
