@@ -1860,6 +1860,7 @@ test('structured operation history preserves approval scope and per-item results
  });
  assert.equal(await page.locator('.ihtml-tool-batch').count(),1);assert.match(await page.locator('.ihtml-tool-batch').innerText(),/完成 1.*已接受 1.*结果未知 1/);
  assert.equal(await page.locator('.ihtml-operation-history .t-actions button:visible').count(),0);
+ assert.equal(await page.locator('.ihtml-tool-batch').evaluate(e=>e.open),false);await page.locator('.t-batch-head').click();
  await page.locator('.t-batch-list > summary').click();await page.locator('.ihtml-tool').first().locator('summary.t-head').click();
  assert.match(await page.locator('.ihtml-tool').first().innerText(),/resource-0/);assert.match(await page.locator('.ihtml-tool').first().innerText(),/旧值/);assert.match(await page.locator('.ihtml-tool').first().innerText(),/新值/);
  await page.locator('.ihtml-tool').first().locator('.t-tech > summary').click();assert.match(await page.locator('.ihtml-tool').first().innerText(),/original-0/);
@@ -1891,7 +1892,7 @@ test('operation history pages join the original batch and retain per-item result
   window.a=ihtml.mountChat('#a',{initialMessages:[{id:'u',role:'user',content:'original'}],initialOperations:[record(2)],operationHistory:{cursor:'older',load:async({cursor,signal})=>{if(cursor!=='older'||signal.aborted)throw Error('invalid cursor');return{items:[record(1)],cursor:''}}}});await a.ready();
  });
  await page.locator('.t-history-more').click();await page.waitForFunction(()=>!document.querySelector('.t-history-more'));
- assert.equal(await page.locator('.ihtml-operation-history').count(),1);assert.equal(await page.locator('.ihtml-tool-batch').count(),1);await page.locator('.t-batch-list > summary').click();assert.equal(await page.locator('.ihtml-tool').count(),2);assert.equal(await page.locator('.ihtml-operation-history button:visible').count(),0);
+ assert.equal(await page.locator('.ihtml-operation-history').count(),1);assert.equal(await page.locator('.ihtml-tool-batch').count(),1);assert.equal(await page.locator('.ihtml-tool-batch').evaluate(e=>e.open),false);await page.locator('.t-batch-head').click();await page.locator('.t-batch-list > summary').click();assert.equal(await page.locator('.ihtml-tool').count(),2);assert.equal(await page.locator('.ihtml-operation-history button:visible').count(),0);
 });
 
 test('late proposals and duplicate terminal references preserve verified history scope and result',async(t)=>{
@@ -1900,4 +1901,43 @@ test('late proposals and duplicate terminal references preserve verified history
   const s=sockets[0];s.emit({type:'turn_start',run_id:'replay',seq:1});s.emit({type:'confirmation_required',run_id:'replay',seq:2,tool_call:{id:'known',name:'any_write',title:'late proposal',confirmation_nonce:'old',confirmation_token:'OLD',body:{target:'different'}},tool_status:'pending'});s.emit({type:'tool_start',run_id:'replay',seq:3,tool_call:{id:'known'},tool_status:'running'});s.emit({type:'tool_result',run_id:'replay',seq:4,tool_call:{id:'known'},tool_status:'success'});s.emit({type:'assistant_done',run_id:'replay',seq:5,message:'done'});
  });
  assert.equal(await page.locator('.ihtml-tool').count(),1);await page.locator('.ihtml-tool > summary').click();const text=await page.locator('.ihtml-tool').innerText();assert.match(text,/original-target/);assert.match(text,/saved/);assert.match(text,/verified original receipt/);assert.ok(!text.includes('late proposal'));assert.equal(await page.locator('.ihtml-operation-history button:visible').count(),0);
+});
+
+// 任意历史批次都收起外层；键盘展开和后续分页不丢失用户选择，逐项回执仍能核对。
+test('historical batch summaries collapse compactly and preserve manual expansion across pagination',async(t)=>{
+ const page=await fixture(t,{width:390,height:844});await page.evaluate(async()=>{
+  const row=i=>({id:'scope-'+i,afterMessageId:'u',status:i===1?'unknown':'success',proposalRecorded:true,result:{receipt:'original-'+i},call:{name:'arbitrary_inspect',title:'An arbitrary operation',confirmation_group:'same'}});
+  window.a=ihtml.mountChat('#a',{initialMessages:[{id:'u',role:'user',content:'original'}],initialOperations:[row(2),row(1)],operationHistory:{cursor:'more',load:async()=>({items:[row(0)],cursor:''})}});await a.ready();
+ });
+ const batch=page.locator('.ihtml-tool-batch');assert.equal(await batch.evaluate(e=>e.open),false);assert.equal(await page.locator('.t-batch-list').isVisible(),false);
+ assert.ok(await batch.evaluate(e=>e.getBoundingClientRect().height<105&&e.scrollWidth<=e.clientWidth));
+ await batch.locator(':scope > summary').focus();await page.keyboard.press('Enter');assert.equal(await batch.evaluate(e=>e.open),true);
+ await page.locator('.t-history-more').click();await page.waitForFunction(()=>!document.querySelector('.t-history-more'));assert.equal(await batch.evaluate(e=>e.open),true);
+ await batch.locator('.t-batch-list > summary').click();await batch.locator('.ihtml-tool').first().locator('summary.t-head').click();assert.match(await batch.innerText(),/original-2/);
+ await batch.locator(':scope > summary').click();assert.equal(await batch.evaluate(e=>e.open),false);assert.equal(await page.locator('.ihtml-operation-history button:visible').count(),0);
+});
+
+// 历史错误与未知也应默认折叠，实时待确认/告警的展开规则不能泄漏到只读历史。
+test('historical attention states collapse by default and stay readable without authority',async(t)=>{
+ const page=await fixture(t);await page.evaluate(async()=>{
+  window.a=ihtml.mountChat('#a',{initialOperations:['error','unknown','pending','expired'].map((status,i)=>({id:'attention-'+i,status,proposalRecorded:true,result:{note:'original receipt '+i},call:{name:'different_'+i,title:'Original operation '+i}}))});await a.ready();
+ });
+ assert.equal(await page.locator('.ihtml-operation-history .ihtml-tool[open]').count(),0);
+ assert.equal(await page.locator('.ihtml-operation-history .ihtml-tool').count(),4);
+ const first=page.locator('.ihtml-operation-history .ihtml-tool').first();await first.locator('summary.t-head').click();assert.match(await first.innerText(),/original receipt 0/);
+ assert.equal(await page.locator('.ihtml-operation-history .t-actions button:visible').count(),0);
+});
+
+// 历史默认折叠不能牺牲实时确认；确定受理/完成后则自动收起，结果摘要仍保留。
+test('live batch confirmation stays open until settled and then collapses automatically',async(t)=>{
+ const page=await fixture(t);await page.evaluate(async()=>{
+  const original=window.fetch;window.fetch=async(...args)=>{const r=await original(...args),read=r.text;r.text=async()=>JSON.stringify({...JSON.parse(await read()),batch_confirmations:true});return r};
+  window.a=ihtml.mountChat('#a',{});await a.ready();await a.chat.send('original');const s=sockets[0];s.emit({type:'turn_start',run_id:'batch',seq:1});
+  for(let i=0;i<2;i++)s.emit({type:'confirmation_required',run_id:'batch',seq:i+2,tool_call:{id:'live-'+i,name:'any_operation',confirmation_nonce:'n'+i,confirmation_token:'signed'+i}});
+  s.emit({type:'assistant_done',run_id:'batch',seq:4,message:'review'});
+ });
+ const batch=page.locator('.ihtml-tool-batch');assert.equal(await batch.evaluate(e=>e.open),true);assert.equal(await batch.locator(':scope > .t-actions button').isVisible(),true);await batch.locator(':scope > .t-actions button').click();
+ await page.evaluate(()=>{const s=sockets[0];s.emit({type:'turn_start',run_id:'settled',seq:1});for(let i=0;i<2;i++)s.emit({type:'tool_result',run_id:'settled',seq:i+2,tool_call:{id:'live-'+i},tool_status:i?'accepted':'success',tool_result:{saved:true}});s.emit({type:'assistant_done',run_id:'settled',seq:4,message:'receipts saved'});});
+ assert.equal(await batch.evaluate(e=>e.open),false);assert.match(await batch.locator('.t-batch-status').innerText(),/1/);
+ await batch.locator(':scope > summary').click();assert.equal(await batch.locator('.t-batch-list').isVisible(),true);assert.equal(await batch.locator(':scope > .t-actions button').isVisible(),false);
 });

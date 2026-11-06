@@ -2176,7 +2176,15 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
 .ihtml-trace-actions .ihtml-tool[data-status="accepted"]:not([open]) > summary .t-summary { display: none; }
 
 /* 同类批量确认只展示公共摘要，逐项参数与独立回执保留在完整清单。 */
-.ihtml-root .ihtml-tool-batch { font-size: 13px; line-height: 1.5; color: var(--ui-text); border: 1px solid var(--ui-primary-border); border-radius: 14px; padding: 14px; display: grid; gap: 10px; min-width: 0; }
+.ihtml-root .ihtml-tool-batch { font-size: 13px; line-height: 1.5; color: var(--ui-text); border: 1px solid var(--ui-control-border); border-radius: 14px; padding: 10px 12px; display: block; min-width: 0; }
+.ihtml-root .ihtml-tool-batch[open] { border-color: var(--ui-primary-border); }
+.ihtml-root .ihtml-tool-batch > .t-batch-head { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 8px; position: relative; padding-right: 20px; min-height: 36px; cursor: pointer; list-style: none; }
+.ihtml-root .ihtml-tool-batch > .t-batch-head::-webkit-details-marker { display: none; }
+.ihtml-root .ihtml-tool-batch > .t-batch-head::after { content: ''; position: absolute; right: 2px; width: 6px; height: 6px; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: rotate(45deg); opacity: .65; }
+.ihtml-root .ihtml-tool-batch[open] > .t-batch-head::after { transform: rotate(225deg); }
+.ihtml-root .ihtml-tool-batch:not([open]) .t-batch-operation { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ihtml-root .ihtml-tool-batch .t-batch-status { font-size: 12px; color: var(--ui-text-muted); min-width: 0; max-width: 16ch; overflow-wrap: anywhere; }
+.ihtml-root .ihtml-tool-batch > :not(summary) { margin-top: 10px; }
 .ihtml-root .ihtml-tool-batch .t-batch-title { font-size: 1.05em; }
 .ihtml-root .ihtml-tool-batch .t-batch-operation, .ihtml-root .ihtml-tool-batch .t-batch-status { margin: 0; overflow-wrap: anywhere; }
 .ihtml-root .ihtml-tool-batch .t-batch-list > summary { cursor: pointer; min-height: 36px; padding: 6px 0; }

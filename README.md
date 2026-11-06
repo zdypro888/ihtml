@@ -636,3 +636,5 @@ SDK 将同一签名提案轮次中同类操作汇总为一张卡：展示公共�
 历史宿主提供 `initialMessages: [{id, role, content, operationId?}]` 和 `initialOperations: [{id, afterMessageId, call, status, summary, result, proposalRecorded, receiptOnly?, updatedAt}]`。`operationId` 显式关联兼容文本，避免重复显示；同文摘要不会被用作操作身份。`call` 保留公开确认范围、facts、review 与请求说明，但签名、nonce 和批准语义始终剥离。`receiptOnly:true` 表示旧记录没有原提案，UI 明确说明缺失，不猜测原范围。
 
 `operationHistory: {cursor, load: async ({cursor, signal}) => ({items, cursor})}` 分页加载更早的操作；首屏与每页共用校验（最多512项、8MiB）。相同消息锚点的分页会合入原批次，逐项结果直接显示在展开的卡片中。宿主负责游标、所有权、过期与持久化；SDK 不将显示历史作为模型上下文或执行凭据。有效签名卡只能从重新鉴权的实时服务端事件恢复。
+
+历史单项和批次外层默认折叠，摘要保留状态、标题和项数；失败、未知、过期等历史状态也不沿用实时告警的强制展开。展开仍能核对原范围与逐项结果，分页和刷新保留用户手动展开选择。实时待确认批次默认展开，确定受理或完成后可自动收起；只读历史不恢复审批入口。

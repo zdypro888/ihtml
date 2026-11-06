@@ -7244,7 +7244,9 @@
           refresh.onclick = (event) => {event.preventDefault(); this.send(T('refresh_confirmation_request'));};
           bar.appendChild(refresh); rec.body.appendChild(bar);
         }
-        if (rec.status === 'pending' || rec.status === 'error' || rec.status === 'unknown' || rec.expired) rec.card.open = true;
+        // 历史中的失败/未知是只读事实，不沿用实时告警的强制展开；状态仍留在摘要，手动展开保留。
+        if (rec.historical) rec.card.open = !!rec.pinned;
+        else if (rec.status === 'pending' || rec.status === 'error' || rec.status === 'unknown' || rec.expired) rec.card.open = true;
         else if (['success', 'accepted', 'cancelled'].includes(rec.status) && !rec.pinned) rec.card.open = false;
         this.syncToolSummary(rec);
         this.syncToolGroups(t);
@@ -7275,7 +7277,8 @@
           if (records.length < 2) continue;
           let g = t.toolGroups.get(key);
           if (!g) {
-            const card = el('section', 'ihtml-tool-batch');
+            // 批次本身也须可折叠；仅收起逐项清单仍会令历史中的每组占据整块空间。
+            const card = el('details', 'ihtml-tool-batch'), head = el('summary', 't-batch-head');
             const title = el('strong', 't-batch-title');
             const operation = el('div', 't-batch-operation');
             const reason = el('p', 't-reason');
@@ -7284,8 +7287,10 @@
             const list = el('details', 't-batch-list'), summary = el('summary'), items = el('div', 't-batch-items');
             list.append(summary, items);
             const bar = el('div', 't-actions'), confirm = el('button', 'ok');
-            bar.append(confirm);card.append(title, operation, reason, facts, counts, list, bar);t.actions.appendChild(card);
-            g = {card, title, operation, reason, facts, counts, list, summary, items, confirm, records: [], error: ''};
+            bar.append(confirm);head.append(title, operation, counts);card.append(head, reason, facts, list, bar);t.actions.appendChild(card);
+            g = {card, head, title, operation, reason, facts, counts, list, summary, items, confirm, records: [], error: '', manualOpen: null};
+            // 仅明确用户操作覆盖默认值；分页和状态刷新不得把手动展开的历史重新收起。
+            head.addEventListener('click', () => {g.manualOpen = !card.open;if(g.manualOpen)this.setFollowing(false);});
             confirm.onclick = () => this.confirmToolGroup(g);
             t.toolGroups.set(key, g);
           }
@@ -7314,6 +7319,8 @@
             rec.title.textContent = label ? clip(label, 320) : views[i].title;
           });
           g.counts.textContent = g.error || Object.entries(counts).filter(([, count]) => count > 0).map(([status, count]) => (TOOL_STATUS_LABEL[status] || status) + ' ' + count).join(' · ');
+          g.counts.title = g.counts.textContent;
+          g.card.open = g.manualOpen ?? (!t.historical && records.some(rec => ['pending', 'running', 'error', 'unknown', 'expired'].includes(rec.status)));
           const pending = records.filter(rec => !rec.historical && rec.status === 'pending' && !rec.expired);
           g.confirm.textContent = T('tool_batch_confirm', {n: pending.length});
           g.confirm.hidden = pending.length === 0;
