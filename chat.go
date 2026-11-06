@@ -45,6 +45,7 @@ const (
 	ChatClientInspectResult = "inspect_result"
 
 	ChatStreamTurnStart       = "turn_start"
+	ChatStreamTurnContext     = "turn_context"
 	ChatStreamAssistantStatus = "assistant_status"
 	// ChatStreamTaskComplete 是会话级调用终态通知，不代表业务成功或自动开启模型轮次。
 	ChatStreamTaskComplete      = "task_complete"
@@ -247,6 +248,8 @@ type ChatTurnBudget struct {
 // confirmation_required / cancel_tool_result / tool_result / assistant_done /
 // turn_error。
 type ChatStreamEvent struct {
+	// FlowID 关联同一用户目标的多个运行轮次，仅用于公开展示，不授予执行权限。
+	FlowID string `json:"flow_id,omitempty"`
 	// RestoredApproval marks a server-restored pending run, not client history.
 	RestoredApproval bool `json:"restored_approval,omitempty"`
 	// ContinuationPending 表示中间回执后将进入受管续办；不是整个请求的终态。

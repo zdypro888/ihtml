@@ -233,6 +233,7 @@ func TestCloseWaitsForUnwindAndConcurrentClose(t *testing.T) {
 	s := openSession(t, configFor(e), "alice", r)
 	send(s, "first")
 	waitSignal(t, started)
+	beforeClose := len(r.snapshot())
 	send(s, "queued")
 	closed := make(chan struct{})
 	go func() { s.Close(); close(closed) }()
@@ -249,7 +250,7 @@ func TestCloseWaitsForUnwindAndConcurrentClose(t *testing.T) {
 		wg.Go(s.Close)
 	}
 	wg.Wait()
-	if len(r.snapshot()) != 1 {
+	if len(r.snapshot()) != beforeClose {
 		t.Fatalf("events after close: %#v", r.snapshot())
 	}
 }

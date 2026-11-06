@@ -68,7 +68,7 @@
             ids.add(record.id);
             const source=record.call||{},call={id:record.id};
             for (const key of ['confirmation_group','name','title','method','path','risk','reason','presentation','review','body','query','confirmation_expires']) if (source[key]!==undefined) call[key]=source[key];
-            const safe=JSON.parse(JSON.stringify({id:record.id,afterMessageId:typeof record.afterMessageId==='string'?record.afterMessageId:'',call,status:['pending','running','accepted','success','error','unknown','cancelled','expired'].includes(record.status)?record.status:'unknown',summary:typeof record.summary==='string'?record.summary:'',result:record.result,proposalRecorded:record.proposalRecorded===true,receiptOnly:record.receiptOnly===true,updatedAt:typeof record.updatedAt==='string'?record.updatedAt:'',runId:typeof record.runId==='string'?record.runId.slice(0,128):'',sequence:Number.isSafeInteger(record.sequence)&&record.sequence>0?record.sequence:0},(key,value)=>isTechnicalSecretKey(key)?undefined:value));
+            const safe=JSON.parse(JSON.stringify({id:record.id,afterMessageId:typeof record.afterMessageId==='string'?record.afterMessageId:'',call,status:['pending','running','accepted','success','error','unknown','cancelled','expired'].includes(record.status)?record.status:'unknown',summary:typeof record.summary==='string'?record.summary:'',result:record.result,proposalRecorded:record.proposalRecorded===true,receiptOnly:record.receiptOnly===true,updatedAt:typeof record.updatedAt==='string'?record.updatedAt:'',flowId:typeof record.flowId==='string'?record.flowId.slice(0,256):'',runId:typeof record.runId==='string'?record.runId.slice(0,128):'',sequence:Number.isSafeInteger(record.sequence)&&record.sequence>0?record.sequence:0},(key,value)=>isTechnicalSecretKey(key)?undefined:value));
             bytes+=new TextEncoder().encode(JSON.stringify(safe)).length;
             if (bytes>8*1024*1024) throw new TypeError('ihtml: operation history exceeds 8 MiB');
             return safe;
@@ -5685,7 +5685,8 @@
       },
 
       appendMessages(messages) {
-        let receipts = null, historyTurn = null, lastMessageID = '';
+        let receipts = null, historyTurn = null, lastMessageID = '',requestFlow='';
+        this.turnsByFlow ||=new Map();this.messageFlows ||=new Map();this.completedHistoryRuns ||=new Set();
         this.operationHistoryStart=doc.createComment('operation-history');this.log.appendChild(this.operationHistoryStart);
         this.messageAnchors=new Map();
         const restored = new Set();
@@ -5697,7 +5698,12 @@
         };
         appendOperations('');
         for (const message of messages || []) {
-          if (message.role==='tool' && message.operationId && (opts.initialOperations||[]).some(record=>record.id===message.operationId)) {appendOperations(message.id);continue;}
+          if (message.role==='tool' && message.operationId && (opts.initialOperations||[]).some(record=>record.id===message.operationId)) {
+            // 文本回执虽由操作卡代替，消息锚点不能丢；后续状态/续办仍属于原请求。
+            const owner=this.operationRecords?.get(message.operationId)?.ownerTurn||this.turnsByFlow.get(requestFlow)||historyTurn;
+            if(owner&&message.id){this.messageAnchors.set(message.id,owner.card);this.historyTurns.set(message.id,owner);this.messageFlows.set(message.id,owner.flowID||requestFlow)}
+            lastMessageID=message.id||lastMessageID;appendOperations(message.id);continue;
+          }
           if (!message.content.trim()) continue;
           // 工具回执是只读展示记录，不是 AI 发言，也不能恢复旧签名或执行入口。
           if (message.role === 'tool') {
@@ -5720,18 +5726,22 @@
           receipts = null;
           let card;
           if(message.role==='user') {
-            historyTurn=null;
+            historyTurn=null;requestFlow=message.flowId||message.id||'legacy-user-'+this.messageFlows.size;
             card=el('article','ihtml-msg user');card.append(el('div','author',T('author_user')),el('div','content',message.content));this.log.appendChild(card);
           } else {
             // 历史回答与操作归入同一回合，使用实时回合的容器、过程区和结果区。
             // 分页只补充这个回合，不能重新套一层“操作历史”改变颜色和排版。
-            const t=historyTurn||this.createHistoryTurn(lastMessageID,false);
+            const flow=message.flowId||requestFlow;
+            const provisional=this.turnsByFlow.get(requestFlow);
+            const t=this.turnsByFlow.get(flow)||(!provisional?.canonicalFlow?provisional:null)||historyTurn||this.createHistoryTurn(lastMessageID,false);
+            if(flow){if(message.flowId||!t.flowID)t.flowID=flow;if(message.flowId)t.canonicalFlow=true;this.turnsByFlow.set(flow,t)}
+            this.archiveAnswer(t);t.answerVersion=message.id||message.runId;t.answerAt=message.createdAt||'';t.answerFinal=true;if(message.runId){this.completedHistoryRuns.add(message.runId);this.turnsByRun.set(message.runId,t)}
             card=t.card;t.text=message.content;t.contentFormat=message.contentFormat||'auto';
             t.answer.style.display='';t.answer.hidden=false;t.answer.replaceChildren(renderAssistant(t.text,t.contentFormat,t.answer,false));
             this.updateProcess(t);historyTurn=null;
           }
           card._displayMessage={role:message.role,content:message.content,contentFormat:message.contentFormat};
-          if(message.id)this.messageAnchors.set(message.id,card);
+          if(message.id){this.messageAnchors.set(message.id,card);this.messageFlows.set(message.id,message.flowId||requestFlow);if(message.role==='assistant')this.historyTurns.set(message.id,card._turn)}
           lastMessageID=message.id||'';
           appendOperations(message.id);
         }
@@ -5740,6 +5750,23 @@
         this.scroll();
       },
 
+      archiveAnswer(t,force=false) {
+        if((!t?.answerFinal&&!force)||!t.text?.trim())return;
+        t.previousAnswers ||= [];
+        const id=t.answerVersion||t.latestRunID||'version-'+t.previousAnswers.length;
+        if(!t.previousAnswers.some(v=>v.id===id))t.previousAnswers.push({id,text:t.text,format:t.contentFormat,at:t.answerAt});
+        // 原文仍由宿主持久保存；单个视图限制回放窗口，避免自动续办无限增大 DOM。
+        if(t.previousAnswers.length>64){t.previousAnswers.shift();t.answerHistoryTruncated=true;}
+        if(!t.answerHistory){const box=el('details','ihtml-answer-history ihtml-think');box.append(el('summary','think-head'),el('div','t-answer-versions'));t.card.insertBefore(box,t.answer);t.answerHistory=box}
+        t.answerHistory.firstElementChild.textContent=T('answer_versions',{n:t.previousAnswers.length});
+        const body=t.answerHistory.lastElementChild;body.replaceChildren();if(t.answerHistoryTruncated)body.append(el('p','t-meta',T('answer_versions_window')));
+        for(const v of t.previousAnswers){const row=el('section','t-prior-answer');if(v.at){const at=new Date(v.at);if(Number.isFinite(at.getTime())){const time=el('time','t-meta',at.toLocaleString(opts.locale||navigator.language));time.dateTime=at.toISOString();row.append(time)}}row.append(renderAssistant(v.text,v.format,row,false));body.append(row)}
+        t.answerFinal=false;
+      },
+      startFlowRun(t,runID) {
+        if(t.latestRunID!==runID){this.archiveAnswer(t);t.text='';t.textBytes=0;t.answer.replaceChildren();t.answer.style.display='none';t.answerFinal=false;t.answerStale=false;t.answerVersion=runID;t.answerAt='';t.latestRunID=runID;}
+        t.done=false;t.cancelled=false;
+      },
       createHistoryTurn(anchor,place=true) {
         this.historyTurns ||= new Map();
         const previous=this.turn,t=this.beginTurn('deep');this.turn=previous;
@@ -5754,7 +5781,7 @@
         const groups=new Map();for(const record of records){const key=record.afterMessageId||'';if(!groups.has(key))groups.set(key,[]);groups.get(key).push(record);}
         const previousTurn=this.turn;
         for(const [anchor,items] of groups){
-          let t=this.historyTurns.get(anchor);
+          let t=this.historyTurns.get(anchor)||this.turnsByFlow?.get(this.messageFlows?.get(anchor));
           for(const record of items){
             const existing=this.operationRecords.get(record.id);
             if(existing){
@@ -5767,7 +5794,9 @@
               this.updateProcess(existing.ownerTurn);
               continue;
             }
-            if(!t)t=this.createHistoryTurn(anchor);
+            if(!t)t=this.turnsByFlow?.get(record.flowId)||this.createHistoryTurn(anchor);
+            const flow=record.flowId||this.messageFlows?.get(anchor);if(flow){if(record.flowId||!t.flowID)t.flowID=flow;if(record.flowId)t.canonicalFlow=true;this.turnsByFlow ||=new Map();this.turnsByFlow.set(flow,t)}
+            this.historyTurns.set(anchor,t);if(record.runId&&!this.turnsByRun.has(record.runId))this.turnsByRun.set(record.runId,t);
             this.upsertTool({type:'tool_result',tool_call:{...record.call,id:record.id},tool_status:record.status,tool_summary:record.summary,tool_result:record.result,history_record:record},record.status,t);
             this.operationRecords.set(record.id,t.tools.get(record.id));
           }
@@ -5800,7 +5829,7 @@
         // deliberately not replayable. Never derive history from rendered HTML.
         for (const card of Array.from(this.log.children).reverse()) {
           const sources = card._turn
-            ? [{ role: 'assistant', content: card._turn.text, contentFormat: card._turn.contentFormat }]
+            ? [...(card._turn.previousAnswers||[]).map(v=>({role:'assistant',content:v.text,contentFormat:v.format})),...(card._turn.answerStale?[]:[{ role: 'assistant', content: card._turn.text, contentFormat: card._turn.contentFormat }])]
             : card._displayMessages || [card._displayMessage];
           for (const source of sources.slice().reverse()) {
             if (!source || !source.content || !remaining || messages.length === 100) continue;
@@ -6167,7 +6196,7 @@
         chatSessionID(true); // 换会话号 = 服务端上下文重开
         this.clearTurnTimers();
         this.log.replaceChildren();
-        this.operationRecords?.clear();this.historyTurns?.clear();this.messageAnchors?.clear();
+        this.operationRecords?.clear();this.historyTurns?.clear();this.turnsByFlow?.clear();this.messageFlows?.clear();this.completedHistoryRuns?.clear();this.replayFlow=null;this.messageAnchors?.clear();
         this.setFollowing(true);
         this.availabilityNote = null;
         this.turn = null;
@@ -6265,7 +6294,7 @@
         this.close();
         if (this.log) {
           this.log.replaceChildren();
-          this.operationRecords?.clear();this.historyTurns?.clear();this.messageAnchors?.clear();this.operationPager=null;this.operationCursor='';
+          this.operationRecords?.clear();this.historyTurns?.clear();this.turnsByFlow?.clear();this.messageFlows?.clear();this.completedHistoryRuns?.clear();this.replayFlow=null;this.messageAnchors?.clear();this.operationPager=null;this.operationCursor='';
           this.notice(T('welcome'));
         }
       },
@@ -6733,7 +6762,7 @@
       appendStatus(text, isError, t = this.turn) {
         text = (text || '').trim();
         if (!t || !text) return;
-        if (!isError) t.liveStatus = text;
+        if (!isError){t.liveStatus=text;if(t.text?.trim()&&!t.done){this.archiveAnswer(t,true);t.answerStale=true;t.answer.hidden=true;t.answer.style.display='none'}}
         let node = null;
         if (!isError) node = t.pBody.querySelector('.ihtml-pline[data-persistent="false"]');
         else if (t.lastStatusNode && t.lastStatusNode.dataset.persistent === 'true') node = t.lastStatusNode;
@@ -6849,8 +6878,8 @@
         t.text += limited.text;
         t.textBytes += limited.bytes;
         if (limited.truncated) t.textTruncated = true;
-        t.answer.style.display = '';
-        t.answer.hidden = false;
+        t.answer.style.display = t.answerStale?'none':'';
+        t.answer.hidden = !!t.answerStale;
         t.card.querySelector(':scope > .author').hidden = false;
         t.answer.classList.add('streaming');
         if (!t.renderFrame) {
@@ -6872,6 +6901,7 @@
       },
       resetAssistant(ev, t = this.turn) {
         if (!t || t.done) return;
+        this.archiveAnswer(t);t.answerStale=false;
         cancelAssistantRender(t);
         t.text = '';
         t.textBytes = 0;
@@ -7420,7 +7450,7 @@
       operationRecord(ev,status,rec) {
         if(ev.history_record)return ev.history_record;
         const call=ev.tool_call||rec?.call||{};
-        return normalizeOperationHistory([{id:call.id||ev.tool_id||rec?.call?.id||rec?.id,call,status,summary:ev.tool_summary,result:ev.tool_result,updatedAt:ev.tool_updated_at,runId:ev.run_id,sequence:ev.seq,proposalRecorded:ev.type==='confirmation_required'}])[0];
+        return normalizeOperationHistory([{id:call.id||ev.tool_id||rec?.call?.id||rec?.id,call,status,summary:ev.tool_summary,result:ev.tool_result,updatedAt:ev.tool_updated_at,flowId:ev.flow_id,runId:ev.run_id,sequence:ev.seq,proposalRecorded:ev.type==='confirmation_required'}])[0];
       },
       settledToolStatus(rec) {
         const source = rec?.lastEvent?.type;
@@ -7729,7 +7759,15 @@
       eventTurn(ev) {
         const runID = String(ev && ev.run_id || '');
         if (!runID) return this.turn;
+        this.turnsByFlow ||=new Map();
+        const closedReplay=ev.background_replay&&this.completedHistoryRuns?.has(runID);
+        const operationEvent=['confirmation_required','tool_start','tool_result'].includes(ev.type);
+        // 已保存的答复不重放旧正文；挂起后补发的确认和结果仍是独立执行证据，不能一起丢掉。
+        if(closedReplay&&!operationEvent)return null;
         let t = this.turnsByRun.get(runID);
+        const owner=ev.flow_id&&this.turnsByFlow.get(ev.flow_id);
+        if(owner&&owner!==t){if(t&&!t.toolCount&&!t.text){if(t.clock)clearInterval(t.clock);t.clock=0;cancelAssistantRender(t);t.card.remove();if(this.turn===t)this.turn=owner}t=owner;this.turnsByRun.set(runID,t)}
+        if(!t&&ev.type==='turn_start'&&ev.background_replay&&this.replayFlow){t=this.replayFlow;this.turnsByRun.set(runID,t)}
         if (!t && ev.type === 'turn_start') {
           if ((!(this.turn?.acceptNextRun) || ev.restored_approval && ev.task_id) && (ev.restored_approval || ev.background_replay)) {
             const foreground = this.turn;
@@ -7747,12 +7785,14 @@
             t = candidate;
           }
         }
+        if(ev.flow_id&&t){this.turnsByFlow.set(ev.flow_id,t);t.flowID=ev.flow_id;this.turnsByRun.set(runID,t)}
         if (!t) return null;
-        if (t.done && t.pendingCount === 0 && !['turn_start','confirmation_required'].includes(ev.type)) return null;
-        const seq = Number(ev.seq) || 0;
-        const previous = t.runSeq.get(runID) || 0;
-        if (seq && seq <= previous) return null;
-        if (seq) t.runSeq.set(runID, seq);
+        const starting=!closedReplay&&(ev.type==='turn_start'||ev.type==='turn_context'||!!ev.flow_id&&!t.runSeq.has(runID));
+        if(t.done&&t.pendingCount===0&&!starting&&ev.type!=='confirmation_required'&&!(closedReplay&&operationEvent))return null;
+        const seq=Number(ev.seq)||0,previous=t.runSeq.get(runID)||0;
+        if(seq&&seq<=previous)return null;
+        if(starting){this.startFlowRun(t,runID);if(!this.turn||this.turn===t||this.turn.done){this.turn=t;this.setActive(true)}}
+        if(seq)t.runSeq.set(runID,seq);
         return t;
       },
       releaseTurnRuns(t) {
@@ -7772,7 +7812,8 @@
           this.backgroundSeq=Number(ev.background_seq);
         }
         if (ev.type==='background_user_message') {
-          const existing=(opts.initialMessages||[]).some(message=>message.role==='user'&&message.content===ev.message);
+          const matches=(opts.initialMessages||[]).filter(message=>message.role==='user'&&message.content===ev.message);const existing=matches.length>0;
+          if(matches.length===1)this.replayFlow=this.historyTurns?.get(matches[0].id)||this.turnsByFlow?.get(this.messageFlows?.get(matches[0].id));
           if (!existing && ev.background_replay && typeof ev.message==='string') {
             const row=el('article','ihtml-msg user');row.append(el('div','author',T('author_user')),el('div','content',ev.message));
             this.log.appendChild(row);
@@ -7858,7 +7899,7 @@
         const continuing=ev.continuation_pending===true;
         if(continuing&&t){
           cancelAssistantRender(t);this.clearTransientStatus(t);this.finalizeThinking(t);
-          t.confirmingTool=false;t.done=false;t.acceptNextRun=true;t.text='';t.textBytes=0;t.answer.replaceChildren();t.answer.style.display='none';
+          this.archiveAnswer(t);t.confirmingTool=false;t.done=false;t.acceptNextRun=true;t.text='';t.textBytes=0;t.answer.replaceChildren();t.answer.style.display='none';
           t.card.querySelector(':scope > .author').hidden=true;
           this.appendStatus(T('agent_continuing'),false,t);this.updateProcess(t);if(this.turn===t)this.setActive(true);return;
         }
@@ -7879,7 +7920,7 @@
           t.textBytes = limited.bytes;
           t.textTruncated = limited.truncated;
         }
-        t.confirmingTool = false;
+        t.confirmingTool = false;t.answerStale=false;
         if ((t.text && t.text.trim()) || t.textTruncated) {
           t.answer.hidden = false;
           t.card.querySelector(':scope > .author').hidden = false;
@@ -7891,7 +7932,7 @@
           t.answer.style.display = 'none';
         }
         t.answer.classList.remove('streaming');
-        t.done = true;
+        t.done = true;t.answerStale=false;t.answerFinal=true;t.answerVersion=ev.run_id||t.answerVersion;this.completedHistoryRuns ||=new Set();if(ev.run_id)this.completedHistoryRuns.add(ev.run_id);
         this.updateProcess(t);
         const answerSummary = clip(String(t.answer.innerText || t.answer.textContent || '').replace(/\s+/g, ' ').trim(), 140);
         this.announce(answerSummary ? T('answer_complete_summary', { summary: answerSummary }) : T('answer_complete'));
@@ -8501,7 +8542,7 @@
             if (!message || !['user', 'assistant', 'tool'].includes(message.role) || typeof message.content !== 'string') throw new TypeError('ihtml: initialMessages require user/assistant/tool role and string content');
             bytes += new TextEncoder().encode(message.content).length;
             if (bytes > 512 * 1024) throw new TypeError('ihtml: initialMessages exceed 512 KiB');
-            return { id:typeof message.id==='string'?message.id:'',operationId:typeof message.operationId==='string'?message.operationId:'',role: message.role, content: message.content, contentFormat: message.role === 'tool' ? 'text' : typeof message.contentFormat === 'string' ? message.contentFormat : 'text' };
+            return { flowId:typeof message.flowId==='string'?message.flowId.slice(0,256):'',runId:typeof message.runId==='string'?message.runId.slice(0,128):'',createdAt:typeof message.createdAt==='string'?message.createdAt:'',id:typeof message.id==='string'?message.id:'',operationId:typeof message.operationId==='string'?message.operationId:'',role: message.role, content: message.content, contentFormat: message.role === 'tool' ? 'text' : typeof message.contentFormat === 'string' ? message.contentFormat : 'text' };
           });
         }
         if (opts.initialOperations != null) opts.initialOperations=normalizeOperationHistory(opts.initialOperations);

@@ -1778,7 +1778,7 @@ test('display-only tool history folds receipts without AI authors, action author
  });
  const group=page.locator('.ihtml-receipt-history');assert.equal(await group.count(),1);assert.match(await group.locator('summary').innerText(),/28/);assert.equal(await group.locator('ol').isVisible(),false);
  // welcome 仍是独立引导，不能为28项回执各制造AI作者。
- assert.equal(await page.locator('.ihtml-msg.assistant').count(),3);assert.equal(await page.locator('.ihtml-tool, .t-actions button').count(),0);
+ assert.equal(await page.locator('.ihtml-msg.assistant').count(),2);assert.equal(await page.locator('.ihtml-answer-history').count(),1);assert.equal(await page.locator('.ihtml-tool, .t-actions button').count(),0);
  await group.locator('summary').click();assert.equal(await group.locator('li').count(),1);assert.match(await group.innerText(),/× 28/);
  const saved=await page.evaluate(()=>a.chat.getMessages());assert.equal(saved.filter(m=>m.role==='tool').length,28);assert.ok(saved.every(m=>!m.tool_call));assert.ok(saved.filter(m=>m.role==='tool').every(m=>m.contentFormat==='text'));
  await page.locator('#a').screenshot({path:'/tmp/ihtml-receipt-history-after.png'});
@@ -2022,4 +2022,62 @@ test('chat geometry changes are deferred and coalesced outside resize delivery',
   root.classList.remove('ihtml-chat-compact');observer.callback([]);a.destroy();await new Promise(resolve=>requestAnimationFrame(resolve));return {immediate,deferred,afterDestroy:root.classList.contains('ihtml-chat-compact'),disconnected:observer.targets.size===0};
  });
  assert.deepEqual(result,{immediate:false,deferred:true,afterDestroy:false,disconnected:true});
+});
+
+// 同一目标的说明是版本快照；自动续办有新状态时不能继续把上一版说明并列成当前事实。
+test('live and restored goal continuations share one flow and archive superseded answers',async(t)=>{
+ const page=await fixture(t);
+ await page.evaluate(async()=>{backgroundExecution=true;
+  window.a=ihtml.mountChat('#a',{locale:'en'});await a.ready();await a.chat.send('Original goal');
+  const call={id:'op',name:'arbitrary_change',title:'Original scope',confirmation_nonce:'n',confirmation_token:'SIGNED',body:{target:'one'}};
+  const emit=(type,run_id,seq,rest={})=>sockets[0].emit({type,run_id,seq,flow_id:'goal-f',...rest});
+  emit('turn_start','r1',1);emit('confirmation_required','r1',2,{tool_call:call});emit('assistant_done','r1',3,{message:'OLD_PENDING'});
+  emit('turn_start','r2',1);emit('tool_result','r2',2,{tool_call:{id:'op',confirmation_nonce:'n'},tool_status:'accepted',tool_result:{id:'original-job'}});emit('assistant_done','r2',3,{message:'OLD_ZERO_COMPLETED'});
+  window.b=ihtml.mountChat('#b',{locale:'en',initialMessages:[{id:'u',role:'user',content:'Original goal'},{id:'old',flowId:'goal-f',runId:'r1',role:'assistant',content:'OLD_PENDING'},{id:'latest',flowId:'goal-f',runId:'r2',role:'assistant',content:'OLD_ZERO_COMPLETED'}],initialOperations:[{id:'op',afterMessageId:'u',flowId:'goal-f',runId:'r2',sequence:2,status:'accepted',proposalRecorded:true,call,result:{id:'original-job'}}]});await b.ready();while(sockets.length<2)await new Promise(resolve=>setTimeout(resolve,0));
+  // 剥离测试新问题，只给历史连接注入可信背景帧，不调用任何实际服务。
+  const original=b.root.querySelector('.ihtml-operation-history');
+  for(const [socket,run] of [[sockets[0],'r3'],[sockets[1],'r3']]) {socket.emit({type:'turn_start',run_id:run,seq:1,flow_id:'goal-f',background_replay:socket===sockets[1]});socket.emit({type:'assistant_status',run_id:run,seq:2,flow_id:'goal-f',status:'CURRENT_COMPLETED_1'})}
+  window.restoredOriginal=original;
+ });
+ for(const selector of ['#a','#b']) {
+  const flow=page.locator(selector+' .ihtml-msg.assistant').filter({has:page.locator('.ihtml-tool')});assert.equal(await flow.count(),1);assert.match(await flow.innerText(),/CURRENT_COMPLETED_1/);assert.doesNotMatch(await flow.innerText(),/OLD_PENDING|OLD_ZERO_COMPLETED/);assert.equal(await flow.locator('.ihtml-tool').getAttribute('data-status'),'accepted');assert.equal(await flow.locator('.ihtml-answer-history').count(),1);assert.equal(await flow.locator('.ihtml-answer-history').evaluate(e=>e.open),false);await flow.locator('.ihtml-answer-history > summary').click();assert.match(await flow.innerText(),/OLD_PENDING/);assert.match(await flow.innerText(),/OLD_ZERO_COMPLETED/);
+ }
+ assert.equal(await page.evaluate(()=>restoredOriginal.isConnected),true);
+});
+
+test('legacy active replay rejoins its unique original question without duplicating the AI flow',async(t)=>{
+ const page=await fixture(t);await page.evaluate(async()=>{backgroundExecution=true;window.a=ihtml.mountChat('#a',{initialMessages:[{id:'u',role:'user',content:'Legacy original'},{id:'a',role:'assistant',content:'OLD_SNAPSHOT'}],initialOperations:[{id:'read',afterMessageId:'u',status:'success',call:{id:'read',name:'read'}}]});await a.ready();while(!sockets.length)await new Promise(resolve=>setTimeout(resolve,0));const s=sockets[0];s.emit({type:'background_user_message',message:'Legacy original',background_replay:true});s.emit({type:'turn_start',run_id:'active',seq:1,background_replay:true});s.emit({type:'assistant_status',run_id:'active',seq:2,status:'CURRENT_PROGRESS'});});
+ const flow=page.locator('.ihtml-operation-history');assert.equal(await flow.count(),1);assert.match(await flow.innerText(),/CURRENT_PROGRESS/);assert.doesNotMatch(await flow.innerText(),/OLD_SNAPSHOT/);assert.equal(await flow.locator('.ihtml-answer-history').count(),1);
+});
+
+test('new progress supersedes an in-flight explanatory draft until its authoritative final snapshot',async(t)=>{
+ const page=await fixture(t);await page.evaluate(async()=>{window.a=ihtml.mountChat('#a');await a.ready();await a.chat.send('Track arbitrary work');const s=sockets[0];s.emit({type:'turn_start',run_id:'r',seq:1});s.emit({type:'assistant_delta',run_id:'r',seq:2,delta:'OLD_ZERO_SNAPSHOT'});a.root.querySelector('.ihtml-process').closest('.ihtml-msg').dataset.fixtureFlow='yes';});
+ await page.waitForFunction(()=>a.root.querySelector('.ihtml-process')?.closest('.ihtml-msg').querySelector('.answer')?.textContent.includes('OLD_ZERO'));
+ await page.evaluate(()=>sockets[0].emit({type:'assistant_status',run_id:'r',seq:3,status:'CURRENT_PROGRESS_1'}));
+ assert.equal(await page.locator('.ihtml-msg.assistant[data-fixture-flow] > .answer').isVisible(),false);assert.equal(await page.locator('.ihtml-answer-history').evaluate(e=>e.open),false);assert.match(await page.locator('.p-title').innerText(),/CURRENT_PROGRESS_1/);
+ await page.evaluate(()=>sockets[0].emit({type:'assistant_delta',run_id:'r',seq:4,delta:' still a draft'}));assert.equal(await page.locator('.ihtml-msg.assistant[data-fixture-flow] > .answer').isVisible(),false);
+ await page.evaluate(()=>sockets[0].emit({type:'assistant_done',run_id:'r',seq:5,message:'FINAL_CONFIRMED_2'}));assert.equal(await page.locator('.ihtml-msg.assistant[data-fixture-flow] > .answer').isVisible(),true);assert.equal(await page.locator('.ihtml-msg.assistant[data-fixture-flow] > .answer').innerText(),'FINAL_CONFIRMED_2');
+});
+
+// 后台旧目标恢复不能覆盖后来提出的新目标；关联依赖可信 ID，不按说明内容或当前焦点猜测。
+test('explicit flow identities isolate interleaved goals during background recovery',async(t)=>{
+ const page=await fixture(t);await page.evaluate(async()=>{backgroundExecution=true;window.a=ihtml.mountChat('#a',{initialMessages:[{id:'u1',role:'user',content:'First goal'},{id:'a1',role:'assistant',flowId:'f1',runId:'old1',content:'First snapshot'},{id:'u2',role:'user',content:'Second goal'},{id:'a2',role:'assistant',flowId:'f2',runId:'old2',content:'Second snapshot'}]});await a.ready();while(!sockets.length)await new Promise(r=>setTimeout(r,0));sockets[0].emit({type:'turn_start',flow_id:'f1',run_id:'next1',seq:1,background_replay:true});sockets[0].emit({type:'assistant_status',flow_id:'f1',run_id:'next1',seq:2,status:'FIRST_GOAL_PROGRESS'});});
+ const first=page.locator('.ihtml-msg.assistant').filter({hasText:'FIRST_GOAL_PROGRESS'});assert.equal(await first.count(),1);assert.equal(await page.locator('.ihtml-msg.assistant > .answer').filter({hasText:'Second snapshot'}).isVisible(),true);assert.doesNotMatch(await first.innerText(),/Second snapshot/);assert.equal(await first.locator('.ihtml-answer-history').count(),1);
+});
+
+// 已用结构化卡替代的文本回执仍是合法锚点，不能让其后的状态和说明另起一个历史 AI 块。
+test('receipt message anchors keep subsequent operations and latest explanation in the original flow',async(t)=>{
+ const page=await fixture(t);await page.evaluate(async()=>{window.a=ihtml.mountChat('#a',{initialMessages:[{id:'u',role:'user',content:'Original goal'},{id:'before',role:'assistant',content:'OLD_PENDING'},{id:'receipt',role:'tool',operationId:'change',content:'accepted'},{id:'after',role:'assistant',content:'LATEST_EXPLANATION'}],initialOperations:[{id:'change',afterMessageId:'u',status:'accepted',proposalRecorded:true,call:{id:'change',name:'arbitrary_change',title:'Original scope'},result:{accepted:true}},{id:'read',afterMessageId:'receipt',status:'success',call:{id:'read',name:'arbitrary_read'},result:{completed:1}}]});await a.ready()});
+ assert.equal(await page.locator('.ihtml-operation-history').count(),1);const flow=page.locator('.ihtml-operation-history');assert.equal(await flow.locator('.ihtml-tool').count(),2);assert.equal(await flow.locator('.ihtml-trace-actions > .ihtml-tool').count(),1);assert.equal(await flow.locator('.pbody > .ihtml-tool').count(),1);assert.match(await flow.innerText(),/LATEST_EXPLANATION/);assert.doesNotMatch(await flow.innerText(),/OLD_PENDING/);assert.equal(await flow.locator('.ihtml-answer-history').count(),1);
+});
+
+// 两个相同问题仍是两个请求；旧协议的活动恢复使用公开运行 ID 关联，而不是按文本合并。
+test('legacy repeated questions use recorded run identity to rejoin the correct active flow',async(t)=>{
+ const page=await fixture(t);await page.evaluate(async()=>{backgroundExecution=true;window.a=ihtml.mountChat('#a',{initialMessages:[{id:'u1',role:'user',content:'Same question'},{id:'a1',role:'assistant',content:'First snapshot'},{id:'u2',role:'user',content:'Same question'},{id:'a2',role:'assistant',content:'Second snapshot'}],initialOperations:[{id:'one',afterMessageId:'u1',runId:'r1',sequence:2,status:'success',call:{id:'one',name:'read'}},{id:'two',afterMessageId:'u2',runId:'r2',sequence:2,status:'success',call:{id:'two',name:'read'}}]});await a.ready();while(!sockets.length)await new Promise(r=>setTimeout(r,0));const s=sockets[0];s.emit({type:'background_user_message',background_replay:true,message:'Same question'});s.emit({type:'turn_start',run_id:'r2',seq:1,background_replay:true});s.emit({type:'assistant_status',run_id:'r2',seq:3,status:'SECOND_PROGRESS'});});
+ const flows=page.locator('.ihtml-operation-history');assert.equal(await flows.count(),2);assert.match(await flows.nth(0).innerText(),/First snapshot/);assert.doesNotMatch(await flows.nth(0).innerText(),/SECOND_PROGRESS/);assert.match(await flows.nth(1).innerText(),/SECOND_PROGRESS/);assert.doesNotMatch(await flows.nth(1).innerText(),/Second snapshot/);
+});
+
+test('completed historical runs suppress old answers while preserving late authoritative approvals',async(t)=>{
+ const page=await fixture(t);await page.evaluate(async()=>{backgroundExecution=true;window.a=ihtml.mountChat('#a',{initialMessages:[{id:'u',role:'user',content:'Original goal'},{id:'a',role:'assistant',flowId:'f',runId:'r',content:'Saved final snapshot'}],initialOperations:[{id:'start',afterMessageId:'u',flowId:'f',runId:'r',sequence:3,status:'success',call:{id:'start',name:'task_start'}}]});await a.ready();while(!sockets.length)await new Promise(r=>setTimeout(r,0));const s=sockets[0];s.emit({type:'turn_start',flow_id:'f',run_id:'r',seq:1,background_replay:true});s.emit({type:'assistant_done',flow_id:'f',run_id:'r',seq:4,background_replay:true,message:'STALE_REPLAY'});s.emit({type:'confirmation_required',flow_id:'f',run_id:'r',seq:10,background_replay:true,tool_call:{id:'late',name:'arbitrary_change',title:'New authoritative scope',confirmation_nonce:'fresh',confirmation_token:'SIGNED',body:{target:'one'}}});});
+ assert.equal(await page.locator('.ihtml-operation-history').count(),1);assert.doesNotMatch(await page.locator('.ihtml-operation-history').innerText(),/STALE_REPLAY/);assert.equal(await page.locator('.ihtml-tool[data-status="pending"]').isVisible(),true);assert.equal(await page.locator('.ihtml-tool[data-status="pending"] .t-actions button.ok').isVisible(),true);
 });

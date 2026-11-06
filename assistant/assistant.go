@@ -894,6 +894,24 @@ func (s *session) run(ctx context.Context, cancel context.CancelFunc, ev *ihtml.
 	if req.DisableTools {
 		req.Skills = nil
 	}
+	if executionCtx.Err() != nil {
+		runErr = executionCtx.Err()
+		return
+	}
+	// 展示关联复用已有可信目标身份，原生恢复/批准沿用同一目标，不从模型或浏览器读取。
+	flow := agent.TaskGoalID(executionCtx)
+	if flow == "" {
+		flow = Presentation(executionCtx).FlowID
+	}
+	if flow == "" {
+		flow = p.id
+	}
+	ctx = withPresentation(ctx, flow, p.id)
+	executionCtx = withPresentation(executionCtx, flow, p.id)
+	p.mu.Lock()
+	p.flowID = flow
+	p.send(ihtml.ChatStreamEvent{Type: ihtml.ChatStreamTurnContext})
+	p.mu.Unlock()
 	onDelta, onEvent := req.OnDelta, req.OnEvent
 	req.OnDelta = func(text string) { p.delta(text, onDelta) }
 	req.OnEvent = func(step agent.Step) { p.step(step, onEvent) }
@@ -1000,6 +1018,7 @@ func (s *session) governTools(tools []agent.Tool, ev *ihtml.ChatClientEvent, p *
 }
 
 type projection struct {
+	flowID              string
 	continuationPending bool
 	mu                  sync.Mutex
 	session             *session
@@ -1026,13 +1045,14 @@ func newProjection(s *session, ctx context.Context, cancel context.CancelFunc) *
 	var id [16]byte
 	// crypto/rand.Read either fills the buffer or panics on modern Go.
 	_, _ = rand.Read(id[:])
-	return &projection{session: s, ctx: ctx, cancel: cancel, id: hex.EncodeToString(id[:]), pendingSteps: make(map[string]int), approvalTools: make(map[string]bool), tools: make(map[string]agent.Tool)}
+	return &projection{flowID: agent.TaskGoalID(ctx), session: s, ctx: ctx, cancel: cancel, id: hex.EncodeToString(id[:]), pendingSteps: make(map[string]int), approvalTools: make(map[string]bool), tools: make(map[string]agent.Tool)}
 }
 
 // All send calls hold mu across sequence assignment and synchronous emission.
 func (p *projection) send(ev ihtml.ChatStreamEvent) {
 	p.seq++
 	ev.RunID, ev.TurnID, ev.Seq = p.id, p.id+"_turn", p.seq
+	ev.FlowID = p.flowID
 	if p.emitFailed {
 		// 网络失败后仍保留后续实际终态；不能因已停止发帧而把历史永久留在执行中。
 		if err := p.session.persistToolHistory(ev); err != nil {

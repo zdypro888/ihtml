@@ -191,6 +191,9 @@ func ValidateTaskGoalLimits(l TaskGoalLimits) error {
 	return nil
 }
 
+// TaskGoalID 返回可信目标的非授权关联标识，供展示、日志等关联恢复轮次；不能据此访问目标或重置预算。
+func TaskGoalID(ctx context.Context) string { return goalBinding(ctx).ID }
+
 // ContinueGoal 让显式批准/总结继承原目标账户，同时保留当前消息的停止代次与追踪。
 // source 必须是宿主保存的可信上下文；不能接受模型传入预算 ID。
 func (r *TaskRuntime) ContinueGoal(ctx context.Context, scope string, source context.Context) (context.Context, error) {

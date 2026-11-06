@@ -2211,3 +2211,7 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
 .ihtml-tool[data-surface="process"] > summary .t-title { font-weight: 500; }
 
 .ihtml-root .t-history-more { justify-self: start; margin: 8px 0; }
+
+/* 同一请求的旧说明在实时与回放中统一归档，不能与当前阶段正文并列冒充最新事实。 */
+.ihtml-answer-history {margin:8px 0;color:var(--ui-text-muted)}
+.ihtml-answer-history .t-prior-answer {padding:8px 10px;color:var(--ui-text);border-top:1px solid var(--ui-border);line-height:1.6;overflow-wrap:anywhere}

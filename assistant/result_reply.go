@@ -47,6 +47,14 @@ func (s *session) explainToolResult(parent context.Context, p *projection, item 
 			return reply
 		}
 	}
+	flow := agent.TaskGoalID(parent)
+	if flow == "" {
+		flow = Presentation(item.invocation).FlowID
+	}
+	p.mu.Lock()
+	p.flowID = flow
+	p.mu.Unlock()
+	parent = withPresentation(parent, flow, p.id)
 	ctx, cancel := context.WithTimeout(parent, cfg.Timeout)
 	defer cancel()
 	if cfg.Begin != nil {

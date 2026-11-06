@@ -10,6 +10,7 @@ import (
 // ToolHistoryRecord 是公开操作显示快照，不包含签名、nonce 或任何可恢复执行的授权。
 // Call 只来自宿主已脱敏的提案，Result 只来自 PresentToolResult；不能传入原始 Handler 输出。
 type ToolHistoryRecord struct {
+	FlowID           string                 `json:"flowId,omitempty"`
 	ID               string                 `json:"id"`
 	AfterMessageID   string                 `json:"afterMessageId,omitempty"`
 	Call             ihtml.ProposedToolCall `json:"call"`
@@ -74,6 +75,7 @@ func ToolHistoryEvent(event ihtml.ChatStreamEvent) (ToolHistoryRecord, bool) {
 	}
 	out.Result = append(json.RawMessage(nil), event.ToolResult...)
 	out.RunID, out.Sequence = event.RunID, event.Seq
+	out.FlowID = event.FlowID
 	out.UpdatedAt = event.ToolUpdatedAt
 	if out.UpdatedAt == nil {
 		updatedAt := time.Now().UTC()
@@ -151,6 +153,9 @@ func MergeToolHistory(previous, next ToolHistoryRecord) ToolHistoryRecord {
 	}
 	if next.RunID == previous.RunID && next.Sequence == 0 {
 		next.Sequence = previous.Sequence
+	}
+	if previous.FlowID != "" {
+		next.FlowID = previous.FlowID
 	}
 	next.AfterMessageID = previous.AfterMessageID
 	return next

@@ -494,5 +494,34 @@
       },
       "runId": "run"
     }
+  },
+  {
+    "name": "operation remains in its original presentation flow",
+    "previous": {
+      "id": "op",
+      "flowId": "original-flow",
+      "call": {
+        "id": "op"
+      },
+      "status": "accepted"
+    },
+    "next": {
+      "id": "op",
+      "flowId": "other-flow",
+      "call": {
+        "id": "op"
+      },
+      "status": "success",
+      "result": {
+        "saved": true
+      }
+    },
+    "expected": {
+      "flowId": "original-flow",
+      "status": "success",
+      "result": {
+        "saved": true
+      }
+    }
   }
 ]
