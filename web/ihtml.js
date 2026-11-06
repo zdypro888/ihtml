@@ -6917,8 +6917,7 @@
         t.answer.classList.remove('streaming');
         t.answer.removeAttribute('data-content-format');
         t.answer.style.display = 'none';
-        // 确认后的结果总结只重置正文，保留用户选择的过程展开状态和真实回执。
-        if (!t.confirmingTool) t.process.open = true;
+        // 正文分段重置不能改动过程披露状态；默认保持折叠，用户手动展开也不被流式重置覆盖。
         if (t.lastKind === 'answer') t.lastKind = '';
         this.updateProcess(t);
         this.scroll();

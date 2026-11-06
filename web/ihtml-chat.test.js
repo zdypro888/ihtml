@@ -809,6 +809,19 @@ test('trace defaults to compact history while signed confirmations stay outside 
  await page.evaluate(()=>a.destroy());
 });
 
+for(const disclosure of ['default','expanded','collapsed'])test('assistant reset preserves process disclosure: '+disclosure,async(t)=>{
+ const page=await fixture(t);
+ await page.evaluate(async()=>{window.a=ihtml.mountChat('#a',{locale:'zh-CN'});await a.ready();await a.chat.send('Original work');const s=sockets[0];s.emit({type:'turn_start',run_id:'reset-view',seq:1});s.emit({type:'tool_result',run_id:'reset-view',seq:2,tool_status:'success',tool_call:{id:'query',name:'arbitrary_query'},tool_result:{count:1}});s.emit({type:'assistant_delta',run_id:'reset-view',seq:3,delta:'Original summary'});});
+ const process=page.locator('#a .ihtml-process');assert.equal(await process.evaluate(e=>e.open),false);
+ if(disclosure!=='default')await process.locator(':scope > summary').click();
+ if(disclosure==='collapsed')await process.locator(':scope > summary').click();
+ const expected=disclosure==='expanded';
+ await page.evaluate(()=>{sockets[0].emit({type:'assistant_reset',run_id:'reset-view',seq:4});sockets[0].emit({type:'tool_result',run_id:'reset-view',seq:5,tool_status:'success',tool_call:{id:'next-query',name:'different_query'},tool_result:{count:2}});});
+ assert.equal(await process.evaluate(e=>e.open),expected,'new stage cannot expand or collapse the process');
+ await page.evaluate(()=>{sockets[0].emit({type:'assistant_delta',run_id:'reset-view',seq:6,delta:'Updated summary'});sockets[0].emit({type:'assistant_done',run_id:'reset-view',seq:7,message:'Final summary'});});
+ assert.equal(await process.evaluate(e=>e.open),expected,'final answer preserves the selected disclosure');
+});
+
 test('explicit trace and reasoning expansion survive streamed answers without being folded',async(t)=>{
  const page=await fixture(t);
  await page.evaluate(async()=>{window.a=ihtml.mountChat('#a',{locale:'zh-CN'});await a.ready();await a.chat.send('本机摘要');sockets[0].emit({type:'turn_start',run_id:'pinned',seq:1});sockets[0].emit({type:'assistant_thinking',run_id:'pinned',seq:2,thinking_id:'one',thinking:'已提供的分析摘要。'});});
