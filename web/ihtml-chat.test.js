@@ -2001,3 +2001,12 @@ for(const mode of ['light','dark'])for(const width of [390,1100])test(`live and 
  for(const selector of ['#a','#b']) {await page.locator(selector+' .ihtml-process > summary').click();assert.equal(await page.locator(selector+' .pbody > .ihtml-tool').first().isVisible(),true);await page.locator(selector+' .pbody > .ihtml-tool > summary').first().click();assert.match(await page.locator(selector+' .pbody > .ihtml-tool').first().innerText(),/checked/)}
  await page.locator('#b').screenshot({path:`/tmp/ihtml-process-history-${mode}-${width}.png`});
 });
+
+// 只保存正文的回合也能由后续分页补齐工具，不能另起历史文章或丢掉已移除的过程容器。
+test('late history pages enrich the original answer turn without replacing its layout',async(t)=>{
+ const page=await fixture(t);
+ await page.evaluate(async()=>{window.a=ihtml.mountChat('#a',{initialMessages:[{id:'u',role:'user',content:'Question'},{id:'a',role:'assistant',content:'Original answer'}],operationHistory:{cursor:'older',load:async()=>({items:[{id:'read',afterMessageId:'u',status:'success',call:{id:'read',name:'arbitrary_read'}},{id:'change',afterMessageId:'u',status:'pending',proposalRecorded:true,call:{id:'change',name:'arbitrary_change',title:'Original scope',body:{target:'one'}}}],cursor:''})}});await a.ready();window.originalAnswer=a.root.querySelector('.answer').parentElement;});
+ await page.locator('.t-history-more').click();await page.waitForFunction(()=>!document.querySelector('.t-history-more'));
+ assert.equal(await page.evaluate(()=>originalAnswer===a.root.querySelector('.answer').parentElement),true);assert.equal(await page.locator('.ihtml-msg.assistant').filter({hasText:'Original answer'}).count(),1);
+ assert.equal(await page.locator('.pbody > [data-surface="process"]').count(),1);assert.equal(await page.locator('.ihtml-trace-actions > [data-surface="operation"]').count(),1);assert.equal(await page.locator('.ihtml-trace-actions > .ihtml-tool').isVisible(),true);assert.equal(await page.locator('.t-history-label').count(),0);
+});
