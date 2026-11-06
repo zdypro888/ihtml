@@ -5356,7 +5356,7 @@
         entry.setAttribute('aria-expanded', 'false'); notify(); chat.syncLatest(); chat.syncChatControls();
         if (focus && entry.isConnected && !entry.hidden) entry.focus({preventScroll: true});
       }
-      function reset() { invalidate(); opened = false; items = []; cursor = ''; uncertain.clear(); list.replaceChildren(); pane.hidden = true; log.hidden = false; entry.setAttribute('aria-expanded', 'false'); notify(); }
+      function reset() { invalidate(); opened = false; items = []; cursor = ''; uncertain.clear(); list.replaceChildren(); pane.hidden = true; log.hidden = false; entry.setAttribute('aria-expanded', 'false'); notify(); chat.syncChatControls(); }
       entry.onclick = () => opened ? close() : open();
       back.onclick = () => close(); more.onclick = () => { void load(true); }; retry.onclick = () => { void load(); };
       pane.addEventListener('keydown', event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(); } });
@@ -5365,7 +5365,7 @@
         if (opened) return;
         if (kind==='notifications') chat.history?.close(false); else chat.notifications?.close(false);
         opened = true; pane.hidden = false; log.hidden = true; chat.dom.latestBtn.hidden = true;
-        entry.setAttribute('aria-expanded', 'true'); notify(); pane.focus({preventScroll: true}); void refreshPushState(); void load();
+        entry.setAttribute('aria-expanded', 'true'); notify(); chat.syncChatControls(); pane.focus({preventScroll: true}); void refreshPushState(); void load();
       }
       let summaryAbort=null;
       const refreshSummary=async()=>{
@@ -5932,6 +5932,12 @@
       },
       syncChatControls() {
         if (!this.dom) return;
+        // 列表仅负责导航：保留原输入节点、草稿和运行连接，只隐藏整个输入/发送/停止区域。
+        // 两类列表共享同一判断，异步回执刷新按钮时也不能重新露出输入框。
+        const navigationOpen=!!(this.history?.opened||this.notifications?.opened);
+        const wasHidden=this.dom.foot.hidden;
+        this.dom.foot.hidden=navigationOpen;
+        if(wasHidden&&!navigationOpen)this.resizeComposer();
         const busy = this.active || this.sending;
         this.history?.sync();
         const unavailable = destroyed || !this.enabled || authRefreshing;

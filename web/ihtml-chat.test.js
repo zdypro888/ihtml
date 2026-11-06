@@ -1097,10 +1097,12 @@ test('optional history defaults off, pages by host IDs, preserves composer and r
  assert.equal(await page.locator('.ihtml-chat-history-select').count(),2);
  assert.equal(await page.locator('.ihtml-chat-history-list img').count(),0);
  assert.equal(await page.locator('textarea').inputValue(),'draft stays');
- const geometry=await page.locator('textarea').boundingBox();assert.ok(geometry&&geometry.height>=44&&geometry.y+geometry.height<845);
+ assert.equal(await page.locator('.ihtml-chat-foot').isVisible(),false);
+ assert.equal(await page.locator('textarea').boundingBox(),null);
  await page.getByRole('button',{name:'Second',exact:true}).click();
  assert.equal(await page.evaluate(()=>selectedHistory),'second');assert.equal(await page.evaluate(()=>a.chat.history.opened),false);
  assert.equal(await page.locator('textarea').getAttribute('readonly'),null);
+ assert.equal(await page.locator('.ihtml-chat-foot').isVisible(),true);
  assert.deepEqual(await page.evaluate(()=>historyCalls),['','next']);
 });
 
@@ -1114,6 +1116,30 @@ test('history failures are bounded, do not leak callback secrets, and deletion r
  assert.ok(await page.getByRole('button',{name:'Delete conversation · One',exact:true}).isDisabled());
  await page.evaluate(async()=>{a.destroy();window.a=ihtml.mountChat('#a',{locale:'en',history:{list:async()=>({items:[{id:'one',title:'One'}]}),select:async()=>{},remove:async()=>false}});await a.ready();a.chat.history.open();});
  await page.getByRole('button',{name:'Delete conversation · One',exact:true}).click();assert.equal(await page.locator('.ihtml-chat-history-select').count(),1);
+});
+
+// 导航列表只改变展示，不能清草稿、停后台运行，或被迟到的流事件重新露出输入区。
+for(const mode of ['light','dark'])for(const width of [390,1100])test(`history and notifications hide composer without losing draft or active run ${mode} ${width}`,async(t)=>{
+ const page=await fixture(t,{width,height:900});await page.evaluate(async({mode})=>{
+  backgroundExecution=true;window.selected=[];
+  const source={list:async()=>({items:[{id:'saved',title:'Saved dialogue'}]}),select:async({id})=>{selected.push(id)}};
+  window.a=ihtml.mountChat('#a',{locale:'en',history:source,notifications:{...source,title:'Inbox'}});await a.ready();a.theme.set({mode},{persist:false});await a.chat.send('Original work');
+  sockets[0].emit({type:'turn_start',run_id:'original',seq:1});a.chat.draft('Unsent draft');window.originalInput=a.root.querySelector('textarea');originalInput.setSelectionRange(2,5);
+  a.chat.history.open();
+ },{mode});
+ const foot=page.locator('#a .ihtml-chat-foot');assert.equal(await foot.isVisible(),false);assert.equal(await foot.evaluate(e=>e.getBoundingClientRect().height),0);
+ await page.evaluate(()=>{a.chat.notifications.open();sockets[0].emit({type:'assistant_status',run_id:'original',seq:2,status:'Still running'});});
+ assert.equal(await foot.isVisible(),false);assert.equal(await page.evaluate(()=>a.chat.busy),true);
+ assert.equal(await page.evaluate(()=>sockets[0].sent.length),1,'list navigation never sends cancel or extra messages');
+ await page.evaluate(()=>a.chat.notifications.close());assert.equal(await foot.isVisible(),true);assert.equal(await foot.locator('button.stop').isVisible(),true);
+ assert.deepEqual(await page.evaluate(()=>({same:originalInput===a.root.querySelector('textarea'),draft:originalInput.value,start:originalInput.selectionStart,end:originalInput.selectionEnd})),{same:true,draft:'Unsent draft',start:2,end:5});
+ await page.evaluate(()=>{a.chat.history.open();sockets[0].emit({type:'assistant_done',run_id:'original',seq:3,message:'Original result'});});
+ assert.equal(await foot.isVisible(),false);assert.equal(await page.evaluate(()=>a.chat.busy),false);
+ await page.getByRole('button',{name:'Saved dialogue',exact:true}).first().click();
+ assert.equal(await foot.isVisible(),true);assert.equal(await page.locator('#a textarea').inputValue(),'Unsent draft');assert.equal(await page.evaluate(()=>selected.length),1);
+ await page.evaluate(()=>a.chat.notifications.open());assert.equal(await foot.isVisible(),false);await page.getByRole('button',{name:'Saved dialogue',exact:true}).last().click();
+ assert.equal(await foot.isVisible(),true);assert.equal(await page.locator('#a textarea').inputValue(),'Unsent draft');assert.match(await page.locator('#a .ihtml-chat-log').innerText(),/Original result/);
+ assert.equal(await page.evaluate(()=>sockets[0].sent.length),1);
 });
 
 test('late history and selection cannot restore another identity; hidden entry uses public API only',async t=>{

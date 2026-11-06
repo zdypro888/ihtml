@@ -1964,6 +1964,7 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
   column-gap: 8px; row-gap: 3px; align-items: end;
 }
 .ihtml-chat-foot .compose { display: contents; }
+.ihtml-chat-foot[hidden] { display:none !important; }
 .ihtml-chat-foot textarea {
   grid-column: 1; grid-row: 1; min-width: 0;
   width: 100%; resize: none; max-height: 140px; min-height: 44px; overflow-y: auto; overscroll-behavior: contain;
