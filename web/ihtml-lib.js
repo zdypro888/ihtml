@@ -963,6 +963,8 @@
     function factValue(value, t) {
       if (value == null || value === '') return '';
       if (Array.isArray(value)) {
+        // 复杂列表复用现有递归脱敏摘要，避免目标对象被显示成 [object Object]。
+        if(value.some(entry=>entry&&typeof entry==='object'))return clip(technicalText(value,t).replace(/\s+/g,' '),FACT_LIMIT);
         const visible = value.slice(0, 8).map((entry) => safeText(entry, 60)).filter(Boolean);
         if (value.length > 8) visible.push(t('tool_more_entries', { n: value.length - 8 }));
         return clip(visible.join(', '), FACT_LIMIT);
@@ -1077,7 +1079,8 @@
           pushFact(facts, t('tool_fact_operation'), name || t('tool_title_unknown'), t);
           for (const [key, value] of Object.entries(body).slice(0, 12)) {
             if (facts.length >= 5) break;
-            if (isSensitiveKey(key) || HEAVY_KEY.test(key) || (value && typeof value === 'object')) continue;
+            // 嵌套目标/变更同样属于确认范围，复用 factValue 的有界脱敏展示，不能仅藏到技术详情。
+            if (isSensitiveKey(key) || HEAVY_KEY.test(key)) continue;
             pushFact(facts, safeText(key, 60), value, t);
           }
       }

@@ -1208,6 +1208,18 @@ test('host presentation facts replace guessed request facts with readable signed
  assert.ok(view.request.includes('proxySelection'));
 });
 
+test('generic confirmations expose nested targets and changes through bounded redacted facts',()=>{
+ const body={target:{handle:'record-42',credentials:{token:'NESTED_SECRET'}},change:{$set:{caption:'review-marker',previous:'',optional:null}},destinations:[{id:'other-1',password:'ARRAY_SECRET'}]};
+ const view=chatTrace.toolView({name:'arbitrary_change',title:'Review change',body},{tool_status:'pending'},makeT('en'));
+ const facts=JSON.stringify(view.facts);
+ assert.match(facts,/record-42/);assert.match(facts,/review-marker/);assert.match(facts,/other-1/);
+ assert.match(view.facts.find(f=>f.label==='change').value,/"previous": ""/);
+ assert.doesNotMatch(facts,/NESTED_SECRET|ARRAY_SECRET|\[object Object\]/);
+ assert.ok(facts.length<6000);
+ body.change.deep=body;
+ assert.doesNotThrow(()=>chatTrace.toolView({name:'another_change',body},{tool_status:'pending'},makeT('zh')));
+});
+
 // Go 持久快照与浏览器归并读取同一组协议向量，防止两端各自修补状态逻辑。
 test('public operation merge matches shared persistence conformance vectors',()=>{
  const vectors=require('../assistant/testdata/operation_merge.json');

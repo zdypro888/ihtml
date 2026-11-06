@@ -1708,6 +1708,18 @@ test('live status remains in collapsed summary across answer deltas and resets a
  await page.evaluate(()=>a.destroy());
 });
 
+test('nested confirmation scope stays visible and identical in live and historical cards',async(t)=>{
+ const page=await fixture(t,{width:393,height:850});
+ await page.evaluate(async()=>{
+  const call={id:'nested',name:'arbitrary_change',title:'Change one record',method:'POST',path:'/records',body:{target:{handle:'record-42',token:'HIDDEN_NESTED'},change:{$set:{caption:'review-marker',old:''}},items:[{id:'related-1',password:'HIDDEN_LIST'}]},confirmation_token:'SIGNED',confirmation_nonce:'nonce'};
+  window.a=ihtml.mountChat('#a',{locale:'zh-CN'});await a.ready();await a.chat.send('Change');sockets[0].emit({type:'turn_start',run_id:'nested',seq:1});sockets[0].emit({type:'confirmation_required',run_id:'nested',seq:2,tool_call:call});sockets[0].emit({type:'assistant_done',run_id:'nested',seq:3,message:'Review'});
+  window.b=ihtml.mountChat('#b',{locale:'zh-CN',initialOperations:[{id:'nested',status:'pending',proposalRecorded:true,call}]});await b.ready();
+ });
+ const live=await page.locator('#a .ihtml-tool .t-facts').innerText(),saved=await page.locator('#b .ihtml-tool .t-facts').innerText();
+ assert.equal(live,saved);assert.match(live,/record-42/);assert.match(live,/review-marker/);assert.match(live,/related-1/);assert.doesNotMatch(live,/HIDDEN_|\[object Object\]/);
+ assert.equal(await page.locator('#a .ihtml-tool').evaluate(e=>e.scrollWidth<=e.clientWidth+1),true);
+});
+
 test('readable confirmation metadata renders exact targets and clear action on mobile',async(t)=>{
  const page=await fixture(t,{width:393,height:850});
  await page.evaluate(async()=>{window.a=ihtml.mountChat('#a',{locale:'zh-CN'});await a.ready();await a.chat.send('查看文件');sockets[0].emit({type:'turn_start',run_id:'readable',seq:1});sockets[0].emit({type:'confirmation_required',run_id:'readable',seq:2,tool_call:{id:'preview',title:'查看所选账号的文件清单',method:'POST',path:'/preview',body:{scope:'all',proxySelection:'default'},risk:'medium',reason:'仅查看文件清单和空间占用，不删除文件。',presentation:{confirm_text:'确认查看文件清单',reason_label:'确认后会做什么',facts:[{label:'账号数量',value:'2'},{label:'完整账号名单',value:'one@example.test\ntwo@example.test'},{label:'清理范围',value:'整个 iCloud Drive（包含其他来源文件）'},{label:'网络出口',value:'沿用账号的默认网络设置'}]},confirmation_token:'fixture',confirmation_nonce:'fixture'}});});
