@@ -6654,11 +6654,10 @@
         if (t.turnFailed) return T('turn_failed');
         if (t.errorCount > 0) return T('tools_failed', { n: t.errorCount });
         if (t.agentState && t.agentState.manualPaused && t.agentState.plan.length) return T('agent_plan_paused');
-        // 接纳回执只结束提交阶段，不证明异步业务结束；过期也不是取消回执。
-        if (Array.from(t.tools.values()).some(rec => rec.status === 'accepted')) return T('trace_accepted');
+        // 已结束轮次的摘要是过程入口，不把某一项提交回执当成整个业务的当前结论。
         if (Array.from(t.tools.values()).some(rec => rec.status === 'expired')) return T('trace_expired');
         const steps = this.processStepCount(t);
-        if (steps > 0) return T('trace_completed', { n: steps });
+        if (steps > 0) return T('process_steps');
         return T('done');
       },
       finishCancelled(t) {
@@ -7096,6 +7095,7 @@
         rec.status = status;
         rec.card.dataset.status = status;
         rec.chip.textContent = TOOL_STATUS_LABEL[status] || status;
+        rec.chip.title = status==='accepted'?T('submission_only'):'';
         rec.chip.className = 'ihtml-chip t-status ' + status;
       },
       appendTechnicalSection(parent, title, value, rec, suffix) {
@@ -7267,7 +7267,8 @@
         const techBody = el('div', 't-tech-body');
         const hasRequest = this.appendTechnicalSection(techBody, T('request_summary'), view.request, rec, 'request');
         // 结果是同一张操作卡的核心事实，实时和回放都只需展开一次即可读取。
-        this.appendTechnicalSection(rec.body, T('result_data'), view.result, rec, 'result');
+        if(rec.status==='accepted')rec.body.appendChild(el('p','t-meta t-submission-note',T('submission_only')));
+        this.appendTechnicalSection(rec.body, T(rec.status==='accepted'?'submission_receipt':'result_data'), view.result, rec, 'result');
         const hasDebug = this.appendTechnicalSection(techBody, T('diagnostic_data'), view.debug, rec, 'debug');
         if (view.hasTechnical && (hasRequest || hasDebug)) {
           const tech = el('details', 't-tech');
@@ -7343,11 +7344,12 @@
             const reason = el('p', 't-reason');
             const facts = el('dl', 't-facts');
             const counts = el('p', 't-batch-status');counts.setAttribute('aria-live', 'polite');
+            const submission = el('p','t-meta t-submission-note',T('submission_only'));submission.hidden=true;
             const list = el('details', 't-batch-list'), summary = el('summary'), items = el('div', 't-batch-items');
             list.append(summary, items);
             const bar = el('div', 't-actions'), confirm = el('button', 'ok');
-            bar.append(confirm);head.append(title, operation, counts);card.append(head, reason, facts, list, bar);t.actions.appendChild(card);
-            g = {card, head, title, operation, reason, facts, counts, list, summary, items, confirm, records: [], error: '', manualOpen: null};
+            bar.append(confirm);head.append(title, operation, counts);card.append(head, reason, facts, submission, list, bar);t.actions.appendChild(card);
+            g = {card, head, title, operation, reason, facts, counts, submission, list, summary, items, confirm, records: [], error: '', manualOpen: null};
             // 仅明确用户操作覆盖默认值；分页和状态刷新不得把手动展开的历史重新收起。
             head.addEventListener('click', () => {g.manualOpen = !card.open;if(g.manualOpen)this.setFollowing(false);});
             confirm.onclick = () => this.confirmToolGroup(g);
@@ -7378,11 +7380,18 @@
           });
           g.counts.textContent = g.error || Object.entries(counts).filter(([, count]) => count > 0).map(([status, count]) => (TOOL_STATUS_LABEL[status] || status) + ' ' + count).join(' · ');
           g.counts.title = g.counts.textContent;
+          // 提交与业务结论分层，说明只在展开后出现；窄屏截断的操作名仍可完整读取。
+          g.submission.hidden=counts.accepted===0;
+          g.operation.title=g.operation.textContent;
+          g.head.setAttribute('aria-label',[g.title.textContent,g.operation.textContent,g.counts.textContent].filter(Boolean).join(' · '));
+          const focused=doc.activeElement,focusInBody=g.card.contains(focused)&&!g.head.contains(focused);
           g.card.open = this.toolDisclosureOpen(records.map(rec => rec.status), g.manualOpen ?? (records.some(rec => rec.manualOpen === true) ? true : undefined));
           const pending = records.filter(rec => !rec.historical && rec.status === 'pending' && !rec.expired && rec.call.confirmation_nonce && rec.call.confirmation_token);
           g.confirm.textContent = T('tool_batch_confirm', {n: pending.length});
           g.confirm.hidden = pending.length === 0 || !this.modelInfo?.batch_confirmations;
           g.confirm.disabled = destroyed || readOnly || authRefreshing || !this.enabled || this.active || this.sending || !!this.confirmationBusy || pending.some(rec => rec.call.review?.blocking_reason || rec.cancelPending || rec.confirmPending);
+          // 批准按钮消失或回执自动收起后，键盘焦点留在原清单摘要，不能掉回整个页面。
+          if(focusInBody&&(!g.card.open||focused===g.confirm&&g.confirm.hidden))queueMicrotask(()=>{if(g.head.isConnected&&(doc.activeElement===focused||doc.activeElement===doc.body))g.head.focus({preventScroll:true})});
         }
         // 配置加载、分页和执行状态会改变分组创建时机；位置始终按原操作顺序，不能按组建成时间排列。
         const ordered = [...new Set([...t.tools.values()].filter(rec=>this.toolSurface(rec)==='operation').map(rec => rec.batchGroup?.card || rec.card))];
@@ -7396,6 +7405,7 @@
       // 全部宿主确认钩子通过后才发送固定卡片数组；后端原子入队，各项仍独立验签与记录结果。
       async confirmToolGroup(g) {
         if (destroyed || readOnly || authRefreshing || !this.enabled || this.active || this.sending || this.confirmationBusy) return;
+        const approvalFocus=doc.activeElement,restoreApprovalFocus=g.card.contains(approvalFocus);
         const records = g.records.filter(rec => !rec.historical && rec.status === 'pending' && !rec.expired);
         if (!records.length || records.some(rec => rec.call.review?.blocking_reason || rec.cancelPending)) return;
         if (records.length === 1) return this.confirmTool(records[0]);
@@ -7426,6 +7436,8 @@
             this.renderToolRecord(rec, rec.lastEvent, t);
           }
           this.setActive(true);this.updateProcess(t);
+          // 按钮置忙时浏览器可能已把焦点清至 body；用本次显式批准前的焦点归属完成交接。
+          if(restoreApprovalFocus)queueMicrotask(()=>{if(g.head.isConnected&&(doc.activeElement===approvalFocus||doc.activeElement===doc.body||g.card.contains(doc.activeElement)))g.head.focus({preventScroll:true})});
         } catch {
           g.error = T('confirmation_send_failed');
         } finally {
@@ -7834,11 +7846,8 @@
         }
         // 后台调用完成属于会话通知，不开启/结束模型轮次，也不把调用返回宣称为业务成功。
         if (ev.type === 'task_complete') {
-          const text = T('background_call_returned', { id: String(ev.task_id || '') });
-          if (!this.taskNotice || !this.taskNotice.isConnected) {
-            this.taskNotice = el('div', 'ihtml-pline'); this.taskNotice.setAttribute('role', 'status'); this.log.appendChild(this.taskNotice);
-          }
-          this.taskNotice.textContent = text; this.announce(text); this.notifyEvent(ev); return;
+          // 这是宿主通知事件；原调用已有过程/回执记录，不能再追加一段仅实时存在的内部编号提示。
+          this.notifyEvent(ev); return;
         }
         // inspect_request 是服务端的带外请求, 不依赖轮次归属与序号去重:
         // 即使本地轮次已收尾也应答, 否则服务端工具只能等到超时。

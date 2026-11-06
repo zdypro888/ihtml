@@ -1522,7 +1522,7 @@ test('expired historical card is corrected by its accepted receipt without claim
  assert.equal(await page.locator('.ihtml-tool').count(),1);
  assert.equal(await page.locator('.ihtml-tool[data-status="accepted"]').count(),1);
  assert.equal(await page.locator('.t-refresh').count(),0);
- assert.match(await page.locator('#a').innerText(),/操作请求已受理/);
+ assert.match(await page.locator('#a .p-title').first().innerText(),/处理过程/);
  assert.match(await page.locator('#a').innerText(),/16\/30/);
  assert.doesNotMatch(await page.locator('#a').innerText(),/已取消|本轮处理结束/);
  assert.equal(await page.evaluate(()=>a.chat.busy),true);
@@ -1723,7 +1723,7 @@ test('57 signed operations use one batch confirmation and aggregate independent 
  assert.equal(await page.locator('.ihtml-tool-batch').count(),1);
  assert.equal(await page.locator('.ihtml-trace-actions > .ihtml-tool').count(),0);
  assert.equal(await page.locator('.t-batch-items').isVisible(),false);
- assert.match(await page.locator('.ihtml-tool-batch').innerText(),/批量处理 · 57 项/);
+ assert.match(await page.locator('.ihtml-tool-batch').innerText(),/操作清单 · 57 项/);
  assert.match(await page.locator('.ihtml-tool-batch').innerText(),/仅直播转播/);
  assert.equal(await page.locator('.ihtml-tool-batch').evaluate(el=>el.scrollWidth<=el.clientWidth),true);
  await page.screenshot({path:'/tmp/ihtml-batch-confirmation-mobile.png',animations:'disabled'});
@@ -1818,7 +1818,7 @@ test('batch grouping is shared by unrelated tools and keeps each tool scope sepa
 });
 
 // 会话级完成通知不伪造新轮次、不重发调用，也不把业务受理显示为业务完成。
-test('background call completion notifies without starting or finishing a model turn',async(t)=>{
+test('background call completion reaches host notifications without adding a conversation message',async(t)=>{
  const page=await fixture(t);
  await page.evaluate(async()=>{
   window.a=ihtml.mountChat('#a',{onChatEvent:event=>events.push(event)});await a.ready();await a.chat.send('query');
@@ -1829,8 +1829,32 @@ test('background call completion notifies without starting or finishing a model 
  });
  assert.equal(await page.evaluate(()=>sockets[0].sent.length),await page.evaluate(()=>framesBefore));
  assert.equal(await page.evaluate(()=>events.filter(event=>event.type==='task_complete').length),1);
- assert.match(await page.locator('#a').innerText(),/opaque-task/);
+ assert.doesNotMatch(await page.locator('#a').innerText(),/opaque-task|后台调用已返回|Background call returned/);
+ assert.equal(await page.evaluate(()=>events.find(event=>event.type==='task_complete').task_id),'opaque-task');
  assert.equal(await page.locator('#a .ihtml-msg.assistant').count(),await page.evaluate(()=>cardsBefore));
+});
+
+// 提交状态只描述回执，不能挤占业务结论；过程入口、说明和通知在实时与历史保持同一层次。
+for(const mode of ['light','dark'])for(const width of [390,1100])test(`submission receipts stay distinct from outcomes in live and restored UI ${mode} ${width}`,async(t)=>{
+ const page=await fixture(t,{width,height:900});await page.evaluate(async({mode,width})=>{
+  const original=fetch;window.fetch=async(...args)=>{const r=await original(...args),text=r.text;r.text=async()=>JSON.stringify({...JSON.parse(await text()),batch_confirmations:true});return r};
+  const call=i=>({id:'op-'+i,name:'arbitrary_operation',title:'Apply selected scope',method:'POST',path:'/objects',body:{target:'item-'+i},confirmation_nonce:'n'+i,confirmation_token:'SIGNED'+i});
+  window.a=ihtml.mountChat('#a',{locale:'zh-CN',onChatEvent:e=>events.push(e)});await a.ready();a.theme.set({mode},{persist:false});a.root.style.width=width+'px';await a.chat.send('Apply the selected scope');
+  const socket=sockets[0];socket.emit({type:'turn_start',run_id:'r',seq:1,flow_id:'f'});for(let i=0;i<2;i++){socket.emit({type:'confirmation_required',run_id:'r',seq:2+i*2,flow_id:'f',tool_call:call(i)});socket.emit({type:'tool_result',run_id:'r',seq:3+i*2,flow_id:'f',tool_call:call(i),tool_status:'accepted',tool_result:{id:'original-job-'+i}})}socket.emit({type:'assistant_done',run_id:'r',seq:6,flow_id:'f',content_format:'markdown',message:'The original work is complete.'});
+  window.b=ihtml.mountChat('#b',{locale:'zh-CN',initialMessages:[{id:'u',role:'user',content:'Apply the selected scope'},{id:'a',role:'assistant',flowId:'f',runId:'r',contentFormat:'markdown',content:'The original work is complete.'}],initialOperations:[0,1].map(i=>({id:'op-'+i,afterMessageId:'u',flowId:'f',runId:'r',sequence:3+i*2,status:'accepted',proposalRecorded:true,call:call(i),result:{id:'original-job-'+i}}))});await b.ready();b.theme.set({mode},{persist:false});b.root.style.width=width+'px';
+  socket.emit({type:'task_complete',task_id:'INTERNAL_TASK_ID',task_state:'completed'});
+ },{mode,width});
+ for(const selector of ['#a','#b']){
+  assert.equal(await page.locator(selector+' .p-title').innerText(),'处理过程');
+  const group=page.locator(selector+' .ihtml-tool-batch');assert.equal(await group.evaluate(e=>e.open),false);assert.match(await group.locator(':scope > summary').innerText(),/操作清单.*已提交 2/s);
+  assert.doesNotMatch(await page.locator(selector).innerText(),/INTERNAL_TASK_ID|后台调用已返回|操作请求已受理/);
+  await group.locator(':scope > summary').click();assert.match(await group.locator(':scope > .t-meta').innerText(),/已提交表示请求已受理/);
+  assert.match(await group.locator(':scope > summary').getAttribute('aria-label'),/Apply selected scope/);
+  await group.locator('.t-batch-list > summary').click();await group.locator('.ihtml-tool > summary').first().click();assert.match(await group.innerText(),/提交回执/);
+  assert.equal(await page.locator(selector+' .ihtml-chat-log').evaluate(e=>e.scrollWidth>e.clientWidth),false);
+  await group.locator(':scope > summary').click();await page.locator(selector).screenshot({path:`/tmp/ihtml-polish-${selector.slice(1)}-${mode}-${width}.png`});
+ }
+ assert.equal(await page.evaluate(()=>events.filter(e=>e.type==='task_complete'&&e.task_id==='INTERNAL_TASK_ID').length),1);
 });
 
 // 模型挂起后准备完成的确认卡仍汇入原批次；迟到正文不能改写已完成答复。
@@ -1858,7 +1882,7 @@ test('structured operation history preserves approval scope and per-item results
  await page.evaluate(async()=>{
   window.a=ihtml.mountChat('#a',{locale:'zh-CN',initialMessages:[{id:'question',role:'user',content:'通用批量操作'},{id:'reply',role:'assistant',content:'原始回复'}],initialOperations:['success','accepted','unknown','pending'].map((status,i)=>({id:'history-'+i,afterMessageId:'question',status,proposalRecorded:true,summary:'实际回执 '+i,result:{saved:status==='success',jobId:'original-'+i,api_key:'SECRET'},call:{name:'arbitrary_tool',title:'任意资源变更',method:'PUT',path:'/resources',confirmation_group:'original',reason:'只修改原始范围',confirmation_token:'OLD_SECRET',confirmation_nonce:'OLD_NONCE',requires_confirmation:true,presentation:{facts:[{label:'目标',value:'resource-'+i},{label:'用途',value:'原目标值'}]},review:{scope:'原始范围',before:{value:'旧值'},after:{value:'新值'}}}}))});await a.ready();
  });
- assert.equal(await page.locator('.ihtml-tool-batch').count(),1);assert.match(await page.locator('.ihtml-tool-batch').innerText(),/完成 1.*已接受 1.*结果未知 1/);
+ assert.equal(await page.locator('.ihtml-tool-batch').count(),1);assert.match(await page.locator('.ihtml-tool-batch').innerText(),/完成 1.*已提交 1.*结果未知 1/);
  assert.equal(await page.locator('.ihtml-operation-history .t-actions button:visible').count(),0);
  assert.equal(await page.locator('.ihtml-tool-batch').evaluate(e=>e.open),false);await page.locator('.t-batch-head').click();
  await page.locator('.t-batch-list > summary').click();await page.locator('.ihtml-tool').first().locator('summary.t-head').click();
@@ -1940,6 +1964,7 @@ test('live batch confirmation stays open until settled and then collapses automa
  const batch=page.locator('.ihtml-tool-batch');assert.equal(await batch.evaluate(e=>e.open),true);assert.equal(await batch.locator(':scope > .t-actions button').isVisible(),true);await batch.locator(':scope > .t-actions button').click();
  await page.evaluate(()=>{const s=sockets[0];s.emit({type:'turn_start',run_id:'settled',seq:1});for(let i=0;i<2;i++)s.emit({type:'tool_result',run_id:'settled',seq:i+2,tool_call:{id:'live-'+i},tool_status:i?'accepted':'success',tool_result:{saved:true}});s.emit({type:'assistant_done',run_id:'settled',seq:4,message:'receipts saved'});});
  assert.equal(await batch.evaluate(e=>e.open),false);assert.match(await batch.locator('.t-batch-status').innerText(),/1/);
+ assert.equal(await batch.locator(':scope > summary').evaluate(e=>e===document.activeElement),true,'settled approval keeps keyboard focus on the original batch');
  await batch.locator(':scope > summary').click();assert.equal(await batch.locator('.t-batch-list').isVisible(),true);assert.equal(await batch.locator(':scope > .t-actions button').isVisible(),false);
 });
 

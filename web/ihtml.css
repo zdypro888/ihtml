@@ -2215,3 +2215,5 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
 /* 同一请求的旧说明在实时与回放中统一归档，不能与当前阶段正文并列冒充最新事实。 */
 .ihtml-answer-history {margin:8px 0;color:var(--ui-text-muted)}
 .ihtml-answer-history .t-prior-answer {padding:8px 10px;color:var(--ui-text);border-top:1px solid var(--ui-border);line-height:1.6;overflow-wrap:anywhere}
+/* 提交语义说明是展开回执的次要信息，单卡和清单共用同一层次。 */
+.ihtml-chat .t-submission-note {display:block;margin:8px 0;color:var(--ui-text-muted);font-size:12px;line-height:1.6}
