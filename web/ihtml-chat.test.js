@@ -2010,3 +2010,16 @@ test('late history pages enrich the original answer turn without replacing its l
  assert.equal(await page.evaluate(()=>originalAnswer===a.root.querySelector('.answer').parentElement),true);assert.equal(await page.locator('.ihtml-msg.assistant').filter({hasText:'Original answer'}).count(),1);
  assert.equal(await page.locator('.pbody > [data-surface="process"]').count(),1);assert.equal(await page.locator('.ihtml-trace-actions > [data-surface="operation"]').count(),1);assert.equal(await page.locator('.ihtml-trace-actions > .ihtml-tool').isVisible(),true);assert.equal(await page.locator('.t-history-label').count(),0);
 });
+
+// 观测阶段不得同步改变被观察布局；合帧处理并随销毁回收，避免窄侧栏/手机重排反馈循环。
+test('chat geometry changes are deferred and coalesced outside resize delivery',async(t)=>{
+ const page=await fixture(t);
+ const result=await page.evaluate(async()=>{
+  window.resizeWatchers=[];window.ResizeObserver=class {constructor(callback){this.callback=callback;this.targets=new Set();resizeWatchers.push(this)}observe(node){this.targets.add(node)}unobserve(node){this.targets.delete(node)}disconnect(){this.targets.clear()}};
+  window.a=ihtml.mountChat('#a');await a.ready();const root=a.root,panel=root.querySelector('.ihtml-chat');Object.defineProperty(panel,'clientHeight',{configurable:true,value:250});root.classList.remove('ihtml-chat-compact');
+  const observer=resizeWatchers.find(o=>o.targets.has(panel));observer.callback([]);observer.callback([]);const immediate=root.classList.contains('ihtml-chat-compact');
+  await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));const deferred=root.classList.contains('ihtml-chat-compact');
+  root.classList.remove('ihtml-chat-compact');observer.callback([]);a.destroy();await new Promise(resolve=>requestAnimationFrame(resolve));return {immediate,deferred,afterDestroy:root.classList.contains('ihtml-chat-compact'),disconnected:observer.targets.size===0};
+ });
+ assert.deepEqual(result,{immediate:false,deferred:true,afterDestroy:false,disconnected:true});
+});

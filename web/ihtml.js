@@ -5635,11 +5635,15 @@
         this.notifications = opts.notifications ? createChatHistory(head,log,foot,opts.notifications,'notifications') : null;
         // 观察真正渲染后的消息高度；覆盖延迟 Markdown、图片加载、折叠及宿主视口变化。
         if (typeof ResizeObserver === 'function') {
+          let geometryFrame=0;
           const resize = new ResizeObserver(() => {
-            // An inline host can shrink independently of the browser viewport.
-            // Keep the composer reachable by compacting explanatory chrome.
-            if (chatOnly) rootEl.classList.toggle('ihtml-chat-compact', panelEl.clientHeight < 320);
-            this.syncLatest(); this.scroll();
+            // 尺寸通知阶段只排队；同步改布局会在 WebKit 的同轮观测中触发重排循环。
+            if(geometryFrame)return;
+            geometryFrame=requestAnimationFrame(()=>{
+              geometryFrame=0;if(destroyed||!log.isConnected)return;
+              if(chatOnly)rootEl.classList.toggle('ihtml-chat-compact',panelEl.clientHeight<320);
+              this.syncLatest();this.scroll();
+            });
           });
           resize.observe(log);
           if (chatOnly) resize.observe(panelEl);
@@ -5651,7 +5655,7 @@
             this.scroll();
           });
           children.observe(log, { childList: true });
-          addDisposer(() => { children.disconnect(); resize.disconnect(); });
+          addDisposer(() => { children.disconnect(); resize.disconnect();if(geometryFrame)cancelAnimationFrame(geometryFrame);geometryFrame=0; });
         }
 
         on(window, 'resize', () => {
