@@ -2082,3 +2082,45 @@ test('completed historical runs suppress old answers while preserving late autho
  const page=await fixture(t);await page.evaluate(async()=>{backgroundExecution=true;window.a=ihtml.mountChat('#a',{initialMessages:[{id:'u',role:'user',content:'Original goal'},{id:'a',role:'assistant',flowId:'f',runId:'r',content:'Saved final snapshot'}],initialOperations:[{id:'start',afterMessageId:'u',flowId:'f',runId:'r',sequence:3,status:'success',call:{id:'start',name:'task_start'}}]});await a.ready();while(!sockets.length)await new Promise(r=>setTimeout(r,0));const s=sockets[0];s.emit({type:'turn_start',flow_id:'f',run_id:'r',seq:1,background_replay:true});s.emit({type:'assistant_done',flow_id:'f',run_id:'r',seq:4,background_replay:true,message:'STALE_REPLAY'});s.emit({type:'confirmation_required',flow_id:'f',run_id:'r',seq:10,background_replay:true,tool_call:{id:'late',name:'arbitrary_change',title:'New authoritative scope',confirmation_nonce:'fresh',confirmation_token:'SIGNED',body:{target:'one'}}});});
  assert.equal(await page.locator('.ihtml-operation-history').count(),1);assert.doesNotMatch(await page.locator('.ihtml-operation-history').innerText(),/STALE_REPLAY/);assert.equal(await page.locator('.ihtml-tool[data-status="pending"]').isVisible(),true);assert.equal(await page.locator('.ihtml-tool[data-status="pending"] .t-actions button.ok').isVisible(),true);
 });
+
+// 对照真实确认、自动续办和重新挂载的显示状态；历史不能凭正文相同隐藏新的权威答复。
+for(const mode of ['light','dark'])for(const width of [390,1100])test(`answer versions keep live and restored presentation identical ${mode} ${width}`,async(t)=>{
+ const page=await fixture(t,{width,height:900});
+ await page.evaluate(async({mode,width})=>{
+  backgroundExecution=true;
+  window.call={id:'change',name:'arbitrary_write',title:'Apply selected scope',method:'POST',path:'/objects',body:{target:'one'},confirmation_nonce:'n',confirmation_token:'SIGNED'};
+  window.savedMessages=[{id:'u',role:'user',content:'Original goal'},{id:'a1',role:'assistant',contentFormat:'markdown',flowId:'f',runId:'r1',content:'Review the selected scope.'}];
+  window.savedOperation={id:'change',afterMessageId:'u',flowId:'f',runId:'r1',sequence:3,status:'pending',proposalRecorded:true,call};
+  window.restore=async()=>{window.b?.destroy?.();const count=sockets.length;window.b=ihtml.mountChat('#b',{locale:'en',initialMessages:savedMessages,initialOperations:[savedOperation]});await b.ready();b.theme.set({mode},{persist:false});b.root.style.width=width+'px';while(sockets.length<=count||sockets.at(-1).readyState!==1)await new Promise(r=>setTimeout(r,0));window.restoredSocket=sockets.at(-1)};
+  window.a=ihtml.mountChat('#a',{locale:'en'});await a.ready();a.theme.set({mode},{persist:false});a.root.style.width=width+'px';await a.chat.send('Original goal');window.liveSocket=sockets[0];
+  liveSocket.emit({type:'turn_start',run_id:'r1',seq:1});liveSocket.emit({type:'turn_context',run_id:'r1',seq:2,flow_id:'f'});liveSocket.emit({type:'confirmation_required',run_id:'r1',seq:3,flow_id:'f',tool_call:call});liveSocket.emit({type:'assistant_done',run_id:'r1',seq:4,flow_id:'f',message:savedMessages[1].content});await restore();
+ },{mode,width});
+ assert.equal(await page.locator('.ihtml-answer-history').count(),0,'one explanation has no version archive in either view');
+ // 点击实际确认按钮走前端状态转换；所有网络均为 fixture，无业务副作用。
+ await page.locator('#a .t-actions button.ok').click();
+ await page.evaluate(async()=>{
+  liveSocket.emit({type:'turn_start',run_id:'r2',seq:1});liveSocket.emit({type:'turn_context',run_id:'r2',seq:2,flow_id:'f'});liveSocket.emit({type:'tool_result',run_id:'r2',seq:3,flow_id:'f',tool_call:{id:'change'},tool_status:'accepted',tool_result:{id:'job'}});liveSocket.emit({type:'assistant_done',run_id:'r2',seq:4,flow_id:'f',message:'The original work is still running.'});
+  savedMessages.push({id:'a2',role:'assistant',contentFormat:'markdown',flowId:'f',runId:'r2',content:'The original work is still running.'});savedOperation={...savedOperation,runId:'r2',status:'accepted',result:{id:'job'}};await restore();
+ });
+ const snapshot=selector=>page.locator(selector+' .ihtml-msg.assistant').filter({has:page.locator('.ihtml-tool')}).evaluate(card=>{
+  const styles=e=>Object.fromEntries(['color','backgroundColor','borderColor','borderRadius','fontSize','fontWeight','lineHeight','padding','margin','display'].map(k=>[k,getComputedStyle(e)[k]]));
+  const answer=card.querySelector(':scope > .answer'),archive=card.querySelector('.ihtml-answer-history');
+  const selectors=[':scope > .author','.ihtml-process','.ihtml-trace-actions > .ihtml-tool','.ihtml-answer-history','.ihtml-answer-history > summary',':scope > .answer'];
+  return {authorVisible:!card.querySelector(':scope > .author').hidden,answerVisible:!answer.hidden&&getComputedStyle(answer).display!=='none',answer:answer.innerHTML,archiveOpen:archive.open,archive:archive.innerHTML,processOpen:card.querySelector('.ihtml-process').open,status:card.querySelector('.p-title').textContent,styles:selectors.map(s=>styles(card.querySelector(s))),order:[...card.children].map(e=>e.className),overflow:card.scrollWidth>card.clientWidth};
+ });
+ const compare=async()=>{await page.evaluate(()=>Promise.all(document.getAnimations().map(a=>a.finished.catch(()=>{}))));const live=await snapshot('#a'),restored=await snapshot('#b');assert.deepEqual(restored,live);assert.equal(live.answerVisible,true);assert.equal(live.authorVisible,true);assert.equal(live.archiveOpen,false);assert.equal(live.overflow,false)};
+ await compare();
+ assert.equal(await page.locator('#a .t-prior-answer').count(),1);
+ await page.evaluate(()=>{
+  // 新一轮的结论可以与上一轮相同；身份由 flow/run 决定，文字不是去重键。
+  for(const socket of [liveSocket,restoredSocket]){const base={run_id:'r3',flow_id:'f',background_replay:socket===restoredSocket};socket.emit({...base,type:'turn_start',seq:1});socket.emit({...base,type:'assistant_status',seq:2,status:'Checking the original work'});socket.emit({...base,type:'assistant_done',seq:3,message:'The original work is still running.'})}
+ });
+ await compare();
+ assert.equal(await page.locator('#a .t-prior-answer').count(),2);
+ await page.evaluate(async()=>{savedMessages.push({id:'a3',role:'assistant',contentFormat:'markdown',flowId:'f',runId:'r3',content:'The original work is still running.'});await restore()});
+ await compare();
+ for(const selector of ['#a','#b'])await page.locator(selector+' .ihtml-answer-history > summary').click();
+ assert.deepEqual(await snapshot('#b'),await snapshot('#a'));
+ assert.equal(await page.locator('#b .t-prior-answer').first().isVisible(),true);
+ await page.locator('#b').screenshot({path:`/tmp/ihtml-answer-versions-${mode}-${width}.png`});
+});

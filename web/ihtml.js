@@ -7870,15 +7870,8 @@
             this.appendStatus(ev.status || T('tool_pending'), false, t);
             this.updateProcess(t);
             break;
-          case 'assistant_done': this.finishTurn(ev, t);
-            if(ev.background_replay && (opts.initialMessages||[]).some(message=>message.role==='assistant'&&message.content===ev.message)) {
-              // 产品历史已有正文，回放只补工具回执/待确认卡，避免同一答复显示两遍。
-              t.answer.hidden=true;
-              t.card.querySelector(':scope > .author').hidden=true;
-              // 已有正文只去重展示文字；续办还在使用此容器，不能连同后续进度一起删掉。
-              if(t.done&&!t.toolCount&&!t.pendingCount)t.card.remove();
-            }
-            break;
+          // 旧轮次由 eventTurn 按运行身份去重；新轮次即使正文相同，也必须显示当前快照。
+          case 'assistant_done': this.finishTurn(ev, t); break;
           case 'turn_error': if(ev.finish_reason==='cancelled')this.finishCancelled(t);else this.turnError(ev.error || 'error', t); break;
         }
         this.notifyEvent(ev);
