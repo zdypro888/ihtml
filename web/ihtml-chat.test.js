@@ -1954,7 +1954,7 @@ test('live and historical operations share grouping disclosure scope and result 
   window.a=ihtml.mountChat('#a',{locale:'en'});await a.ready();await a.chat.send('original');const s=sockets[0];s.emit({type:'turn_start',run_id:'same',seq:1});let seq=2;
   for(const status of statuses)for(let i=0;i<2;i++){s.emit({type:'confirmation_required',run_id:'same',seq:seq++,tool_call:call(status,i),tool_summary:'Original receipt',tool_updated_at:'2026-11-06T08:00:00Z'});if(status!=='pending')s.emit({type:status==='running'?'tool_start':'tool_result',run_id:'same',seq:seq++,tool_call:call(status,i),tool_status:status,tool_updated_at:'2026-11-06T08:00:00Z',tool_summary:'Original receipt',tool_result:receipt(status)});}
   s.emit({type:'assistant_done',run_id:'same',seq:seq++,message:'same public records'});
-  window.b=ihtml.mountChat('#b',{locale:'en',initialOperations:statuses.flatMap(status=>[0,1].map(i=>({id:status+i,status,updatedAt:'2026-11-06T08:00:00Z',proposalRecorded:true,summary:'Original receipt',result:receipt(status),call:call(status,i)})))});await b.ready();
+  window.b=ihtml.mountChat('#b',{locale:'en',initialOperations:statuses.flatMap(status=>[0,1].map(i=>({id:status+i,status,runId:'same',sequence:2+i,updatedAt:'2026-11-06T08:00:00Z',proposalRecorded:true,summary:'Original receipt',result:receipt(status),call:call(status,i)})))});await b.ready();
  },batchEnabled);
  const read=selector=>page.locator(selector).evaluate(root=>[...root.querySelectorAll('.ihtml-tool-batch')].map(g=>({open:g.open,summary:g.querySelector('.t-batch-head').textContent,cards:[...g.querySelectorAll('.ihtml-tool')].map(c=>({status:c.dataset.status,open:c.open,colors:[getComputedStyle(c).color,getComputedStyle(c).backgroundColor,getComputedStyle(c).borderColor,getComputedStyle(c.querySelector('.t-status')).color,getComputedStyle(c.querySelector('.t-status')).backgroundColor],time:c.querySelector('time')?.dateTime,title:c.querySelector('.t-title').textContent,scope:[...c.querySelectorAll('.tbody > .t-reason,.tbody > .t-facts')].map(e=>e.textContent),result:[...c.querySelectorAll('.tbody > .t-tech-section pre')].map(e=>e.textContent),technical:[...c.querySelectorAll('.t-tech pre')].map(e=>e.textContent)}))})));
  const live=await read('#a'),history=await read('#b');assert.equal(live.length,batchEnabled?8:7);assert.deepEqual(history,live);
@@ -1982,9 +1982,9 @@ for(const mode of ['light','dark'])for(const width of [390,1100])test(`live and 
  const page=await fixture(t,{width,height:900});
  await page.evaluate(async({mode,width})=>{
   const processNames=['tool_search','future_internal','arbitrary_read'];
-  const operations=processNames.map((name,i)=>({id:'read-'+i,afterMessageId:'u',status:'success',summary:'internal receipt',call:{id:'read-'+i,name,title:name},result:{checked:true}}));
+  const operations=processNames.map((name,i)=>({id:'read-'+i,afterMessageId:'u',runId:'r',sequence:i+2,updatedAt:'2026-11-06T08:00:00Z',status:'success',summary:'internal receipt',call:{id:'read-'+i,name,title:name},result:{checked:true}}));
   const call={id:'change',name:'unrelated_write',title:'Apply original scope',method:'PUT',path:'/objects/one',risk:'high',reason:'Only this original object',confirmation_nonce:'nonce',confirmation_token:'SIGNED',body:{target:'one'}};
-  operations.push({id:'change',afterMessageId:'u',status:'pending',proposalRecorded:true,call});
+  operations.push({id:'change',afterMessageId:'u',runId:'r',sequence:5,updatedAt:'2026-11-06T08:00:00Z',status:'pending',proposalRecorded:true,call});
   window.a=ihtml.mountChat('#a',{locale:'en'});await a.ready();a.theme.set({mode},{persist:false});a.root.style.width=width+'px';await a.chat.send('Original question');
   const s=sockets[0];s.emit({type:'turn_start',run_id:'r',seq:1});let seq=2;
   for(const op of operations.slice(0,-1))s.emit({type:'tool_result',run_id:'r',seq:seq++,tool_call:op.call,tool_status:op.status,tool_summary:op.summary,tool_result:op.result});

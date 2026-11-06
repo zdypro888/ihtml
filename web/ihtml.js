@@ -7487,7 +7487,8 @@
           t.pBody.appendChild(card);
           rec = {
             id, card, summary, chip, title, note, body, domID, call, status: '', ownerTurn: t,
-            historical:!!ev.history_record, historyRecord:ev.history_record,
+            // 第一次输入尚未成为本地状态，不能预先作为“旧记录”参与序号去重。
+            historical:!!ev.history_record,
             countedPending: false, countedError: false, countdown: 0, cancelAckTimer: 0,
             cancelPending: false, cancelSent: false, confirmPending: false, interactionError: '', lastEvent: {},
           };
