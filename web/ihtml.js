@@ -5750,8 +5750,8 @@
         this.scroll();
       },
 
-      archiveAnswer(t,force=false) {
-        if((!t?.answerFinal&&!force)||!t.text?.trim())return;
+      archiveAnswer(t) {
+        if(!t?.answerFinal||!t.text?.trim())return;
         t.previousAnswers ||= [];
         const id=t.answerVersion||t.latestRunID||'version-'+t.previousAnswers.length;
         if(!t.previousAnswers.some(v=>v.id===id))t.previousAnswers.push({id,text:t.text,format:t.contentFormat,at:t.answerAt});
@@ -5760,7 +5760,7 @@
         if(!t.answerHistory){const box=el('details','ihtml-answer-history ihtml-think');box.append(el('summary','think-head'),el('div','t-answer-versions'));t.card.insertBefore(box,t.answer);t.answerHistory=box}
         t.answerHistory.firstElementChild.textContent=T('answer_versions',{n:t.previousAnswers.length});
         const body=t.answerHistory.lastElementChild;body.replaceChildren();if(t.answerHistoryTruncated)body.append(el('p','t-meta',T('answer_versions_window')));
-        for(const v of t.previousAnswers){const row=el('section','t-prior-answer');if(v.at){const at=new Date(v.at);if(Number.isFinite(at.getTime())){const time=el('time','t-meta',at.toLocaleString(opts.locale||navigator.language));time.dateTime=at.toISOString();row.append(time)}}row.append(renderAssistant(v.text,v.format,row,false));body.append(row)}
+        for(const v of t.previousAnswers){const row=el('section','t-prior-answer');row.append(renderAssistant(v.text,v.format,row,false));body.append(row)}
         t.answerFinal=false;
       },
       startFlowRun(t,runID) {
@@ -6762,7 +6762,7 @@
       appendStatus(text, isError, t = this.turn) {
         text = (text || '').trim();
         if (!t || !text) return;
-        if (!isError){t.liveStatus=text;if(t.text?.trim()&&!t.done){this.archiveAnswer(t,true);t.answerStale=true;t.answer.hidden=true;t.answer.style.display='none'}}
+        if (!isError){t.liveStatus=text;if(t.text?.trim()&&!t.done){this.archiveAnswer(t);t.answerStale=true;t.answer.hidden=true;t.answer.style.display='none'}}
         let node = null;
         if (!isError) node = t.pBody.querySelector('.ihtml-pline[data-persistent="false"]');
         else if (t.lastStatusNode && t.lastStatusNode.dataset.persistent === 'true') node = t.lastStatusNode;
