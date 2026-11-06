@@ -1952,13 +1952,13 @@ test('live and historical operations share grouping disclosure scope and result 
   const call=(status,i)=>({id:status+i,name:'arbitrary_operation',title:'Same operation',method:'PUT',path:'/objects',body:{target:'one'},reason:'Exact original scope',confirmation_group:status,confirmation_nonce:'nonce-'+status+i,confirmation_token:'signed-'+status+i});
   const receipt=status=>['pending','running'].includes(status)?undefined:{state:status,reference:'original'};
   window.a=ihtml.mountChat('#a',{locale:'en'});await a.ready();await a.chat.send('original');const s=sockets[0];s.emit({type:'turn_start',run_id:'same',seq:1});let seq=2;
-  for(const status of statuses)for(let i=0;i<2;i++)s.emit({type:status==='pending'?'confirmation_required':status==='running'?'tool_start':'tool_result',run_id:'same',seq:seq++,tool_call:call(status,i),tool_status:status,tool_updated_at:'2026-11-06T08:00:00Z',tool_summary:'Original receipt',tool_result:receipt(status)});
+  for(const status of statuses)for(let i=0;i<2;i++){s.emit({type:'confirmation_required',run_id:'same',seq:seq++,tool_call:call(status,i),tool_summary:'Original receipt',tool_updated_at:'2026-11-06T08:00:00Z'});if(status!=='pending')s.emit({type:status==='running'?'tool_start':'tool_result',run_id:'same',seq:seq++,tool_call:call(status,i),tool_status:status,tool_updated_at:'2026-11-06T08:00:00Z',tool_summary:'Original receipt',tool_result:receipt(status)});}
   s.emit({type:'assistant_done',run_id:'same',seq:seq++,message:'same public records'});
   window.b=ihtml.mountChat('#b',{locale:'en',initialOperations:statuses.flatMap(status=>[0,1].map(i=>({id:status+i,status,updatedAt:'2026-11-06T08:00:00Z',proposalRecorded:true,summary:'Original receipt',result:receipt(status),call:call(status,i)})))});await b.ready();
  },batchEnabled);
- const read=selector=>page.locator(selector).evaluate(root=>[...root.querySelectorAll('.ihtml-tool-batch')].map(g=>({open:g.open,summary:g.querySelector('.t-batch-head').textContent,cards:[...g.querySelectorAll('.ihtml-tool')].map(c=>({status:c.dataset.status,open:c.open,time:c.querySelector('time')?.dateTime,title:c.querySelector('.t-title').textContent,scope:[...c.querySelectorAll('.tbody > .t-reason,.tbody > .t-facts')].map(e=>e.textContent),result:[...c.querySelectorAll('.tbody > .t-tech-section pre')].map(e=>e.textContent),technical:[...c.querySelectorAll('.t-tech pre')].map(e=>e.textContent)}))})));
+ const read=selector=>page.locator(selector).evaluate(root=>[...root.querySelectorAll('.ihtml-tool-batch')].map(g=>({open:g.open,summary:g.querySelector('.t-batch-head').textContent,cards:[...g.querySelectorAll('.ihtml-tool')].map(c=>({status:c.dataset.status,open:c.open,colors:[getComputedStyle(c).color,getComputedStyle(c).backgroundColor,getComputedStyle(c).borderColor,getComputedStyle(c.querySelector('.t-status')).color,getComputedStyle(c.querySelector('.t-status')).backgroundColor],time:c.querySelector('time')?.dateTime,title:c.querySelector('.t-title').textContent,scope:[...c.querySelectorAll('.tbody > .t-reason,.tbody > .t-facts')].map(e=>e.textContent),result:[...c.querySelectorAll('.tbody > .t-tech-section pre')].map(e=>e.textContent),technical:[...c.querySelectorAll('.t-tech pre')].map(e=>e.textContent)}))})));
  const live=await read('#a'),history=await read('#b');assert.equal(live.length,batchEnabled?8:7);assert.deepEqual(history,live);
- const singles=selector=>page.locator(selector+' .ihtml-trace-actions > .ihtml-tool').evaluateAll(cards=>cards.map(c=>({status:c.dataset.status,open:c.open,time:c.querySelector('time')?.dateTime,title:c.querySelector('.t-title').textContent})));assert.deepEqual(await singles('#b'),await singles('#a'));
+ const singles=selector=>page.locator(selector+' .ihtml-trace-actions > .ihtml-tool').evaluateAll(cards=>cards.map(c=>({status:c.dataset.status,open:c.open,colors:[getComputedStyle(c).color,getComputedStyle(c).backgroundColor,getComputedStyle(c).borderColor,getComputedStyle(c.querySelector('.t-status')).color,getComputedStyle(c.querySelector('.t-status')).backgroundColor],time:c.querySelector('time')?.dateTime,title:c.querySelector('.t-title').textContent})));assert.deepEqual(await singles('#b'),await singles('#a'));
  assert.equal(await page.locator('#a .ihtml-tool-batch > .t-actions button:visible').count(),batchEnabled?1:0);assert.equal(await page.locator('#b .t-actions button:visible').count(),0);
  }});
 
@@ -1975,4 +1975,29 @@ test('history pagination and live receipts share monotonic merge without duplica
  await page.locator('.t-history-more').click();await page.waitForFunction(()=>!document.querySelector('.t-history-more'));
  assert.equal(await page.locator('.ihtml-operation-history').count(),1);assert.equal(await page.locator('.ihtml-tool').count(),1);assert.equal(await page.locator('.ihtml-tool').getAttribute('data-status'),'success');
  await page.locator('.ihtml-tool > summary').click();const text=await page.locator('.ihtml-tool').innerText();assert.match(text,/original-target/);assert.match(text,/saved/);assert.match(text,/verified receipt/);assert.equal(await page.locator('.ihtml-operation-history button').count(),0);
+});
+
+// 过程归过程、确认归操作，来源不决定展示层；对照实际主题的颜色、边框和文字样式。
+for(const mode of ['light','dark'])for(const width of [390,1100])test(`live and restored turns preserve process/action layout and colors ${mode} ${width}`,async(t)=>{
+ const page=await fixture(t,{width,height:900});
+ await page.evaluate(async({mode,width})=>{
+  const processNames=['tool_search','future_internal','arbitrary_read'];
+  const operations=processNames.map((name,i)=>({id:'read-'+i,afterMessageId:'u',status:'success',summary:'internal receipt',call:{id:'read-'+i,name,title:name},result:{checked:true}}));
+  const call={id:'change',name:'unrelated_write',title:'Apply original scope',method:'PUT',path:'/objects/one',risk:'high',reason:'Only this original object',confirmation_nonce:'nonce',confirmation_token:'SIGNED',body:{target:'one'}};
+  operations.push({id:'change',afterMessageId:'u',status:'pending',proposalRecorded:true,call});
+  window.a=ihtml.mountChat('#a',{locale:'en'});await a.ready();a.theme.set({mode},{persist:false});a.root.style.width=width+'px';await a.chat.send('Original question');
+  const s=sockets[0];s.emit({type:'turn_start',run_id:'r',seq:1});let seq=2;
+  for(const op of operations.slice(0,-1))s.emit({type:'tool_result',run_id:'r',seq:seq++,tool_call:op.call,tool_status:op.status,tool_summary:op.summary,tool_result:op.result});
+  s.emit({type:'confirmation_required',run_id:'r',seq:seq++,tool_call:call});s.emit({type:'assistant_done',run_id:'r',seq:seq++,message:'Original answer'});
+  window.b=ihtml.mountChat('#b',{locale:'en',initialMessages:[{id:'u',role:'user',content:'Original question'},{id:'reply',role:'assistant',content:'Original answer'}],initialOperations:operations});await b.ready();b.theme.set({mode},{persist:false});b.root.style.width=width+'px';
+ },{mode,width});
+ const read=selector=>page.locator(selector).evaluate(root=>{
+  const article=[...root.querySelectorAll('.ihtml-msg.assistant')].find(c=>c.querySelector('.answer')?.textContent==='Original answer');
+  const styles=e=>e?Object.fromEntries(['color','backgroundColor','borderColor','borderRadius','fontSize','fontWeight','lineHeight','padding','margin','display'].map(k=>[k,getComputedStyle(e)[k]])):null;
+  return {author:article.querySelector('.author')?.textContent,processOpen:article.querySelector('.ihtml-process').open,processNames:[...article.querySelectorAll('.pbody > .ihtml-tool')].map(c=>c.querySelector('.t-title').textContent),actionNames:[...article.querySelectorAll('.ihtml-trace-actions > .ihtml-tool')].map(c=>c.querySelector('.t-title').textContent),processStyles:styles(article.querySelector('.ihtml-process')),actionStyles:styles(article.querySelector('.ihtml-trace-actions > .ihtml-tool')),chipStyles:styles(article.querySelector('.ihtml-trace-actions .t-status')),answerStyles:styles(article.querySelector('.answer')),historyLabels:article.querySelectorAll('.t-history-label').length,overflow:article.scrollWidth>article.clientWidth};
+ });
+ const live=await read('#a'),history=await read('#b');assert.deepEqual(history,live);assert.equal(live.processOpen,false);assert.deepEqual(live.processNames,['tool_search','future_internal','arbitrary_read']);assert.deepEqual(live.actionNames,['Apply original scope']);assert.equal(live.historyLabels,0);assert.equal(live.overflow,false);
+ assert.equal(await page.locator('#a .ihtml-trace-actions button:visible').count(),2);assert.equal(await page.locator('#b .ihtml-trace-actions button:visible').count(),0);
+ for(const selector of ['#a','#b']) {await page.locator(selector+' .ihtml-process > summary').click();assert.equal(await page.locator(selector+' .pbody > .ihtml-tool').first().isVisible(),true);await page.locator(selector+' .pbody > .ihtml-tool > summary').first().click();assert.match(await page.locator(selector+' .pbody > .ihtml-tool').first().innerText(),/checked/)}
+ await page.locator('#b').screenshot({path:`/tmp/ihtml-process-history-${mode}-${width}.png`});
 });

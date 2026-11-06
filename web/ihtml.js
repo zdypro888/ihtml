@@ -5681,7 +5681,7 @@
       },
 
       appendMessages(messages) {
-        let receipts = null;
+        let receipts = null, historyTurn = null, lastMessageID = '';
         this.operationHistoryStart=doc.createComment('operation-history');this.log.appendChild(this.operationHistoryStart);
         this.messageAnchors=new Map();
         const restored = new Set();
@@ -5689,6 +5689,7 @@
           const records = (opts.initialOperations || []).filter(record => !restored.has(record.id) && record.afterMessageId === id);
           if (!records.length) return;
           records.forEach(record => restored.add(record.id));this.appendOperationHistory(records);
+          historyTurn=this.historyTurns.get(id)||historyTurn;
         };
         appendOperations('');
         for (const message of messages || []) {
@@ -5713,15 +5714,21 @@
             appendOperations(message.id);continue;
           }
           receipts = null;
-          const card = el('article', 'ihtml-msg ' + message.role);
-          card._displayMessage = { role: message.role, content: message.content, contentFormat: message.contentFormat };
-          card.appendChild(el('div', 'author', message.role === 'user' ? T('author_user') : 'AI'));
-          const body = el('div', message.role === 'user' ? 'content' : 'answer');
-          if (message.role === 'user') body.textContent = message.content;
-          else body.replaceChildren(renderAssistant(message.content, message.contentFormat, body, false));
-          card.appendChild(body);
-          this.log.appendChild(card);
+          let card;
+          if(message.role==='user') {
+            historyTurn=null;
+            card=el('article','ihtml-msg user');card.append(el('div','author',T('author_user')),el('div','content',message.content));this.log.appendChild(card);
+          } else {
+            // 历史回答与操作归入同一回合，使用实时回合的容器、过程区和结果区。
+            // 分页只补充这个回合，不能重新套一层“操作历史”改变颜色和排版。
+            const t=historyTurn||this.createHistoryTurn(lastMessageID,false);
+            card=t.card;t.text=message.content;t.contentFormat=message.contentFormat||'auto';
+            t.answer.style.display='';t.answer.hidden=false;t.answer.replaceChildren(renderAssistant(t.text,t.contentFormat,t.answer,false));
+            this.updateProcess(t);historyTurn=null;
+          }
+          card._displayMessage={role:message.role,content:message.content,contentFormat:message.contentFormat};
           if(message.id)this.messageAnchors.set(message.id,card);
+          lastMessageID=message.id||'';
           appendOperations(message.id);
         }
         this.appendOperationHistory((opts.initialOperations || []).filter(record => !restored.has(record.id)));
@@ -5729,6 +5736,13 @@
         this.scroll();
       },
 
+      createHistoryTurn(anchor,place=true) {
+        this.historyTurns ||= new Map();
+        const previous=this.turn,t=this.beginTurn('deep');this.turn=previous;
+        t.done=true;t.historical=true;t.elapsedUnknown=true;t.card.classList.add('ihtml-operation-history');
+        const after=this.messageAnchors?.get(anchor)||this.operationHistoryStart;if(place&&after?.isConnected)after.after(t.card);
+        this.historyTurns.set(anchor,t);this.syncProcessClock(t);return t;
+      },
       // 历史与实时操作复用同一张卡和批次统计；显示快照始终不拥有执行权限。
       appendOperationHistory(records) {
         if (!records.length) return;
@@ -5746,19 +5760,14 @@
               existing.lastEvent={...existing.lastEvent,tool_summary:merged.summary,tool_result:merged.result,tool_updated_at:merged.updatedAt};
               this.setToolStatus(existing,merged.status,existing.ownerTurn);
               this.renderToolRecord(existing,existing.lastEvent,existing.ownerTurn);
+              this.updateProcess(existing.ownerTurn);
               continue;
             }
-            if(!t){
-              t=this.beginTurn('deep');t.done=true;t.historical=true;t.elapsedUnknown=true;
-              t.card.querySelector('.author')?.remove();t.card.classList.add('ihtml-operation-history');
-              t.card.prepend(el('div','t-history-label',T('tool_history_readonly')));
-              const after=this.messageAnchors?.get(anchor)||this.operationHistoryStart;if(after?.isConnected)after.after(t.card);
-              this.historyTurns.set(anchor,t);
-            }
+            if(!t)t=this.createHistoryTurn(anchor);
             this.upsertTool({type:'tool_result',tool_call:{...record.call,id:record.id},tool_status:record.status,tool_summary:record.summary,tool_result:record.result,history_record:record},record.status,t);
             this.operationRecords.set(record.id,t.tools.get(record.id));
           }
-          if(t){t.process.hidden=true;t.actions.hidden=false;}
+          if(t)this.updateProcess(t);
         }
         this.turn=previousTurn;
       },
@@ -6671,7 +6680,10 @@
       },
       updateProcess(t) {
         t = t || this.turn;
-        if (!t || !t.process || !t.process.isConnected) return;
+        if (!t || !t.process || !t.card.isConnected) return;
+        // 分页可给原本只有正文的回合补过程，重新挂回相同容器而非另建历史卡。
+        if(!t.process.isConnected&&(t.toolCount||t.pBody.childNodes.length||!t.done))t.card.insertBefore(t.process,t.actions);
+        if(!t.process.isConnected)return;
         const focusWasInside = t.process.contains(doc.activeElement);
         let collapsed = false;
         t.process.classList.toggle('active', !t.done);
@@ -6973,6 +6985,12 @@
         this.scroll();
       },
 
+      // 原提案决定是否是用户操作；普通读取、发现和后台检查均属于过程。
+      // 旧回执缺少提案时保留可见操作入口，避免猜测并隐藏已有执行结果。
+      toolSurface(rec) {
+        const record=rec.publicRecord||rec.historyRecord;
+        return record?.proposalRecorded||record?.receiptOnly||(!record&&rec.call.confirmation_nonce)?'operation':'process';
+      },
       // 展示只读取公开快照，授权仍保留在独立签名调用中，分页不能授予执行能力。
       toolDisplayCall(rec) {return {...rec.call,...rec.publicRecord?.call};},
       toolView(call, ev) {
@@ -7064,8 +7082,9 @@
         if (!rec || !t) return;
         const hadFocus = rec.body.contains(doc.activeElement);
         rec.attention = rec.attention || ['pending', 'error', 'unknown'].includes(rec.status);
-        // 所有操作进入同一展示区；实时调用不能藏在过程区、历史却另铺一套卡片。
-        const parent = rec.batchGroup ? rec.batchGroup.items : t.actions;
+        // 实时与历史按同一语义归位，不能把过程工具铺成业务确认卡。
+        const surface=this.toolSurface(rec);rec.card.dataset.surface=surface;
+        const parent=rec.batchGroup?rec.batchGroup.items:surface==='operation'?t.actions:t.pBody;
         if (rec.card.parentNode !== parent) parent.appendChild(rec.card);
         if (rec.countdown) { clearInterval(rec.countdown); rec.countdown = 0; }
         const view = this.toolView(this.toolDisplayCall(rec), ev || {});
@@ -7266,7 +7285,7 @@
         t.toolGroups ||= new Map();
         const buckets = new Map();
         for (const rec of t.tools.values()) {
-          if (!rec.call.name || rec.call.approval_resume === 'checkpoint') continue;
+          if (this.toolSurface(rec)!=='operation'||!rec.call.name || rec.call.approval_resume === 'checkpoint') continue;
           // 宿主未支持整批批准时仍保留逐项待确认入口；实际执行结束后可按普通回执分组。
           if (rec.status === 'pending' && !this.modelInfo?.batch_confirmations) continue;
           const key = JSON.stringify([rec.call.confirmation_group || '', rec.call.name, rec.call.method || '', rec.call.risk || '', rec.call.reason || '']);
@@ -7332,7 +7351,7 @@
           g.confirm.disabled = destroyed || readOnly || authRefreshing || !this.enabled || this.active || this.sending || !!this.confirmationBusy || pending.some(rec => rec.call.review?.blocking_reason || rec.cancelPending || rec.confirmPending);
         }
         // 配置加载、分页和执行状态会改变分组创建时机；位置始终按原操作顺序，不能按组建成时间排列。
-        const ordered = [...new Set([...t.tools.values()].map(rec => rec.batchGroup?.card || rec.card))];
+        const ordered = [...new Set([...t.tools.values()].filter(rec=>this.toolSurface(rec)==='operation').map(rec => rec.batchGroup?.card || rec.card))];
         const current = [...t.actions.children].filter(node => ordered.includes(node));
         if (current.some((node, index) => node !== ordered[index])) {
           const focused = doc.activeElement;
@@ -7487,7 +7506,7 @@
         rec.publicRecord=merged;
         this.operationRecords ||= new Map();this.operationRecords.set(merged.id,rec);
         if(rec.historical){rec.historyRecord=merged;rec.call={...merged.call,id:merged.id};}
-        if(!applicable){this.renderToolRecord(rec,rec.lastEvent,t);return;}
+        if(!applicable){this.renderToolRecord(rec,rec.lastEvent,t);this.updateProcess(t);return;}
         if (ev.type === 'tool_start' || ev.type === 'tool_result') rec.interactionError='';
         const previous = rec.status;
         status=merged.status;

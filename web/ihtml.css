@@ -2205,6 +2205,9 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
 .ihtml-root .ihtml-receipt-history li { overflow-wrap: anywhere; white-space: pre-wrap; }
 .ihtml-root .ihtml-receipt-history .t-receipt-count { white-space: nowrap; margin-left: 8px; }
 
-/* 操作历史复用实时卡片，只增加只读来源标识和通用分页入口。 */
-.ihtml-root .ihtml-operation-history .t-history-label { color: var(--ui-text-muted); font-size: 12px; font-weight: 600; margin-bottom: 8px; }
+/* 过程工具在实时与历史均使用紧凑行，原结果仍能展开；操作卡保持完整确认样式。 */
+.ihtml-process .pbody > .ihtml-tool[data-surface="process"] { margin: 4px 0; border-color: transparent; background: transparent; border-radius: 4px; }
+.ihtml-tool[data-surface="process"]:not([open]) > summary .t-summary { display: none; }
+.ihtml-tool[data-surface="process"] > summary .t-title { font-weight: 500; }
+
 .ihtml-root .t-history-more { justify-self: start; margin: 8px 0; }
