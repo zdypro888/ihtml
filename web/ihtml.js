@@ -5232,29 +5232,43 @@
         const supported = typeof Notification!=='undefined' && 'serviceWorker' in navigator && typeof PushManager!=='undefined' && isSecureContext;
         button.disabled=!supported;
         if (!supported) button.textContent=T('notifications_push_unsupported');
-        let registration=null,enabled=false;
+        let registration=null,enabled=false,pushBusy=false,knownEpoch=requestEpoch,pushSequence=0;
+        const syncPushOwner=()=>{
+          if(knownEpoch!==requestEpoch){knownEpoch=requestEpoch;subscriptionIds.clear();enabled=false;}
+          button.disabled=!supported||authRefreshing||pushBusy;
+          if(supported)button.textContent=T(enabled?'notifications_push_disable':'notifications_push_enable');
+        };
         button.onclick=async()=>{
-          if (button.disabled) return;button.disabled=true;
+          if(button.disabled||destroyed||authRefreshing)return;
+          syncPushOwner();pushBusy=true;syncPushOwner();pushSequence++;
+          const epoch=requestEpoch,abort=new AbortController();requestControllers.add(abort);
+          const alive=()=>!destroyed&&!authRefreshing&&requestEpoch===epoch&&!abort.signal.aborted;
+          // 浏览器权限/订阅不支持 AbortSignal；共享期限结束后拒绝迟到结果，尤其不能在新身份下保存旧请求。
+          const wait=async invoke=>{if(!alive())throw staleRequestError();const value=await boundedChatHook(invoke,abort.signal,30000);if(!alive())throw staleRequestError();return value;};
           try {
-            if (!enabled && await Notification.requestPermission()!=='granted') throw new Error('permission');
+            if (!enabled && await wait(()=>Notification.requestPermission())!=='granted') throw new Error('permission');
             const worker=new URL('ihtml-push-sw.js',baseURL);if(worker.origin!==location.origin)throw new Error('origin');
-            registration=registration||await navigator.serviceWorker.register(worker.href,{scope:new URL('./',worker).pathname,updateViaCache:'none'});
-            if (!registration.active) await new Promise((resolve,reject)=>{const instance=registration.installing||registration.waiting;if(!instance){reject(new Error('worker'));return;}const timer=setTimeout(()=>reject(new Error('worker timeout')),15000);instance.addEventListener('statechange',()=>{if(instance.state==='activated'){clearTimeout(timer);resolve();}});});
-            let subscription=await registration.pushManager.getSubscription();
-            if (enabled) {if(subscription){await push.remove(subscription.toJSON());await subscription.unsubscribe();subscriptionIds.delete(await subscriptionID(subscription.endpoint));}enabled=false;}
+            registration=registration||await wait(()=>navigator.serviceWorker.register(worker.href,{scope:new URL('./',worker).pathname,updateViaCache:'none'}));
+            if (!registration.active) await wait(()=>new Promise((resolve,reject)=>{const instance=registration.installing||registration.waiting;if(!instance){reject(new Error('worker'));return;}const timer=setTimeout(()=>reject(new Error('worker timeout')),15000);instance.addEventListener('statechange',()=>{if(instance.state==='activated'){clearTimeout(timer);resolve();}});}));
+            let subscription=await wait(()=>registration.pushManager.getSubscription());
+            if (enabled) {if(subscription){await wait(()=>push.remove(subscription.toJSON()));await wait(()=>subscription.unsubscribe());subscriptionIds.delete(await wait(()=>subscriptionID(subscription.endpoint)));}enabled=false;}
             else {
-              if(!subscription){const encoded=String(push.publicKey||'').replace(/-/g,'+').replace(/_/g,'/');const key=Uint8Array.from(atob(encoded),c=>c.charCodeAt(0));subscription=await registration.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:key});}
-              const saved=await push.subscribe(subscription.toJSON());if(saved?.enabled!==true)throw new Error('not saved');subscriptionIds.add(await subscriptionID(subscription.endpoint));enabled=true;
+              if(!subscription){const encoded=String(push.publicKey||'').replace(/-/g,'+').replace(/_/g,'/');const key=Uint8Array.from(atob(encoded),c=>c.charCodeAt(0));subscription=await wait(()=>registration.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:key}));}
+              const saved=await wait(()=>push.subscribe(subscription.toJSON()));if(saved?.enabled!==true)throw new Error('not saved');subscriptionIds.add(await wait(()=>subscriptionID(subscription.endpoint)));enabled=true;
             }
-            button.textContent=T(enabled?'notifications_push_disable':'notifications_push_enable');
-          }catch{status.textContent=T('notifications_push_error');}finally{button.disabled=false;}
+            syncPushOwner();
+          }catch(error){if(alive()&&!isStaleError(error))status.textContent=T('notifications_push_error');}
+          finally{requestControllers.delete(abort);abort.abort();pushBusy=false;if(!destroyed)syncPushOwner();}
         };
         refreshPushState=async()=>{
-          if(!supported||Notification.permission!=='granted')return;
+          syncPushOwner();
+          if(!supported||destroyed||authRefreshing||pushBusy||Notification.permission!=='granted')return;
+          const epoch=requestEpoch,sequence=pushSequence;
+          const alive=()=>!destroyed&&!authRefreshing&&!pushBusy&&requestEpoch===epoch&&pushSequence===sequence;
           try{const worker=new URL('ihtml-push-sw.js',baseURL);const found=await navigator.serviceWorker.getRegistration(new URL('./',worker).href);
-            if(!found?.active||new URL(found.active.scriptURL).pathname!==worker.pathname)return;
+            if(!alive()||!found?.active||new URL(found.active.scriptURL).pathname!==worker.pathname)return;
             registration=found;const current=await found.pushManager.getSubscription();
-            if(current){const id=await subscriptionID(current.endpoint);enabled=subscriptionIds.has(id);button.textContent=T(enabled?'notifications_push_disable':'notifications_push_enable');}
+            if(current){const id=await subscriptionID(current.endpoint);if(alive()){enabled=subscriptionIds.has(id);syncPushOwner();}}
           }catch{}
         };
         pane.appendChild(button);

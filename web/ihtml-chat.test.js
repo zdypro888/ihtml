@@ -48,6 +48,26 @@ test('notification failures keep prior state and permit a later refresh', async 
   assert.deepEqual(await page.evaluate(()=>{notificationObserver.destroy();return observerUpdates}),[7]);
 });
 let browser;
+for(const reset of ['destroy','refreshAuth'])test('late browser notification consent cannot subscribe after '+reset,async t=>{
+ const page=await fixture(t);
+ await page.evaluate(async()=>{
+  window.pushSaved=0;window.pushRegistered=0;
+  Object.defineProperty(window,'Notification',{configurable:true,value:{permission:'default',requestPermission:()=>new Promise(resolve=>{window.resolvePushPermission=resolve})}});
+  Object.defineProperty(window,'PushManager',{configurable:true,value:function(){}});
+  Object.defineProperty(navigator,'serviceWorker',{configurable:true,value:{
+   getRegistration:async()=>null,
+   register:async()=>{
+    pushRegistered++;
+    return {active:{},pushManager:{getSubscription:async()=>null,subscribe:async()=>({endpoint:'https://fcm.googleapis.com/fcm/send/test',toJSON:()=>({endpoint:'test'})})}};
+   },
+  }});
+  window.a=ihtml.mountChat('#a',{notifications:{list:async()=>({items:[],unread:0}),push:{publicKey:'AAAA',subscriptionIds:[],subscribe:async()=>{pushSaved++;return{enabled:true}},remove:async()=>{}}}});await a.ready();a.chat.notifications.open();
+ });
+ await page.locator('.ihtml-chat-push-enable').click();await page.waitForFunction(()=>!!window.resolvePushPermission);
+ await page.evaluate(async action=>{if(action==='destroy')a.destroy();else{identity='bob';await a.refreshAuth()}resolvePushPermission('granted');await new Promise(resolve=>setTimeout(resolve,80))},reset);
+ assert.equal(await page.evaluate(()=>pushSaved),0,'old consent must not save in the next identity');
+ assert.equal(await page.evaluate(()=>pushRegistered),0,'old consent must not register a worker after identity change');
+});
 test.before(async () => { browser = await chromium.launch({ headless: true }); });
 test.after(async () => { if (browser) await browser.close(); });
 

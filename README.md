@@ -593,6 +593,8 @@ GPT-6.1 Terra 的工具调用必须使用 `OpenAIAPI:"responses"`；SDK 在发�
 
 宿主在助手尚未打开时需要更新通知入口，可复用 `ihtml.observeNotifications({load:({signal})=>status, onUpdate:status=>void, onError?, intervalMS?})`。默认每30秒读取服务端摘要，页面回到前台或获得焦点时刷新；同一观察器不会重叠查询，重复 `refresh()` 会合并。`destroy()` 取消请求、定时器与监听并拒绝迟到回包，身份变化必须销毁旧观察器。它不挂载聊天、不建立 WebSocket，也不标记已读；失败保留宿主已有显示。回调应遵守 AbortSignal，忽略取消的未返回回调仍只占一个请求，不会无限堆积。列表、已读和系统推送继续使用上述原生通知面板。
 
+系统推送的权限申请、浏览器注册及宿主订阅保存共用当前鉴权代次和有界等待。销毁组件或 `refreshAuth()` 后，迟到结果不会继续保存订阅或更新旧界面；旧状态读取也不能覆盖较新的启停动作。浏览器仅返回订阅不等于宿主已保存，仍须取得 `{enabled:true}` 回执。
+
 ### Responses 原生上下文压缩
 
 `agent/eino.Config{Provider:ProviderOpenAI,OpenAIAPI:"responses",ContextCompaction:"provider"}` 使用 `context_management:[{type:"compaction"}]`。未显式设置 `SummarizeAfterTokens` 时**省略** `compact_threshold`，由服务端决定；不套用 Eino 的 24k 默认值，也不再按 80 条消息提前触发。供应商没有给所有模型推荐同一个固定阈值，不能把文档示例阈值或整个模型窗口当作推荐值。参见 [官方压缩指南](https://developers.openai.com/api/docs/guides/compaction)。
