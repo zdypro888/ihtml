@@ -6,6 +6,7 @@ the first tagged release, changes are recorded under **Unreleased**.
 ## Unreleased
 
 ### Added
+- `ihtml.observeNotifications` shares host notification-status observation before chat mount, with cancellation, visibility refresh, coalesced requests and teardown; it never opens chat or marks notifications read.
 - Inline chat supports optional host-owned headers (`chatHeader: "none"`) and empty-conversation `starters` that scroll with messages and disappear after sending.
 
 - Add opt-in `mountChat({history})` rendering, paginated host callbacks, explicit

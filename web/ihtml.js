@@ -8495,11 +8495,42 @@
   const mountedHosts = new WeakMap();
   const mountingHosts = new WeakSet();
   const compatibilityProxyKeys = new Set();
-  const compatibilityReservedKeys = new Set(['version', 'mounted', 'instances', 'mount', 'mountChat', '__primary']);
+  // 通知入口可在聊天尚未挂载时观察服务端摘要；不创建连接、发消息或标记已读。
+  function observeNotifications(options = {}) {
+    if (typeof options.load !== 'function' || typeof options.onUpdate !== 'function') throw new TypeError('ihtml.observeNotifications: load and onUpdate are required');
+    const interval = options.intervalMS === undefined ? 30000 : options.intervalMS;
+    if (!Number.isFinite(interval) || interval < 1000) throw new TypeError('ihtml.observeNotifications: intervalMS must be at least 1000');
+    let destroyed = false, pending = false, refreshPending = false, timer = 0, controller = null;
+    const schedule = delay => { clearTimeout(timer); if (!destroyed) timer = setTimeout(run, delay); };
+    const refresh = () => { if (destroyed) return; if (pending) { refreshPending = true; return; } schedule(0); };
+    const run = async () => {
+      if (destroyed || pending) return;
+      if (doc.visibilityState === 'hidden') { schedule(interval); return; }
+      pending = true; refreshPending = false;
+      const abort = new AbortController(); controller = abort;
+      const deadline = setTimeout(() => abort.abort(), 30000);
+      try {
+        const status = await options.load({ signal: abort.signal });
+        if (!destroyed && !abort.signal.aborted) options.onUpdate(status);
+      } catch (error) {
+        if (!destroyed && !abort.signal.aborted && typeof options.onError === 'function') { try { options.onError(error); } catch {} }
+      } finally {
+        clearTimeout(deadline); abort.abort(); controller = null; pending = false;
+        schedule(refreshPending ? 0 : interval);
+      }
+    };
+    const visibility = () => { if (doc.visibilityState === 'hidden') controller?.abort(); else refresh(); };
+    doc.addEventListener('visibilitychange', visibility);
+    window.addEventListener('focus', refresh);
+    refresh();
+    return { refresh, destroy() { if (destroyed) return; destroyed = true; clearTimeout(timer); controller?.abort(); doc.removeEventListener('visibilitychange', visibility); window.removeEventListener('focus', refresh); } };
+  }
+  const compatibilityReservedKeys = new Set(['version', 'mounted', 'instances', 'mount', 'mountChat', 'observeNotifications', '__primary']);
   const globalAPI = {
     version: '0.6.0',
     mounted: false,
     __primary: null,
+    observeNotifications,
     instances: () => Array.from(liveInstances),
     mountChat(hostEl, options = {}) {
       return globalAPI.mount(hostEl, options, chatOnlyOption);

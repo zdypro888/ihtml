@@ -591,6 +591,8 @@ GPT-6.1 Terra 的工具调用必须使用 `OpenAIAPI:"responses"`；SDK 在发�
 
 可选 `notifications.push={publicKey,subscriptionIds,subscribe(subscriptionJSON),remove(subscriptionJSON)}` 增加系统推送设置。只有用户点击才请求浏览器权限，`subscribe` 必须在服务端保存后返回 `{enabled:true}`。`subscriptionIds` 为当前用户已登记端点的 SHA-256；不能仅凭浏览器已有订阅就宣称当前用户已开启。`push` 包复用标准 Web Push 加密传输；VAPID 私钥由宿主凭据配置保管，不返回前端。固定同源资源 `ihtml-push-sw.js` 只显示通知和打开同源页面，不执行业务。宿主需放行该 SDK 静态资源；`/assistant/` 集成使用同路径 scope，不覆盖站点已有根 Service Worker。iOS 可能要求将站点添加到主屏幕；不支持或拒绝权限时站内通知照常可用。
 
+宿主在助手尚未打开时需要更新通知入口，可复用 `ihtml.observeNotifications({load:({signal})=>status, onUpdate:status=>void, onError?, intervalMS?})`。默认每30秒读取服务端摘要，页面回到前台或获得焦点时刷新；同一观察器不会重叠查询，重复 `refresh()` 会合并。`destroy()` 取消请求、定时器与监听并拒绝迟到回包，身份变化必须销毁旧观察器。它不挂载聊天、不建立 WebSocket，也不标记已读；失败保留宿主已有显示。回调应遵守 AbortSignal，忽略取消的未返回回调仍只占一个请求，不会无限堆积。列表、已读和系统推送继续使用上述原生通知面板。
+
 ### Responses 原生上下文压缩
 
 `agent/eino.Config{Provider:ProviderOpenAI,OpenAIAPI:"responses",ContextCompaction:"provider"}` 使用 `context_management:[{type:"compaction"}]`。未显式设置 `SummarizeAfterTokens` 时**省略** `compact_threshold`，由服务端决定；不套用 Eino 的 24k 默认值，也不再按 80 条消息提前触发。供应商没有给所有模型推荐同一个固定阈值，不能把文档示例阈值或整个模型窗口当作推荐值。参见 [官方压缩指南](https://developers.openai.com/api/docs/guides/compaction)。
