@@ -68,6 +68,38 @@ for(const reset of ['destroy','refreshAuth'])test('late browser notification con
  assert.equal(await page.evaluate(()=>pushSaved),0,'old consent must not save in the next identity');
  assert.equal(await page.evaluate(()=>pushRegistered),0,'old consent must not register a worker after identity change');
 });
+test('a host-hidden notification panel keeps unread observation without marking receipts seen', async t => {
+ const page=await fixture(t);
+ await page.evaluate(async()=>{
+  window.notices=[];window.noticeUnread=-1;window.seenIDs=[];
+  window.a=ihtml.mountChat('#a',{notifications:{list:async()=>({items:notices,unread:notices.length}),onUnreadChange:n=>{noticeUnread=n},seen:async({ids})=>{seenIDs.push(...ids);return{readIds:ids,unread:0}}}});
+  await a.ready();a.chat.notifications.open();
+ });
+ await page.waitForFunction(()=>noticeUnread===0);
+ await page.evaluate(()=>{document.querySelector('#a').style.display='none';notices=[{id:'new',title:'A new receipt',unread:true}];a.chat.notifications.refresh()});
+ await page.waitForFunction(()=>noticeUnread===1);
+ assert.deepEqual(await page.evaluate(()=>seenIDs),[],'hidden host must not acknowledge unseen receipts');
+ await page.evaluate(()=>{document.querySelector('#a').style.display='block'});
+ await page.waitForFunction(()=>seenIDs.includes('new'));
+ assert.equal(await page.evaluate(()=>noticeUnread),0,'showing the host refreshes and acknowledges rendered receipts');
+});
+
+test('a notification page loaded after the host hides never acknowledges its unseen result', async t=>{
+ const page=await fixture(t);
+ await page.evaluate(async()=>{
+  window.deferNotice=false;window.seenIDs=[];window.noticeUnread=-1;
+  window.a=ihtml.mountChat('#a',{notifications:{list:async()=>{if(deferNotice)await new Promise(resolve=>{window.releaseNotice=resolve});return{items:[{id:'late',title:'Late receipt',unread:true}],unread:1}},seen:async({ids})=>{seenIDs.push(...ids);return{readIds:ids,unread:0}},onUnreadChange:n=>{noticeUnread=n}}});
+  await a.ready();
+ });
+ await page.waitForFunction(()=>noticeUnread===1);
+ await page.evaluate(()=>{deferNotice=true;a.chat.notifications.open()});
+ await page.waitForFunction(()=>typeof releaseNotice==='function');
+ await page.evaluate(()=>{document.querySelector('#a').style.display='none';deferNotice=false;releaseNotice()});
+ await page.waitForTimeout(100);
+ assert.deepEqual(await page.evaluate(()=>seenIDs),[]);
+ assert.equal(await page.evaluate(()=>noticeUnread),1);
+});
+
 test.before(async () => { browser = await chromium.launch({ headless: true }); });
 test.after(async () => { if (browser) await browser.close(); });
 

@@ -5311,6 +5311,8 @@
         more.hidden = !cursor; sync();
       };
       const alive = (id, abort) => !destroyed && opened && id === generation && !abort.signal.aborted && !authRefreshing;
+      // 外层抽屉/窗口隐藏不会改变 opened；只有实际可见的通知面板才能确认已读。
+      const paneVisible=()=>document.visibilityState!=='hidden'&&(typeof pane.checkVisibility==='function'?pane.checkVisibility({checkOpacity:true,checkVisibilityCSS:true}):pane.getClientRects().length>0&&getComputedStyle(pane).visibility==='visible');
       const failure = (error, id, abort) => {
         if (!alive(id, abort)) return;
         // 不输出回调异常原文，避免 HTTP/认证错误携带宿主敏感信息。
@@ -5318,6 +5320,7 @@
       };
       async function load(append = false) {
         if (!opened || pending || destroyed || authRefreshing) return;
+        if(kind==='notifications'&&!paneVisible()){void refreshSummary();return;}
         const abort = new AbortController(), id = ++generation, before = append ? cursor : '';
         pending = abort; status.textContent = T('history_loading'); retry.hidden = true; sync();
         try {
@@ -5333,7 +5336,7 @@
           if (typeof source.onUnreadChange==='function') source.onUnreadChange(Math.max(0,Number(page.unread)||0));
           render();
           // 仅对已打开并实际渲染的这一页通知调用已读 hook；摘要轮询没有此副作用。
-          if(kind==='notifications'&&typeof source.seen==='function') {
+          if(kind==='notifications'&&paneVisible()&&typeof source.seen==='function') {
             try {
               const seen=await boundedChatHook(()=>source.seen({ids:rows.map(row=>row.id),signal:abort.signal}),abort.signal,30000);
               if(!alive(id,abort))return;
@@ -5383,13 +5386,17 @@
       }
       let summaryAbort=null;
       const refreshSummary=async()=>{
-        if(opened||summaryAbort||destroyed||authRefreshing||document.visibilityState==='hidden')return;
+        if((opened&&paneVisible())||pending||summaryAbort||destroyed||authRefreshing||document.visibilityState==='hidden')return;
         summaryAbort=new AbortController();const summaryGeneration=generation;
-        try{const page=await boundedChatHook(()=>source.list({cursor:'',signal:summaryAbort.signal}),summaryAbort.signal,30000);if(!destroyed&&!opened&&summaryGeneration===generation&&typeof source.onUnreadChange==='function')source.onUnreadChange(Math.max(0,Number(page?.unread)||0));}catch{}finally{summaryAbort?.abort();summaryAbort=null;}
+        try{const page=await boundedChatHook(()=>source.list({cursor:'',signal:summaryAbort.signal}),summaryAbort.signal,30000);if(!destroyed&&(!opened||!paneVisible())&&summaryGeneration===generation&&typeof source.onUnreadChange==='function')source.onUnreadChange(Math.max(0,Number(page?.unread)||0));}catch{}finally{summaryAbort?.abort();summaryAbort=null;}
       };
       const poll = kind==='notifications'?setInterval(refreshSummary,30000):0;
       if(poll)void refreshSummary();
-      addDisposer(()=>{if(poll)clearInterval(poll);summaryAbort?.abort();reset();});
+      const refreshVisibility=()=>{if(opened&&paneVisible())void load();else void refreshSummary();};
+      const visibilityObserver=kind==='notifications'&&typeof IntersectionObserver==='function'?new IntersectionObserver(refreshVisibility):null;
+      visibilityObserver?.observe(pane);
+      if(poll)document.addEventListener('visibilitychange',refreshVisibility);
+      addDisposer(()=>{if(poll){clearInterval(poll);document.removeEventListener('visibilitychange',refreshVisibility);}visibilityObserver?.disconnect();summaryAbort?.abort();reset();});
       return {open, close, reset, sync, refresh: () => opened?load():refreshSummary(), get opened() { return opened; }, get mutating() { return mutating; }};
     }
 
