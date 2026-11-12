@@ -300,3 +300,15 @@ func (s *Store) Revoke(ctx context.Context, b authorization.Binding, id string, 
 	}
 	return nil
 }
+
+// RevokePending 仅回收待批准状态，与 Activate 的状态更新原子决胜。
+func (s *Store) RevokePending(ctx context.Context, b authorization.Binding, id string, now time.Time) error {
+	if !s.valid() || !b.Valid() || id == "" || now.IsZero() {
+		return authorization.ErrInvalid
+	}
+	f := filter(b, id)
+	f["storageVersion"] = version
+	f["record.state"] = authorization.Pending
+	_, err := s.Grants.UpdateOne(ctx, f, bson.M{"$set": bson.M{"record.state": authorization.Revoked, "record.updatedAt": now}})
+	return err
+}

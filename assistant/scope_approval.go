@@ -31,6 +31,7 @@ func scopeTool(name string) bool {
 }
 
 type scopeProposal struct {
+	ID            string          `json:"id,omitempty"`
 	Tool          string          `json:"tool"`
 	Arguments     json.RawMessage `json:"arguments"`
 	TargetPointer string          `json:"target_pointer"`
@@ -90,6 +91,10 @@ func (s *session) appendScopeTools(tools []agent.Tool, req *agent.TurnRequest) (
 	str := map[string]any{"type": "string"}
 	// 请求本身只激活已签名的持久范围；从来不在 Handler 内批量执行业务。
 	request := agent.Tool{Name: authorizationRequest, Description: "先请求一次任务授权，再逐项执行。适用于同一操作、固定修改内容、已确定的有限目标集合；无需先生成每个目标的确认卡。arguments是一个目标的完整参数模板，target_pointer是模板中允许替换的字符串目标字段RFC6901路径，targets是精确目标名单。其他参数固定不变。批准后用authorization_execute执行，不能把目标指针指向修改值或放宽业务前置条件。", Effect: agent.ToolEffectWrite, ApprovalRequired: true, InputSchema: schema(map[string]any{"tool": str, "arguments": map[string]any{"type": "object"}, "target_pointer": str, "targets": map[string]any{"type": "array", "items": str, "minItems": 1, "maxItems": authorization.MaxTargets}}, "tool", "arguments", "target_pointer", "targets")}
+	request.InputSchema["properties"].(map[string]any)["id"] = str
+	delete(request.InputSchema, "required")
+	request.InputSchema["oneOf"] = []any{map[string]any{"required": []string{"id"}, "not": map[string]any{"anyOf": []any{map[string]any{"required": []string{"tool"}}, map[string]any{"required": []string{"arguments"}}, map[string]any{"required": []string{"target_pointer"}}, map[string]any{"required": []string{"targets"}}}}}, map[string]any{"required": []string{"tool", "arguments", "target_pointer", "targets"}, "not": map[string]any{"required": []string{"id"}}}}
+	request.Description += " 恢复历史待确认授权时只传id，由服务端重读原固定范围重新签卡；不能改写名单或参数。"
 	var catalog []map[string]any
 	for _, tool := range tools {
 		if tool.ApprovalRequired && len(tool.ScopeTargets) > 0 {
@@ -296,14 +301,37 @@ func (s *session) prepareScopeProposal(ctx context.Context, args json.RawMessage
 	if json.Unmarshal(args, &input) != nil {
 		return ihtml.ProposedToolCall{}, nil, ErrInvalidToolArguments
 	}
+	m, err := s.scopeManager(ctx)
+	if err != nil {
+		return ihtml.ProposedToolCall{}, nil, err
+	}
+	var existing *authorization.Record
+	if input.ID != "" {
+		if input.Tool != "" || len(input.Arguments) > 0 || input.TargetPointer != "" || len(input.Targets) > 0 {
+			return ihtml.ProposedToolCall{}, nil, ErrInvalidToolArguments
+		}
+		r, e := m.Get(ctx, scopeBinding(ctx, s, req), input.ID)
+		if e != nil || r.State != authorization.Pending {
+			return ihtml.ProposedToolCall{}, nil, ErrPreviewRefreshRequired
+		}
+		if s.tasks != nil {
+			if e = s.tasks.CheckExecutionEpoch(ctx, agent.TaskScope(req), r.Plan.ExecutionEpoch); e != nil {
+				return ihtml.ProposedToolCall{}, nil, e
+			}
+		}
+		existing = &r
+		input.Tool = r.Plan.Tool
+		input.Arguments = r.Plan.Arguments
+		input.TargetPointer = r.Plan.TargetPointer
+		input.Targets = r.Plan.Targets
+	}
 	tool, ok := p.tools[input.Tool]
 	if !ok || !tool.ApprovalRequired || scopeTool(tool.Name) || !slices.Contains(tool.ScopeTargets, input.TargetPointer) {
 		return ihtml.ProposedToolCall{}, nil, ihtml.ErrAccessDenied
 	}
 	plan := authorization.Plan{Tool: tool.Name, ContractVersion: scopeContract(tool), Arguments: input.Arguments, TargetPointer: input.TargetPointer, Targets: input.Targets}
-	m, err := s.scopeManager(ctx)
-	if err != nil {
-		return ihtml.ProposedToolCall{}, nil, err
+	if existing != nil && existing.Plan.ContractVersion != plan.ContractVersion {
+		return ihtml.ProposedToolCall{}, nil, ErrPreviewRefreshRequired
 	}
 	// 先由标准协议校验指针和目标，再使用代表性目标取得宿主公开的操作说明。
 	if len(input.Targets) == 0 {
@@ -332,7 +360,12 @@ func (s *session) prepareScopeProposal(ctx context.Context, args json.RawMessage
 			return ihtml.ProposedToolCall{}, nil, err
 		}
 	}
-	record, err := m.Prepare(ctx, scopeBinding(ctx, s, req), plan, time.Now().Add(life))
+	var record authorization.Record
+	if existing != nil {
+		record = *existing
+	} else {
+		record, err = m.Prepare(ctx, scopeBinding(ctx, s, req), plan, time.Now().Add(life))
+	}
 	if err != nil {
 		return ihtml.ProposedToolCall{}, nil, err
 	}

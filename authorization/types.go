@@ -103,4 +103,5 @@ type Store interface {
 	Claim(context.Context, ClaimRequest) (Claim, error)
 	Finish(context.Context, Binding, Claim, Outcome, time.Time) error
 	Revoke(context.Context, Binding, string, time.Time) error
+	RevokePending(context.Context, Binding, string, time.Time) error
 }

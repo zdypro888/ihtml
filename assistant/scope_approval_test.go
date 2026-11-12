@@ -275,3 +275,36 @@ func TestScopePendingRequestCancellationAndConnectionCleanup(t *testing.T) {
 		})
 	}
 }
+
+func TestScopePendingReviewReusesStoredRange(t *testing.T) {
+	f := newScopeFixture(t)
+	s, _ := f.session(t)
+	id, _ := scopePrepared(t, f, s)
+	p := newProjection(s, t.Context(), func() {})
+	p.tools[f.tool.Name] = f.tool
+	call, _, err := s.prepareScopeProposal(t.Context(), json.RawMessage(scopeJSON(map[string]string{"id": id})), p, scopeReq())
+	if err != nil || call.Body.(map[string]string)["id"] != id || f.calls.Load() != 0 {
+		t.Fatal("review lost frozen range", err)
+	}
+	_, _, err = s.prepareScopeProposal(t.Context(), json.RawMessage(scopeJSON(map[string]any{"id": id, "targets": []string{"outside"}})), p, scopeReq())
+	if err == nil {
+		t.Fatal("review changed approved scope")
+	}
+}
+
+func TestScopeOldProposalCleanupCannotRevokeActivatedRange(t *testing.T) {
+	f := newScopeFixture(t)
+	s, _ := f.session(t)
+	id, ref := scopePrepared(t, f, s)
+	request := scopeFindTool(t, s, f.tool, scopeReq(), authorizationRequest)
+	if _, err := request.Handler(t.Context(), ref); err != nil {
+		t.Fatal(err)
+	}
+	if err := authorization.New(f.store).RevokePending(t.Context(), scopeBinding(t.Context(), s, scopeReq()), id); err != nil {
+		t.Fatal(err)
+	}
+	r, err := authorization.New(f.store).Get(t.Context(), scopeBinding(t.Context(), s, scopeReq()), id)
+	if err != nil || r.State != authorization.Active {
+		t.Fatal("old proposal revoked active scope", err, r.State)
+	}
+}

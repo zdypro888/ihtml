@@ -34,5 +34,5 @@ func (s *session) revokePendingScope(ctx context.Context, item *pendingTool) err
 	if r.Digest != ref.Digest {
 		return authorization.ErrDenied
 	}
-	return m.Revoke(ctx, binding, ref.ID)
+	return m.RevokePending(ctx, binding, ref.ID)
 }

@@ -409,3 +409,11 @@ func decodeValue(d *json.Decoder, depth int) (any, error) {
 	}
 	return nil, ErrInvalid
 }
+
+// RevokePending 原子回收未批准提案；重签卡与批准并发时不能撤销已生效授权。
+func (m *Manager) RevokePending(ctx context.Context, b Binding, id string) error {
+	if m == nil || m.store == nil || !b.Valid() || id == "" {
+		return ErrInvalid
+	}
+	return m.store.RevokePending(ctx, b, id, time.Now().UTC())
+}

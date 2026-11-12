@@ -191,3 +191,22 @@ func (s *MemoryStore) Revoke(ctx context.Context, binding Binding, id string, no
 	s.records[id] = r
 	return nil
 }
+
+// RevokePending 与 Activate 共用同一把锁，过时确认卡的回收不能影响已批准范围。
+func (s *MemoryStore) RevokePending(ctx context.Context, b Binding, id string, now time.Time) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, err := s.get(b, id)
+	if err != nil {
+		return err
+	}
+	if r.State == Pending {
+		r.State = Revoked
+		r.UpdatedAt = now
+		s.records[id] = r
+	}
+	return nil
+}
