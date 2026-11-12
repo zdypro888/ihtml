@@ -1934,7 +1934,8 @@ test('structured operation history preserves approval scope and per-item results
   window.a=ihtml.mountChat('#a',{locale:'zh-CN',initialMessages:[{id:'question',role:'user',content:'通用批量操作'},{id:'reply',role:'assistant',content:'原始回复'}],initialOperations:['success','accepted','unknown','pending'].map((status,i)=>({id:'history-'+i,afterMessageId:'question',status,proposalRecorded:true,summary:'实际回执 '+i,result:{saved:status==='success',jobId:'original-'+i,api_key:'SECRET'},call:{name:'arbitrary_tool',title:'任意资源变更',method:'PUT',path:'/resources',confirmation_group:'original',reason:'只修改原始范围',confirmation_token:'OLD_SECRET',confirmation_nonce:'OLD_NONCE',requires_confirmation:true,presentation:{facts:[{label:'目标',value:'resource-'+i},{label:'用途',value:'原目标值'}]},review:{scope:'原始范围',before:{value:'旧值'},after:{value:'新值'}}}}))});await a.ready();
  });
  assert.equal(await page.locator('.ihtml-tool-batch').count(),1);assert.match(await page.locator('.ihtml-tool-batch').innerText(),/完成 1.*已提交 1.*结果未知 1/);
- assert.equal(await page.locator('.ihtml-operation-history .t-actions button:visible').count(),0);
+ assert.equal(await page.locator('.ihtml-operation-history .t-actions button.ok:visible').count(),0);
+ assert.equal(await page.locator('.ihtml-operation-history .t-refresh:visible').count(),1);
  assert.equal(await page.locator('.ihtml-tool-batch').evaluate(e=>e.open),false);await page.locator('.t-batch-head').click();
  await page.locator('.t-batch-list > summary').click();await page.locator('.ihtml-tool').first().locator('summary.t-head').click();
  assert.match(await page.locator('.ihtml-tool').first().innerText(),/resource-0/);assert.match(await page.locator('.ihtml-tool').first().innerText(),/旧值/);assert.match(await page.locator('.ihtml-tool').first().innerText(),/新值/);
@@ -2001,7 +2002,7 @@ test('historical cards use the same active and settled disclosure states without
  assert.equal(await page.locator('.ihtml-operation-history .ihtml-tool[data-status="pending"]').evaluate(e=>e.open),true);
  assert.equal(await page.locator('.ihtml-operation-history .ihtml-tool').count(),4);
  const first=page.locator('.ihtml-operation-history .ihtml-tool').first();await first.locator('summary.t-head').click();assert.match(await first.innerText(),/original receipt 0/);
- assert.equal(await page.locator('.ihtml-operation-history .t-actions button:visible').count(),0);
+ assert.equal(await page.locator('.ihtml-operation-history .t-actions button.ok:visible').count(),0);
 });
 
 // 历史默认折叠不能牺牲实时确认；确定受理/完成后则自动收起，结果摘要仍保留。
@@ -2035,7 +2036,7 @@ test('live and historical operations share grouping disclosure scope and result 
  const read=selector=>page.locator(selector).evaluate(root=>[...root.querySelectorAll('.ihtml-tool-batch')].map(g=>({open:g.open,summary:g.querySelector('.t-batch-head').textContent,cards:[...g.querySelectorAll('.ihtml-tool')].map(c=>({status:c.dataset.status,open:c.open,colors:[getComputedStyle(c).color,getComputedStyle(c).backgroundColor,getComputedStyle(c).borderColor,getComputedStyle(c.querySelector('.t-status')).color,getComputedStyle(c.querySelector('.t-status')).backgroundColor],time:c.querySelector('time')?.dateTime,title:c.querySelector('.t-title').textContent,scope:[...c.querySelectorAll('.tbody > .t-reason,.tbody > .t-facts')].map(e=>e.textContent),result:[...c.querySelectorAll('.tbody > .t-tech-section pre')].map(e=>e.textContent),technical:[...c.querySelectorAll('.t-tech pre')].map(e=>e.textContent)}))})));
  const live=await read('#a'),history=await read('#b');assert.equal(live.length,batchEnabled?8:7);assert.deepEqual(history,live);
  const singles=selector=>page.locator(selector+' .ihtml-trace-actions > .ihtml-tool').evaluateAll(cards=>cards.map(c=>({status:c.dataset.status,open:c.open,colors:[getComputedStyle(c).color,getComputedStyle(c).backgroundColor,getComputedStyle(c).borderColor,getComputedStyle(c.querySelector('.t-status')).color,getComputedStyle(c.querySelector('.t-status')).backgroundColor],time:c.querySelector('time')?.dateTime,title:c.querySelector('.t-title').textContent})));assert.deepEqual(await singles('#b'),await singles('#a'));
- assert.equal(await page.locator('#a .ihtml-tool-batch > .t-actions button:visible').count(),batchEnabled?1:0);assert.equal(await page.locator('#b .t-actions button:visible').count(),0);
+ assert.equal(await page.locator('#a .ihtml-tool-batch > .t-actions button.ok:visible').count(),batchEnabled?1:0);assert.equal(await page.locator('#b .t-actions button.ok:visible').count(),0);
  }});
 
 // 迟到分页与实时结果交错时仍是同一记录；补回提案只补范围，不回退状态或增加空历史块。
@@ -2073,7 +2074,7 @@ for(const mode of ['light','dark'])for(const width of [390,1100])test(`live and 
   return {author:article.querySelector('.author')?.textContent,processOpen:article.querySelector('.ihtml-process').open,processNames:[...article.querySelectorAll('.pbody > .ihtml-tool')].map(c=>c.querySelector('.t-title').textContent),actionNames:[...article.querySelectorAll('.ihtml-trace-actions > .ihtml-tool')].map(c=>c.querySelector('.t-title').textContent),processStyles:styles(article.querySelector('.ihtml-process')),actionStyles:styles(article.querySelector('.ihtml-trace-actions > .ihtml-tool')),chipStyles:styles(article.querySelector('.ihtml-trace-actions .t-status')),answerStyles:styles(article.querySelector('.answer')),historyLabels:article.querySelectorAll('.t-history-label').length,overflow:article.scrollWidth>article.clientWidth};
  });
  const live=await read('#a'),history=await read('#b');assert.deepEqual(history,live);assert.equal(live.processOpen,false);assert.deepEqual(live.processNames,['tool_search','future_internal','arbitrary_read']);assert.deepEqual(live.actionNames,['Apply original scope']);assert.equal(live.historyLabels,0);assert.equal(live.overflow,false);
- assert.equal(await page.locator('#a .ihtml-trace-actions button:visible').count(),2);assert.equal(await page.locator('#b .ihtml-trace-actions button:visible').count(),0);
+ assert.equal(await page.locator('#a .ihtml-trace-actions button:visible').count(),2);assert.equal(await page.locator('#b .ihtml-trace-actions button.ok:visible').count(),0);
  for(const selector of ['#a','#b']) {await page.locator(selector+' .ihtml-process > summary').click();assert.equal(await page.locator(selector+' .pbody > .ihtml-tool').first().isVisible(),true);await page.locator(selector+' .pbody > .ihtml-tool > summary').first().click();assert.match(await page.locator(selector+' .pbody > .ihtml-tool').first().innerText(),/checked/)}
  await page.locator('#b').screenshot({path:`/tmp/ihtml-process-history-${mode}-${width}.png`});
 });
@@ -2228,4 +2229,30 @@ for(const mode of ['light','dark'])for(const width of [390,1100])test(`answer ve
  assert.deepEqual(await snapshot('#b'),await snapshot('#a'));
  assert.equal(await page.locator('#b .t-prior-answer').first().isVisible(),true);
  await page.locator('#b').screenshot({path:`/tmp/ihtml-answer-versions-${mode}-${width}.png`});
+});
+
+// 历史和通知只导航到原对话；没有签名的卡提供核对入口，不假装已经获得批准。
+for(const entry of ['history','notifications'])for(const mode of ['light','dark'])for(const width of [390,1100])test(`restored confirmations remain actionable through ${entry} ${mode} ${width}`,async t=>{
+ const page=await fixture(t,{width,height:900});
+ await page.evaluate(async({entry,mode,width})=>{
+  const originalFetch=window.fetch;
+  window.fetch=async(url,init)=>{const response=await originalFetch(url,init);if(String(url).endsWith('/api/chat/models'))return {...response,text:async()=>JSON.stringify({...JSON.parse(await response.text()),batch_confirmations:true})};return response};
+  const select=async()=>{
+   window.b=ihtml.mountChat('#b',{locale:'en',initialMessages:[{id:'u',role:'user',content:'Original request'}],initialOperations:[0,1].map(i=>({id:'op-'+i,afterMessageId:'u',flowId:'f',runId:'r',sequence:3+i,status:'pending',proposalRecorded:true,call:{id:'op-'+i,name:'arbitrary_change',title:'Original scope',method:'PUT',path:'/objects',confirmation_group:'group',confirmation_token:'OLD_SECRET',confirmation_nonce:'OLD_NONCE',body:{id:'original-'+i},presentation:{facts:[{label:'Target',value:'original-'+i}]}}}))});
+   await b.ready();b.theme.set({mode},{persist:false});b.root.style.width=width+'px';a.root.style.display='none';b.chat.draft('unsent draft');
+  };
+  window.a=ihtml.mountChat('#a',{locale:'en',[entry]:{list:async()=>({items:[{id:'saved',title:'Saved dialogue'}]}),select}});await a.ready();a.chat[entry].open();
+ },{entry,mode,width});
+ await page.getByRole('button',{name:'Saved dialogue',exact:true}).click();
+ const group=page.locator('#b .ihtml-tool-batch');await group.waitFor();assert.equal(await group.evaluate(e=>e.open),true);
+ await group.locator('.t-batch-list > summary').click();await group.locator('.ihtml-tool summary.t-head').first().click();assert.match(await group.innerText(),/original-0/);
+ assert.equal(await group.locator('button.ok:visible').count(),0);
+ await group.locator(':scope > .t-actions > .t-refresh').click();
+ await page.waitForFunction(()=>sockets.some(s=>s.sent.some(f=>f.type==='user_message'&&f.client_context?.operation_ids?.length===2)));
+ const frames=await page.evaluate(()=>sockets.flatMap(s=>s.sent));
+ const sent=frames.find(f=>f.type==='user_message'&&f.client_context?.operation_ids);
+ assert.deepEqual(sent.client_context.operation_ids,['op-0','op-1']);assert.equal(JSON.stringify(sent).includes('OLD_SECRET'),false);
+ assert.equal(frames.some(f=>['confirm_tool','confirm_tools'].includes(f.type)),false);
+ assert.equal(await page.locator('#b textarea').inputValue(),'unsent draft');
+ assert.equal(await group.evaluate(e=>e.scrollWidth>e.clientWidth),false);
 });

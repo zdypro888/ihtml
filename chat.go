@@ -133,11 +133,13 @@ type ChatQueryFilter struct {
 
 // ChatClientContext 是随 user_message 上送的页面上下文。
 type ChatClientContext struct {
-	Viewport  ChatClientViewport `json:"viewport"`
-	Page      ChatClientPage     `json:"page"`
-	Locale    string             `json:"locale,omitempty"`
-	TimeZone  string             `json:"time_zone,omitempty"`
-	UserAgent string             `json:"user_agent,omitempty"`
+	// OperationIDs 仅引用用户选择的原公开记录，宿主须按当前用户/对话重新读取；不是确认授权。
+	OperationIDs []string           `json:"operation_ids,omitempty"`
+	Viewport     ChatClientViewport `json:"viewport"`
+	Page         ChatClientPage     `json:"page"`
+	Locale       string             `json:"locale,omitempty"`
+	TimeZone     string             `json:"time_zone,omitempty"`
+	UserAgent    string             `json:"user_agent,omitempty"`
 }
 
 // ChatClientInspectionItem 是内核回传的单个 Item 实时渲染状态(不可信数据)。

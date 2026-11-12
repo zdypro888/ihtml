@@ -5959,7 +5959,7 @@
             const owner = message._turn;
             if (!owner) continue;
             for (const rec of owner.tools.values()) {
-              if (rec.expired && rec.status === 'expired') {
+              if (this.needsConfirmationReview(rec)) {
                 const refresh = rec.body.querySelector('.t-refresh');
                 if (refresh) refresh.disabled = unavailable || readOnly || confirmationBusy;
               }
@@ -6485,7 +6485,7 @@
         } catch (e) { /* 连接瞬断: 服务端工具会按离线超时返回 */ }
       },
 
-      async send(value) {
+      async send(value, operationIDs) {
         if (destroyed || !this.enabled || authRefreshing || !this.dom || this.active || this.sending || this.confirmationBusy || this.history?.mutating) return false;
         this.history?.close(false);
         this.notifications?.close(false);
@@ -6507,6 +6507,7 @@
           if (!this.modelInfo) await this.loadModels();
           if (destroyed || epoch !== requestEpoch || user !== resolvedUser || generation !== this.sendGeneration || !this.enabled || authRefreshing) return false;
           const clientContext = await this.resolveContext(contextAbort.signal);
+          if(operationIDs?.length)clientContext.operation_ids=[...operationIDs];
           if (destroyed || epoch !== requestEpoch || user !== resolvedUser || generation !== this.sendGeneration || contextAbort.signal.aborted || !this.enabled || authRefreshing) return false;
           // The input is the source of truth. `change` is not guaranteed to fire
           // before Enter submits (and programmatic fills only emit `input`), so a
@@ -7299,12 +7300,13 @@
           rec.body.setAttribute('aria-labelledby', rec.title.id);
           if (primary) rec.body.setAttribute('aria-describedby', primary.id);
         }
-        if (!rec.historical && rec.expired && rec.status === 'expired') {
-          const bar = el('div', 't-actions');
-          const refresh = el('button', 't-refresh', T('refresh_confirmation'));
-          refresh.disabled = !!this.confirmationBusy || this.active || this.sending;
-          refresh.onclick = (event) => {event.preventDefault(); this.send(T('refresh_confirmation_request'));};
-          bar.appendChild(refresh); rec.body.appendChild(bar);
+        if (this.needsConfirmationReview(rec)) {
+          const bar=el('div','t-actions');
+          const refresh=el('button','t-refresh',T(rec.historical?'restore_confirmation':'refresh_confirmation'));
+          refresh.disabled=destroyed||readOnly||authRefreshing||!this.enabled||!!this.confirmationBusy||this.active||this.sending;
+          refresh.title=T('restore_confirmation_hint');
+          refresh.onclick=event=>{event.preventDefault();void this.reviewToolConfirmations([rec]);};
+          bar.appendChild(refresh);rec.body.appendChild(bar);
         }
         rec.card.open = this.toolDisclosureOpen([rec.status], rec.manualOpen, !!rec.batchGroup);
         this.syncToolSummary(rec);
@@ -7314,6 +7316,20 @@
           const target = owner && rec.card.parentNode === owner.pBody && !owner.process.open ? owner.processSummary : rec.summary;
           if (target && target.isConnected) target.focus({ preventScroll: true });
         });
+      },
+      // 公开历史和已过期签名不能消费；恢复仅发送原记录引用，绝不提交旧签名或业务调用。
+      needsConfirmationReview(rec) {
+        return ['pending','expired'].includes(rec.status) && (rec.historical ? !!rec.historyRecord?.proposalRecorded : !!rec.expired);
+      },
+      async reviewToolConfirmations(records) {
+        const selected=records.filter(rec=>this.needsConfirmationReview(rec));
+        if(!selected.length)return;
+        const draft=this.dom.input.value;
+        try {return await this.send(T('refresh_confirmation_request'),selected.map(rec=>rec.call.id||rec.id));}
+        finally {
+          // 程序发出的核对请求不吞掉用户在切换列表前保留的草稿。
+          if(draft&&this.dom&&!this.dom.input.value){this.dom.input.value=draft;this.resizeComposer();this.syncChatControls();}
+        }
       },
       // 来源不参与展示状态：待确认、进行中及待刷新确认默认展开，执行回执默认收起；显式选择优先。
       toolDisclosureOpen(statuses, manualOpen, nested = false) {
@@ -7353,11 +7369,12 @@
             const list = el('details', 't-batch-list'), summary = el('summary'), items = el('div', 't-batch-items');
             list.append(summary, items);
             const bar = el('div', 't-actions'), confirm = el('button', 'ok');
-            bar.append(confirm);head.append(title, operation, counts);card.append(head, reason, facts, submission, list, bar);t.actions.appendChild(card);
-            g = {card, head, title, operation, reason, facts, counts, submission, list, summary, items, confirm, records: [], error: '', manualOpen: null};
+            const review=el('button','t-refresh',T('restore_confirmation'));bar.append(confirm,review);head.append(title, operation, counts);card.append(head, reason, facts, submission, list, bar);t.actions.appendChild(card);
+            g = {card, head, title, operation, reason, facts, counts, submission, list, summary, items, confirm, review, records: [], error: '', manualOpen: null};
             // 仅明确用户操作覆盖默认值；分页和状态刷新不得把手动展开的历史重新收起。
             head.addEventListener('click', () => {g.manualOpen = !card.open;if(g.manualOpen)this.setFollowing(false);});
             confirm.onclick = () => this.confirmToolGroup(g);
+            review.onclick=()=>void this.reviewToolConfirmations(g.records);
             t.toolGroups.set(key, g);
           }
           g.records = records;
@@ -7392,6 +7409,10 @@
           const focused=doc.activeElement,focusInBody=g.card.contains(focused)&&!g.head.contains(focused);
           g.card.open = this.toolDisclosureOpen(records.map(rec => rec.status), g.manualOpen ?? (records.some(rec => rec.manualOpen === true) ? true : undefined));
           const pending = records.filter(rec => !rec.historical && rec.status === 'pending' && !rec.expired && rec.call.confirmation_nonce && rec.call.confirmation_token);
+          g.review.hidden=!records.some(rec=>this.needsConfirmationReview(rec));
+          if(g.review.hidden)g.review.remove();else if(!g.review.isConnected)g.confirm.parentNode.appendChild(g.review);
+          g.review.title=T('restore_confirmation_hint');
+          g.review.disabled=destroyed||readOnly||authRefreshing||!this.enabled||this.active||this.sending||!!this.confirmationBusy;
           g.confirm.textContent = T('tool_batch_confirm', {n: pending.length});
           g.confirm.hidden = pending.length === 0 || !this.modelInfo?.batch_confirmations;
           g.confirm.disabled = destroyed || readOnly || authRefreshing || !this.enabled || this.active || this.sending || !!this.confirmationBusy || pending.some(rec => rec.call.review?.blocking_reason || rec.cancelPending || rec.confirmPending);
