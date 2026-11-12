@@ -115,14 +115,14 @@ async function fixture(t, viewport = { width: 1100, height: 800 }, device = {}) 
     window.calls = []; window.sockets = []; window.events = [];
     window.identity = 'alice'; window.readOnly = false; window.configStatus = 200;
     window.agentModes = ['fast', 'deep'];
-    window.confirmationScope = 'session'; window.approvalResume = 'manual_tool_only';window.backgroundExecution=false;
+    window.confirmationScope = 'session'; window.approvalResume = 'manual_tool_only';window.backgroundExecution=false;window.connectionProbeSupported=false;
     window.fetch = async (url, init) => {
       const pathname = new URL(url).pathname;
       calls.push({ url: String(url), headers: init.headers });
       const data = pathname.endsWith('/api/config')
         ? { user: identity, chat: true, read_only: readOnly, params: {} }
         : pathname.endsWith('/api/chat/models')
-          ? { model_ready: true, model_select: false, models: [], agent_modes: agentModes, deep_approval_resume: approvalResume, confirmation_scope: confirmationScope,background_execution:backgroundExecution }
+          ? { model_ready: true, model_select: false, models: [], agent_modes: agentModes, deep_approval_resume: approvalResume, confirmation_scope: confirmationScope,background_execution:backgroundExecution,connection_probe:connectionProbeSupported }
           : {};
       const status = pathname.endsWith('/api/config') ? configStatus : 200;
       return { ok: status === 200, status, statusText: 'Unavailable', text: async () => JSON.stringify(data) };
@@ -2422,4 +2422,41 @@ test('replayed progress retains source update time and legacy status clears old 
 test('long plain status is clamped in summary and fully readable after expansion',async t=>{
  const page=await fixture(t,{width:390,height:900});await page.evaluate(async()=>{window.a=ihtml.mountChat('#a');await a.ready();await a.chat.send('Original');sockets[0].emit({type:'turn_start',run_id:'r',seq:1});sockets[0].emit({type:'assistant_status',run_id:'r',seq:2,status:'正在核对原任务的冻结范围，保留所有实际回执并等待外部系统返回。'.repeat(6)})});
  const title=page.locator('.p-title');assert.equal(await title.evaluate(e=>e.scrollHeight>e.clientHeight),true);await page.locator('.ihtml-process > summary').click();assert.match(await page.locator('.pbody').innerText(),/冻结范围/);
+});
+
+test('Safari foreground detects a silently dead OPEN socket and resumes without replay',async t=>{
+ const page=await fixture(t);await page.clock.install();
+ await page.evaluate(async()=>{
+  backgroundExecution=true;connectionProbeSupported=true;window.ticketCount=0;window.a=ihtml.mountChat('#a',{connectionAuth:async()=> 'ticket-'+(++ticketCount)});await a.ready();await a.chat.send('original');
+  document.querySelector('textarea').value='preserved draft';window.visible=true;Object.defineProperty(document,'visibilityState',{configurable:true,get:()=>visible?'visible':'hidden'});
+  visible=false;document.dispatchEvent(new Event('visibilitychange'));visible=true;document.dispatchEvent(new Event('visibilitychange'));window.dispatchEvent(new Event('pageshow'));window.dispatchEvent(new Event('focus'));
+ });
+ assert.equal(await page.evaluate(()=>sockets[0].sent.filter(x=>x.type==='connection_ping').length),1);
+ await page.clock.runFor(8100);await page.waitForFunction(()=>sockets.length===2);
+ assert.equal(await page.evaluate(()=>ticketCount),2);assert.deepEqual(await page.evaluate(()=>sockets[1].sent),[]);
+ assert.equal(await page.evaluate(()=>a.chat.busy),true);assert.equal(await page.locator('.ihtml-chat textarea').inputValue(),'preserved draft');
+ await page.evaluate(()=>sockets[1].emit({type:'assistant_status',status:'Original task resumed'}));assert.match(await page.locator('.p-title').innerText(),/Original task resumed/);
+});
+
+test('healthy transport answers the foreground probe without disconnecting or changing the conversation',async t=>{
+ const page=await fixture(t);await page.clock.install();
+ await page.evaluate(async()=>{connectionProbeSupported=true;window.a=ihtml.mountChat('#a');await a.ready();await a.chat.send('original');window.dispatchEvent(new Event('pageshow'));const ping=sockets[0].sent.at(-1);sockets[0].emit({type:'connection_pong',probe_id:ping.probe_id})});
+ await page.clock.runFor(8100);assert.equal(await page.evaluate(()=>sockets.length),1);assert.equal(await page.evaluate(()=>sockets[0].readyState),1);
+ assert.equal(await page.locator('.ihtml-msg.user').count(),1);assert.doesNotMatch(await page.locator('#a').innerText(),/connection_pong|connection_ping/);
+});
+
+test('probe timeout reconnects even when Safari never dispatches close and stale pong cannot acknowledge a new probe',async t=>{
+ const page=await fixture(t);await page.clock.install();
+ await page.evaluate(async()=>{backgroundExecution=true;connectionProbeSupported=true;connectionProbeSupported=true;window.a=ihtml.mountChat('#a');await a.ready();await a.chat.send('original');sockets[0].close=function(){this.readyState=3};window.dispatchEvent(new Event('online'));sockets[0].emit({type:'connection_pong',probe_id:'unrelated'})});
+ await page.clock.runFor(8100);await page.waitForFunction(()=>sockets.length===2);assert.deepEqual(await page.evaluate(()=>sockets[1].sent),[]);
+ await page.evaluate(()=>{window.dispatchEvent(new Event('focus'));sockets[0].emit({type:'connection_pong',probe_id:sockets[1].sent.at(-1).probe_id})});
+ await page.clock.runFor(8100);await page.waitForFunction(()=>sockets.length===3);
+ await page.evaluate(()=>{a.chat.clear();window.dispatchEvent(new Event('pageshow'));window.dispatchEvent(new Event('focus'))});await page.clock.runFor(30000);assert.equal(await page.evaluate(()=>sockets.length),3);
+});
+
+test('visible idle transport is checked periodically and destroying cancels the pending probe',async t=>{
+ const page=await fixture(t);await page.clock.install();
+ await page.evaluate(async()=>{connectionProbeSupported=true;window.a=ihtml.mountChat('#a');await a.ready();await a.chat.send('original')});
+ await page.clock.runFor(25010);assert.equal(await page.evaluate(()=>sockets[0].sent.at(-1).type),'connection_ping');
+ await page.evaluate(()=>a.destroy());await page.clock.runFor(60000);assert.equal(await page.evaluate(()=>sockets.length),1);
 });

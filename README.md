@@ -668,3 +668,7 @@ SDK 将同一签名提案轮次中同类操作汇总为一张卡：展示公共�
 `agent.ReportProgress(ctx, progress.Snapshot{Message: "正在核对范围", Phase: "核对", Counters: []progress.Counter{{Label: "已处理", Unit: "个文件", Current: 7, Total: &total}}, UpdatedAt: receiptTime})` 通过当前执行通道发布事实；`agent.PollUntil` 的探针也可返回 `ProgressSnapshot`。没有结构化报告通道时自动退回原有文字摘要。
 
 计数由业务系统提供完整范围，未知总量保持 `nil`，不得用分页样例推算。可提供 `State`（running/queued/waiting/cooldown）、`WaitReason` 和 `RetryAt`；它们不改变执行、批准或完成状态。最多8项计数，负数、总量小于当前值及非法状态被拒绝。`UpdatedAt` 是原回执时间，回放不会改成重连时间。UI 折叠时展示简短摘要，展开保留完整明细；不会根据计数自行计算百分比或宣布完成。
+
+### 浏览器恢复与连接探活
+
+内置 WS 的模型能力响应声明 `connection_probe:true`。前端在 `visibilitychange`、`pageshow`、`focus`、`online` 恢复时发送带随机编号的 `connection_ping`；可见页面也每25秒探活。服务端在认证检查后直接回 `connection_pong`，不调用模型、不写对话历史、不执行业务。8秒内未收到当前连接的匹配回执时，本地替换连接、刷新票据并沿用原会话恢复；不依赖 Safari 一定上报 `close`，也不重发消息或确认。隐藏、销毁及显式断开会回收探活计时器。未声明此能力的旧后端保持原连接协议。

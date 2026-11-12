@@ -5418,6 +5418,8 @@
       reconnectTimer: 0,
       reconnectAttempt: 0,
       reconnectWanted: false,
+      connectionStartedAt: 0,
+      connectionProbe: null,
       backgroundSession: '',
       backgroundSeq: 0,
       connectionNotice: null,
@@ -5650,15 +5652,21 @@
         rootEl.appendChild(panelEl);
         this.dom = { mask, panel: panelEl, log, latestBtn, foot, input, sendBtn, providerBadge, modelInput, dataList, freshBtn, newBtn, toolbar, modebar, modeButtons, modeHint, live, readonlyBadge };
         this.log = log;
-        // 网络/前台恢复只重建连接，不重放用户消息或确认帧。
+        // Safari 恢复时 OPEN 可能是假活；探活只验证传输，不重发消息或确认。
         const recoverConnection = () => {
-          if (!this.reconnectWanted || document.visibilityState === 'hidden') return;
+          if (document.visibilityState === 'hidden') {this.clearConnectionProbe();return;}
+          if (!this.reconnectWanted) return;
           this.reconnectAttempt = 0;
-          this.scheduleReconnect(true);
+          if(this.wsPromise&&Date.now()-this.connectionStartedAt>=10000)this.replaceConnection();
+          else if(this.ws?.readyState===WebSocket.OPEN)this.probeConnection();
+          else this.scheduleReconnect(true);
         };
         window.addEventListener('online', recoverConnection);
+        window.addEventListener('pageshow', recoverConnection);
+        window.addEventListener('focus', recoverConnection);
         document.addEventListener('visibilitychange', recoverConnection);
-        addDisposer(() => {window.removeEventListener('online', recoverConnection); document.removeEventListener('visibilitychange', recoverConnection);});
+        const probeInterval=setInterval(()=>this.probeConnection(),25000);
+        addDisposer(() => {clearInterval(probeInterval);this.clearConnectionProbe();window.removeEventListener('online', recoverConnection);window.removeEventListener('pageshow', recoverConnection);window.removeEventListener('focus', recoverConnection);document.removeEventListener('visibilitychange', recoverConnection);});
         this.history = createChatHistory(head, log, foot);
         this.notifications = opts.notifications ? createChatHistory(head,log,foot,opts.notifications,'notifications') : null;
         // 观察真正渲染后的消息高度；覆盖延迟 Markdown、图片加载、折叠及宿主视口变化。
@@ -6102,6 +6110,25 @@
         if (this.connectionNotice.textContent === text) return;
         this.connectionNotice.textContent = text; this.announce(text); this.scroll();
       },
+      clearConnectionProbe() {
+        if(this.connectionProbe)clearTimeout(this.connectionProbe.timer);
+        this.connectionProbe=null;
+      },
+      replaceConnection() {
+        if(!this.reconnectWanted||destroyed)return;
+        const ws=this.ws;this.clearConnectionProbe();
+        // 先处理本地断开，不能依赖假活 socket 一定触发 close 回调。
+        if(ws) {ws.onclose?.({code:1006});try{ws.close();}catch{}}
+        else {this.disconnect();this.reconnectWanted=true;}
+        this.scheduleReconnect(true);
+      },
+      probeConnection() {
+        if(destroyed||!this.reconnectWanted||!this.modelInfo?.connection_probe||document.visibilityState==='hidden'||navigator.onLine===false||this.connectionProbe||this.ws?.readyState!==WebSocket.OPEN)return;
+        const ws=this.ws,id=Array.from(crypto.getRandomValues(new Uint8Array(12)),v=>v.toString(16).padStart(2,'0')).join('');
+        const probe={id,ws,timer:0};this.connectionProbe=probe;
+        probe.timer=setTimeout(()=>{if(this.connectionProbe!==probe)return;this.clearConnectionProbe();if(document.visibilityState!=='hidden'&&this.ws===ws)this.replaceConnection();},8000);
+        try{ws.send(JSON.stringify({type:'connection_ping',probe_id:id}));}catch{this.clearConnectionProbe();this.replaceConnection();}
+      },
       scheduleReconnect(immediate = false) {
         if (destroyed || !this.enabled || authRefreshing || !this.reconnectWanted || navigator.onLine === false || document.visibilityState === 'hidden') return;
         if (this.ws?.readyState === WebSocket.OPEN || this.wsPromise) return;
@@ -6121,6 +6148,7 @@
         if (this.ws && this.ws.readyState === WebSocket.OPEN) return Promise.resolve(this.ws);
         if (this.wsPromise) return this.wsPromise;
         const generation = ++this.wsGeneration;
+        this.connectionStartedAt=Date.now();
         const connectionAbort = new AbortController();
         this.connectionAbort = connectionAbort;
         const promise = (async () => {
@@ -6163,6 +6191,7 @@
               clearTimeout(handshakeTimer);
               fail(new Error(T('chat_disconnected')));
               if (generation !== this.wsGeneration || this.ws !== ws) return;
+              this.clearConnectionProbe();
               this.ws = null;
               this.wsPromise = null;
               this.expireConnectionConfirmations();
@@ -6186,6 +6215,7 @@
               if (destroyed || generation !== this.wsGeneration || this.ws !== ws) return;
               let data = null;
               try { data = JSON.parse(ev.data); } catch { return; }
+              if(data?.type==='connection_pong'){if(this.connectionProbe?.ws===ws&&data.probe_id===this.connectionProbe.id)this.clearConnectionProbe();return;}
               this.onEvent(data);
             };
           });
@@ -6202,6 +6232,7 @@
         return promise;
       },
       disconnect() {
+        this.clearConnectionProbe();
         // 显式停止、登出、新对话或销毁不得被后台重连计时器重新打开。
         this.reconnectWanted = false;
         this.reconnectAttempt = 0;

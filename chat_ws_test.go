@@ -119,3 +119,51 @@ func TestChatDisabled(t *testing.T) {
 		t.Fatalf("models without backend: %d %v", status, out)
 	}
 }
+
+// 探活不得进入模型处理器；即使没有任何业务输出，也能收到相同随机编号的回执。
+type probeChatBackend struct{ events chan string }
+type probeChatSession struct{ events chan string }
+
+func (b *probeChatBackend) NewSession(context.Context, *ChatSessionContext) (ChatSession, error) {
+	return &probeChatSession{events: b.events}, nil
+}
+func (s *probeChatSession) HandleEvent(_ context.Context, e *ChatClientEvent) { s.events <- e.Type }
+func (*probeChatSession) Close()                                              {}
+func TestChatConnectionProbeStaysInTransport(t *testing.T) {
+	backend := &probeChatBackend{events: make(chan string, 2)}
+	h := New(NewMemoryStore(), WithUserResolver(DevelopmentUserResolver), WithChatBackend(backend))
+	defer h.Close()
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	status, out := doJSON(t, "GET", srv.URL+"/api/chat/models?uid=probe", "")
+	if status != 200 || out["connection_probe"] != true {
+		t.Fatal(status, out)
+	}
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http")+"/api/chat/ws?uid=probe", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err = conn.WriteJSON(ChatClientEvent{Type: "connection_ping", ProbeID: "random-nonce"}); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	var event ChatStreamEvent
+	if err = conn.ReadJSON(&event); err != nil {
+		t.Fatal(err)
+	}
+	if event.Type != "connection_pong" || event.ProbeID != "random-nonce" || event.RunID != "" {
+		t.Fatal(event)
+	}
+	if err = conn.WriteJSON(ChatClientEvent{Type: "user_message"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case typ := <-backend.events:
+		if typ != "user_message" {
+			t.Fatal("probe forwarded to backend", typ)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("normal events stopped")
+	}
+}

@@ -179,6 +179,7 @@ type ChatClientEvent struct {
 	// Hosts must namespace it by authenticated user and validate its length.
 	RequestID string        `json:"request_id,omitempty"`
 	Type      string        `json:"type"`
+	ProbeID   string        `json:"probe_id,omitempty"`
 	Messages  []ChatMessage `json:"messages,omitempty"`
 	Model     string        `json:"model,omitempty"`
 	// AgentMode 为空或 fast 时走低延迟单 Agent；deep 仅在服务端显式开启后可用。
@@ -259,6 +260,8 @@ type ChatReplayCompletion struct {
 }
 
 type ChatStreamEvent struct {
+	// ProbeID 仅用于连接探活回执，不属于对话、确认或业务事件。
+	ProbeID string `json:"probe_id,omitempty"`
 	// Progress 与纯文本 Status 同步下发，旧客户端可继续只显示摘要。
 	Progress        *progress.Snapshot `json:"progress,omitempty"`
 	StatusUpdatedAt *time.Time         `json:"status_updated_at,omitempty"`
@@ -404,8 +407,10 @@ type ChatModels struct {
 	// BatchConfirmations 仅由支持固定清单排队及逐项验签的后端声明。
 	BatchConfirmations bool `json:"batch_confirmations,omitempty"`
 	// BackgroundExecution 表示传输断开不会取消后台轮次，重连会回放原执行进度。
-	BackgroundExecution bool  `json:"background_execution,omitempty"`
-	RequestTimeoutMS    int64 `json:"request_timeout_ms"`
+	BackgroundExecution bool `json:"background_execution,omitempty"`
+	// ConnectionProbe 由 WS 传输层提供探活，不触发模型或业务操作。
+	ConnectionProbe  bool  `json:"connection_probe,omitempty"`
+	RequestTimeoutMS int64 `json:"request_timeout_ms"`
 	// ModelSelect 为 true 时前端展示模型选择器(默认隐藏——
 	// 模型是运维概念, 不该暴露给终端用户)。
 	ModelSelect bool `json:"model_select,omitempty"`
@@ -1179,6 +1184,7 @@ func (h *Handler) handleChatModels(w http.ResponseWriter, r *http.Request, user 
 			out.Models = []string{}
 		}
 		out.ProtocolVersion = ChatProtocolVersion
+		out.ConnectionProbe = true
 		// PreviewOnly is a stricter capability than ModelReady. Normalize a
 		// contradictory third-party response so clients never present a
 		// deterministic preview as a real model answer.
@@ -1195,7 +1201,7 @@ func (h *Handler) handleChatModels(w http.ResponseWriter, r *http.Request, user 
 		writeJSON(w, http.StatusOK, out)
 		return
 	}
-	writeJSON(w, http.StatusOK, ChatModels{ProtocolVersion: ChatProtocolVersion, ModelReady: true, Models: []string{}})
+	writeJSON(w, http.StatusOK, ChatModels{ProtocolVersion: ChatProtocolVersion, ConnectionProbe: true, ModelReady: true, Models: []string{}})
 }
 
 func (h *Handler) sameOrigin(r *http.Request) bool {
@@ -1369,6 +1375,16 @@ func (h *Handler) handleChatWS(w http.ResponseWriter, r *http.Request, user stri
 		if !h.chatConnectionAllowed(r, user) {
 			_ = egress.emitInternal(ChatStreamEvent{Type: "turn_error", Error: "当前会话权限已撤销。", ModelReady: true})
 			return
+		}
+		// 探活停留在传输层，既不进入模型/业务处理，也不写入对话历史。
+		if ev.Type == "connection_ping" {
+			if ev.ProbeID == "" || len(ev.ProbeID) > 64 {
+				return
+			}
+			if err := egress.emitInternal(ChatStreamEvent{Type: "connection_pong", ProbeID: ev.ProbeID}); err != nil {
+				return
+			}
+			continue
 		}
 		// 服务端未显式开放模型选择时，忽略客户端伪造的
 		// model 字段，后端继续使用运维配置的默认模型。
