@@ -1250,3 +1250,9 @@ test('tool labels use readable metadata and retain technical identity only in re
  const readable=chatTrace.toolView({name:'plugin_custom_lookup',title:'读取资料'}, {tool_title:'重新核对资料'}, makeT('zh'));
  assert.equal(readable.title,'重新核对资料');
 });
+
+test('framework cancellation summary follows display locale without replacing business messages',()=>{
+ const call={name:'arbitrary',title:'明确的操作标题'};
+ assert.equal(chatTrace.toolView(call,{tool_status:'cancelled',tool_summary:'Cancelled; not executed.'},makeT('zh')).summary,'已撤销，操作未执行。');
+ assert.equal(chatTrace.toolView(call,{tool_status:'cancelled',tool_summary:'original business explanation'},makeT('zh')).summary,'original business explanation');
+});

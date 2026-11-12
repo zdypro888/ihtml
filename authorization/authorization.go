@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -416,4 +417,23 @@ func (m *Manager) RevokePending(ctx context.Context, b Binding, id string) error
 		return ErrInvalid
 	}
 	return m.store.RevokePending(ctx, b, id, time.Now().UTC())
+}
+
+// EquivalentPlans 比较同一执行代次的精确授权范围；目标顺序和模板目标示例不改变授权内容。
+// 其他参数、工具契约或执行代次变化均不能复用已有授权。
+func EquivalentPlans(a, b Plan) bool {
+	a, ea := NormalizePlan(a)
+	b, eb := NormalizePlan(b)
+	if ea != nil || eb != nil || a.Tool != b.Tool || a.ContractVersion != b.ContractVersion || a.ExecutionEpoch != b.ExecutionEpoch || a.TargetPointer != b.TargetPointer || len(a.Targets) != len(b.Targets) {
+		return false
+	}
+	at, bt := slices.Clone(a.Targets), slices.Clone(b.Targets)
+	slices.Sort(at)
+	slices.Sort(bt)
+	if !slices.Equal(at, bt) {
+		return false
+	}
+	aa, ea := BuildArguments(a, at[0])
+	ba, eb := BuildArguments(b, at[0])
+	return ea == nil && eb == nil && bytes.Equal(aa, ba)
 }

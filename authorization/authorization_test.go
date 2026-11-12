@@ -180,3 +180,22 @@ func TestStoreDetachedAndCancellation(t *testing.T) {
 		t.Fatal("explicit grant cannot resume across turns", err)
 	}
 }
+
+func TestEquivalentPlansIgnoreOnlyTargetExamplesAndOrdering(t *testing.T) {
+	_, r := fixture(t)
+	other := r.Plan
+	other.Targets = []string{"two", "one"}
+	other.Arguments = json.RawMessage(`{"path":{"id":"different"},"body":{"usage":"live","nested":{"keep":9007199254740993}}}`)
+	if !EquivalentPlans(r.Plan, other) {
+		t.Fatal("same precise authorization did not match")
+	}
+	other.ExecutionEpoch = "different"
+	if EquivalentPlans(r.Plan, other) {
+		t.Fatal("execution barrier bypassed")
+	}
+	other.ExecutionEpoch = r.Plan.ExecutionEpoch
+	other.Arguments = json.RawMessage(`{"path":{"id":"different"},"body":{"usage":"upload","nested":{"keep":9007199254740993}}}`)
+	if EquivalentPlans(r.Plan, other) {
+		t.Fatal("different mutation reused authorization")
+	}
+}

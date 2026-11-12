@@ -1763,11 +1763,11 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
 .ihtml-tool[data-status="failed"] .t-status { background: color-mix(in srgb, var(--ui-err) 9%, transparent); color: var(--ui-err); }
 .ihtml-tool .t-summary-row {
   flex: 1 1 auto; display: grid;
-  grid-template-columns: minmax(0, max-content) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   align-items: baseline; gap: 2px 8px; min-width: 0;
 }
 .ihtml-tool .t-title {
-  min-width: 0; max-width: 14rem;
+  min-width: 0; max-width: 100%;
   color: var(--ui-text); font-weight: 700;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }

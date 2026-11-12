@@ -2724,3 +2724,10 @@ for(const width of [390,1100]) test('earlier operation pager keeps its full hit 
  await button.click();await page.waitForFunction(()=>document.querySelector('.t-history-more')?.textContent.includes('重试'));assert.ok((await button.boundingBox()).height>=43.9);
  await button.click();await page.waitForFunction(()=>!document.querySelector('.t-history-more'));
 });
+
+for(const width of [390,1100])test('long operation title and localized cancellation summary occupy separate lines '+width,async t=>{
+ const page=await fixture(t,{width,height:800});await page.evaluate(async()=>{window.a=ihtml.mountChat('#a',{locale:'zh-CN',initialOperations:[{id:'cancelled-original',status:'cancelled',proposalRecorded:true,summary:'Cancelled; not executed.',call:{name:'arbitrary_operation',title:'授权任务 · 设置身份的单项业务分配'}}]});await a.ready()});
+ const card=page.locator('.ihtml-tool');const title=await card.locator('.t-title').boundingBox(),summary=await card.locator('.t-summary').boundingBox();
+ assert.ok(summary.y>=title.y+title.height-1);assert.match(await card.innerText(),/已撤销，操作未执行/);assert.ok(!(await card.innerText()).includes('Cancelled;'));
+ await card.screenshot({path:'/tmp/authorization-layout-'+width+'.png'});
+});

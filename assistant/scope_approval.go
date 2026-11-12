@@ -43,6 +43,16 @@ type scopeReference struct {
 	ID     string `json:"id"`
 	Target string `json:"target,omitempty"`
 }
+
+// 已存在有效授权时把原句柄交回模型，不再签发同范围的重复确认卡。
+type scopeReuseError struct{ record authorization.Record }
+
+func (e *scopeReuseError) Error() string { return "assistant: original authorization remains active" }
+
+func activeScopeResult(record authorization.Record) string {
+	return scopeJSON(map[string]any{"status": authorization.Active, "id": record.ID, "targets": len(record.Plan.Targets), "operation_completion": "unconfirmed", "next_action": authorizationExecute, "status_tool": authorizationStatus, "view": ToolResultView{Title: "任务已授权", Summary: fmt.Sprintf("%d 个目标的授权已生效；沿原授权继续执行，实际结果另行核对。", len(record.Plan.Targets)), Status: ihtml.ChatToolAccepted}})
+}
+
 type scopeResult struct {
 	Status  string         `json:"status"`
 	ID      string         `json:"id"`
@@ -90,7 +100,7 @@ func (s *session) appendScopeTools(tools []agent.Tool, req *agent.TurnRequest) (
 	}
 	str := map[string]any{"type": "string"}
 	// 请求本身只激活已签名的持久范围；从来不在 Handler 内批量执行业务。
-	request := agent.Tool{Name: authorizationRequest, Title: "申请任务授权", Description: "先请求一次任务授权，再逐项执行。适用于同一操作、固定修改内容、已确定的有限目标集合；无需先生成每个目标的确认卡。arguments是一个目标的完整参数模板，target_pointer是模板中允许替换的字符串目标字段RFC6901路径，targets是精确目标名单。其他参数固定不变。批准后用authorization_execute执行，不能把目标指针指向修改值或放宽业务前置条件。", Effect: agent.ToolEffectWrite, ApprovalRequired: true, InputSchema: schema(map[string]any{"tool": str, "arguments": map[string]any{"type": "object"}, "target_pointer": str, "targets": map[string]any{"type": "array", "items": str, "minItems": 1, "maxItems": authorization.MaxTargets}}, "tool", "arguments", "target_pointer", "targets")}
+	request := agent.Tool{Name: authorizationRequest, Title: "申请任务授权", Description: "先请求一次任务授权，再逐项执行。适用于同一操作、固定修改内容、已确定的有限目标集合；无需先生成每个目标的确认卡。arguments是一个目标的完整参数模板，target_pointer是模板中允许替换的字符串目标字段RFC6901路径，targets是精确目标名单。其他参数固定不变。active 表示授权生效，不表示业务完成；沿返回的原 id 用 authorization_execute 执行，不重新申请相同授权。不能把目标指针指向修改值或放宽业务前置条件。", Effect: agent.ToolEffectWrite, ApprovalRequired: true, InputSchema: schema(map[string]any{"tool": str, "arguments": map[string]any{"type": "object"}, "target_pointer": str, "targets": map[string]any{"type": "array", "items": str, "minItems": 1, "maxItems": authorization.MaxTargets}}, "tool", "arguments", "target_pointer", "targets")}
 	request.InputSchema["properties"].(map[string]any)["id"] = str
 	delete(request.InputSchema, "required")
 	request.InputSchema["oneOf"] = []any{map[string]any{"required": []string{"id"}, "not": map[string]any{"anyOf": []any{map[string]any{"required": []string{"tool"}}, map[string]any{"required": []string{"arguments"}}, map[string]any{"required": []string{"target_pointer"}}, map[string]any{"required": []string{"targets"}}}}}, map[string]any{"required": []string{"tool", "arguments", "target_pointer", "targets"}, "not": map[string]any{"required": []string{"id"}}}}
@@ -127,7 +137,7 @@ func (s *session) appendScopeTools(tools []agent.Tool, req *agent.TurnRequest) (
 		if err != nil {
 			return "", err
 		}
-		return scopeJSON(scopeResult{Status: authorization.Active, ID: record.ID, Targets: len(record.Plan.Targets), View: ToolResultView{Title: "任务已授权", Summary: fmt.Sprintf("已授权 %d 个目标，后续执行将持续显示进度和结果。", len(record.Plan.Targets)), Status: ihtml.ChatToolSuccess}}), nil
+		return activeScopeResult(record), nil
 	}
 	execute := agent.Tool{Name: authorizationExecute, Title: "执行已授权操作", Description: "执行已获用户批准的一个目标。仅传原授权id和名单中的target；工具从冻结模板构造原调用，检查当前权限与条件后执行。按依赖自主串行、并发或后台执行。重复调用只读取原记录，未知结果不可重做。", Effect: agent.ToolEffectWrite, InputSchema: schema(map[string]any{"id": str, "target": str}, "id", "target")}
 	execute.Handler = func(ctx context.Context, args json.RawMessage) (string, error) {
@@ -301,6 +311,12 @@ func (s *session) appendScopeTools(tools []agent.Tool, req *agent.TurnRequest) (
 
 // prepareScopeProposal 只核验一次模板以说明操作，不枚举执行业务预览。
 func (s *session) prepareScopeProposal(ctx context.Context, args json.RawMessage, p *projection, req *agent.TurnRequest) (ihtml.ProposedToolCall, json.RawMessage, error) {
+	// 同一会话可并行规划工具，但检查与创建授权必须有序，防止两个提案同时漏读彼此。
+	s.scopeProposalMu.Lock()
+	defer s.scopeProposalMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return ihtml.ProposedToolCall{}, nil, err
+	}
 	var input scopeProposal
 	if json.Unmarshal(args, &input) != nil {
 		return ihtml.ProposedToolCall{}, nil, ErrInvalidToolArguments
@@ -349,6 +365,31 @@ func (s *session) prepareScopeProposal(ctx context.Context, args json.RawMessage
 	if err = s.backend.cfg.ToolExecutionGuard(ctx, &h, tool, sample); err != nil {
 		return ihtml.ProposedToolCall{}, nil, err
 	}
+	if s.tasks != nil {
+		plan.ExecutionEpoch, err = s.tasks.ExecutionEpoch(ctx, agent.TaskScope(req))
+		if err != nil {
+			return ihtml.ProposedToolCall{}, nil, err
+		}
+	}
+	// 在同一主体、对话和执行代次内复用精确范围。跨模型续办轮次仍沿原授权 Goal，不能另造一次执行机会。
+	if existing == nil {
+		rows, e := m.List(ctx, scopeBinding(ctx, s, req))
+		if e != nil {
+			return ihtml.ProposedToolCall{}, nil, e
+		}
+		for _, r := range rows {
+			if !r.ExpiresAt.After(time.Now()) || (r.State != authorization.Active && r.State != authorization.Pending) || !authorization.EquivalentPlans(r.Plan, plan) {
+				continue
+			}
+			if existing == nil || r.State == authorization.Active && existing.State != authorization.Active || r.State == existing.State && (r.CreatedAt.Before(existing.CreatedAt) || r.CreatedAt.Equal(existing.CreatedAt) && r.ID < existing.ID) {
+				row := r
+				existing = &row
+			}
+		}
+		if existing != nil && existing.State == authorization.Active {
+			return ihtml.ProposedToolCall{}, nil, &scopeReuseError{record: *existing}
+		}
+	}
 	h = s.sctx
 	call, err := s.backend.cfg.Confirmation.Preview(ctx, &h, tool, sample)
 	if err != nil || call.Risk == "blocked" {
@@ -357,12 +398,6 @@ func (s *session) prepareScopeProposal(ctx context.Context, args json.RawMessage
 	life := s.backend.cfg.ScopeApproval.Lifetime
 	if life == 0 {
 		life = 24 * time.Hour
-	}
-	if s.tasks != nil {
-		plan.ExecutionEpoch, err = s.tasks.ExecutionEpoch(ctx, agent.TaskScope(req))
-		if err != nil {
-			return ihtml.ProposedToolCall{}, nil, err
-		}
 	}
 	var record authorization.Record
 	if existing != nil {
@@ -387,6 +422,20 @@ func (s *session) prepareScopeProposal(ctx context.Context, args json.RawMessage
 func (s *session) scopeResultView(tool agent.Tool, result string) (ToolResultView, bool) {
 	if s.backend.cfg.ScopeApproval == nil || !scopeTool(tool.Name) {
 		return ToolResultView{}, false
+	}
+	if tool.Name == authorizationStatus || tool.Name == authorizationRevoke {
+		var value map[string]json.RawMessage
+		if json.Unmarshal([]byte(result), &value) != nil {
+			return ToolResultView{}, true
+		}
+		public := map[string]json.RawMessage{}
+		for _, key := range []string{"id", "status", "tool", "targets", "total", "next_offset", "has_more", "expires_at"} {
+			if v, ok := value[key]; ok {
+				public[key] = v
+			}
+		}
+		raw, _ := json.Marshal(public)
+		return ToolResultView{Title: tool.Title, Status: ihtml.ChatToolSuccess, Summary: "已读取原授权状态；授权是否生效与目标执行结果分别核对。", Result: raw}, true
 	}
 	var out scopeResult
 	if json.Unmarshal([]byte(result), &out) != nil {

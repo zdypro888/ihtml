@@ -1170,7 +1170,9 @@
       }
       const pending = ev.type === 'confirmation_required' || ev.tool_status === 'pending';
       const summarySource = pending && source.reason ? source.reason : (ev.tool_summary || projected.action);
-      const summary = safeText(summarySource, SUMMARY_LIMIT);
+      // 旧框架回执使用固定英文句子；只本地化已知协议文案，不改写业务返回的任意说明。
+      const frameworkSummary = {'Cancelled; not executed.':'cancelled_not_run'};
+      const summary = safeText(frameworkSummary[summarySource] ? t(frameworkSummary[summarySource]) : summarySource, SUMMARY_LIMIT);
       const reason = source.reason ? safeText(source.reason, SUMMARY_LIMIT) : '';
       const requestPayload = {};
       // 展开技术详情仍能定位原始调用，即使工具没有 HTTP 路径或参数。

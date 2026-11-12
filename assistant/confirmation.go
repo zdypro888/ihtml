@@ -90,6 +90,10 @@ func (s *session) prepareTool(ctx context.Context, tool agent.Tool, args json.Ra
 	} else {
 		call, err = cfg.Preview(ctx, &host, tool, append(json.RawMessage(nil), args...))
 	}
+	var reusable *scopeReuseError
+	if errors.As(err, &reusable) {
+		return activeScopeResult(reusable.record), nil
+	}
 	if errors.Is(err, ErrInvalidToolArguments) {
 		return invalidToolArgumentsResult, nil
 	}

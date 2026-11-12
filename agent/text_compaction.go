@@ -101,7 +101,7 @@ func contextTextBytes(summary string, messages []Message) int {
 // ToolContinuationText is shared by native assistant and host transports. A
 // saved authoritative receipt permits a new authorized turn, not another write.
 func ToolContinuationText() string {
-	return "请根据本段对话中我原先明确提出的请求和刚保存的服务端回执继续处理剩余步骤。先查询原任务状态；仍在执行时查询或等待原任务。只处理原名单和范围，不重复已完成或结果未知的操作；后续写操作重新生成确认卡，没有剩余步骤则简短汇报。"
+	return "请根据本段对话中我原先明确提出的请求和刚保存的服务端回执继续处理剩余步骤。先查询原任务状态；仍在执行时查询或等待原任务。只处理原名单和范围，不重复已完成或结果未知的操作；既有有效授权内尚未执行的步骤，沿原授权继续，不要重新申请同一授权；授权成功只代表允许执行，不代表目标操作已完成。仅超出原授权范围或修改内容的新写操作重新生成确认卡，没有剩余步骤则简短汇报。"
 }
 
 func summaryMessageCount(s string) int {

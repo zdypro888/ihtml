@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -88,11 +89,18 @@ func scopeFindTool(t *testing.T, s *session, original agent.Tool, req *agent.Tur
 	t.Fatal("missing scoped capability", name)
 	return agent.Tool{}
 }
-func scopePrepared(t *testing.T, f *scopeFixture, s *session) (string, json.RawMessage) {
+func scopePrepared(t *testing.T, f *scopeFixture, s *session, targets ...string) (string, json.RawMessage) {
 	t.Helper()
 	p := newProjection(s, t.Context(), func() {})
 	p.tools[f.tool.Name] = f.tool
-	call, ref, err := s.prepareScopeProposal(t.Context(), scopeArgs("/path/id"), p, scopeReq())
+	args := scopeArgs("/path/id")
+	if len(targets) > 0 {
+		var proposal scopeProposal
+		_ = json.Unmarshal(args, &proposal)
+		proposal.Targets = targets
+		args, _ = json.Marshal(proposal)
+	}
+	call, ref, err := s.prepareScopeProposal(t.Context(), args, p, scopeReq())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +188,7 @@ func TestScopeApprovalStopRevokesPendingAndActiveScopes(t *testing.T) {
 	if _, err := request.Handler(t.Context(), ref); err != nil {
 		t.Fatal(err)
 	}
-	pending, _ := scopePrepared(t, f, s)
+	pending, _ := scopePrepared(t, f, s, "distinct-pending")
 	s.revokeScopeApprovals(t.Context())
 	m := authorization.New(f.store)
 	for _, grant := range []string{id, pending} {
@@ -227,7 +235,7 @@ func TestScopeApprovalStopEpochSurvivesReconnectWithoutGrantRevocation(t *testin
 	if _, err := request.Handler(t.Context(), ref); err != nil {
 		t.Fatal(err)
 	}
-	_, pendingRef := scopePrepared(t, f, s)
+	_, pendingRef := scopePrepared(t, f, s, "distinct-pending")
 	if err := s.tasks.CancelAll(); err != nil {
 		t.Fatal(err)
 	}
@@ -306,5 +314,90 @@ func TestScopeOldProposalCleanupCannotRevokeActivatedRange(t *testing.T) {
 	r, err := authorization.New(f.store).Get(t.Context(), scopeBinding(t.Context(), s, scopeReq()), id)
 	if err != nil || r.State != authorization.Active {
 		t.Fatal("old proposal revoked active scope", err, r.State)
+	}
+}
+
+func TestScopeEquivalentProposalReusesOriginalAuthorization(t *testing.T) {
+	f := newScopeFixture(t)
+	s, _ := f.session(t)
+	id, ref := scopePrepared(t, f, s)
+	duplicate, _ := scopePrepared(t, f, s)
+	if duplicate != id {
+		t.Fatal("pending proposal duplicated")
+	}
+	request := scopeFindTool(t, s, f.tool, scopeReq(), authorizationRequest)
+	if _, err := request.Handler(t.Context(), ref); err != nil {
+		t.Fatal(err)
+	}
+	p := newProjection(s, t.Context(), func() {})
+	p.tools[f.tool.Name] = f.tool
+	_, _, err := s.prepareScopeProposal(t.Context(), scopeArgs("/path/id"), p, scopeReq())
+	var reuse *scopeReuseError
+	if !errors.As(err, &reuse) || reuse.record.ID != id {
+		t.Fatal("active grant was replaced", err)
+	}
+	records, e := authorization.New(f.store).List(t.Context(), reuse.record.Binding)
+	if e != nil || len(records) != 1 || f.calls.Load() != 0 {
+		t.Fatal("duplicate grant or premature execution", len(records), e)
+	}
+	// 即使业务不再允许生成新预览，也必须交回原有效授权；实际执行仍逐项重新检查。
+	f.previewUnavailable.Store(true)
+	reused, prepareErr := s.prepareTool(t.Context(), request, scopeArgs("/path/id"), p, scopeReq())
+	if prepareErr != nil || reused != activeScopeResult(reuse.record) {
+		t.Fatal("confirmation bridge did not return original grant", prepareErr)
+	}
+	var result map[string]any
+	_ = json.Unmarshal([]byte(activeScopeResult(reuse.record)), &result)
+	if result["next_action"] != authorizationExecute || result["operation_completion"] != "unconfirmed" {
+		t.Fatal(result)
+	}
+}
+
+func TestScopeStatusPresentationRetainsStructuredFacts(t *testing.T) {
+	f := newScopeFixture(t)
+	s, _ := f.session(t)
+	view, ok := s.scopeResultView(agent.Tool{Name: authorizationStatus, Title: "查询任务授权状态"}, `{"id":"original","status":"active","targets":["one"],"total":1,"private":"hidden"}`)
+	if !ok || len(view.Result) == 0 || view.Title == "" {
+		t.Fatal(view)
+	}
+	var data map[string]any
+	_ = json.Unmarshal(view.Result, &data)
+	if data["status"] != "active" || data["private"] != nil {
+		t.Fatal(data)
+	}
+}
+
+func TestConcurrentEquivalentProposalsShareOnePendingGrant(t *testing.T) {
+	f := newScopeFixture(t)
+	s, _ := f.session(t)
+	var wg sync.WaitGroup
+	ids := make(chan string, 8)
+	errs := make(chan error, 8)
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			p := newProjection(s, t.Context(), func() {})
+			p.tools[f.tool.Name] = f.tool
+			call, _, err := s.prepareScopeProposal(t.Context(), scopeArgs("/path/id"), p, scopeReq())
+			if err != nil {
+				errs <- err
+				return
+			}
+			ids <- call.Body.(map[string]string)["id"]
+		}()
+	}
+	wg.Wait()
+	close(ids)
+	close(errs)
+	for e := range errs {
+		t.Fatal(e)
+	}
+	first := ""
+	for id := range ids {
+		if first != "" && id != first {
+			t.Fatal("parallel duplicate grants")
+		}
+		first = id
 	}
 }

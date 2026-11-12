@@ -353,6 +353,7 @@ type session struct {
 	done                 chan struct{}
 	mu                   sync.Mutex
 	emitMu               sync.Mutex
+	scopeProposalMu      sync.Mutex
 	taskProgress         map[string]taskProgressDisplayState
 	queue                []pendingTurn
 	rejections           []pendingTurn
