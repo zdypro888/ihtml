@@ -2217,7 +2217,8 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
 .ihtml-tool[data-surface="process"]:not([open]) > summary .t-summary { display: none; }
 .ihtml-tool[data-surface="process"] > summary .t-title { font-weight: 500; }
 
-.ihtml-root .t-history-more { justify-self: start; margin: 8px 0; }
+/* 历史分页属于滚动内容，不能随长对话收缩；复用共用按钮并放在记录起点。 */
+.ihtml-root .ui-btn.t-history-more { flex: 0 0 auto; align-self: center; max-width: 100%; min-height: 44px; white-space: normal; line-height: 1.4; margin: 8px 0; }
 
 /* 同一请求的早期说明收纳到处理过程，最新答复始终独立可见。 */
 .ihtml-process .ihtml-answer-history {margin:0;color:var(--ui-text-muted)}

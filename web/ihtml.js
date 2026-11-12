@@ -5861,7 +5861,7 @@
       renderOperationPager(){
         this.operationPager?.remove();this.operationPager=null;
         if(!this.operationCursor||!opts.operationHistory)return;
-        const button=el('button','t-history-more',T('tool_history_more'));button.type='button';this.operationPager=button;this.log.appendChild(button);
+        const button=el('button','ui-btn t-history-more',T('tool_history_more'));button.type='button';this.operationPager=button;this.log.prepend(button);
         button.onclick=async()=>{
           if(this.operationsAbort||destroyed||authRefreshing)return;
           const controller=new AbortController();this.operationsAbort=controller;button.disabled=true;

@@ -2711,3 +2711,16 @@ test('task scope preserves submillisecond authority ordering',async t=>{
  await page.evaluate(()=>{sockets[0].emit(scopeAt('2026-11-13T02:00:00.000000002Z',false));sockets[0].emit(scopeAt('2026-11-13T02:00:00.000000001Z',true))});
  assert.equal(await page.locator('#a .ihtml-chat-foot button.stop').count(),0,'a later completion within the same millisecond wins over the old active snapshot');
 });
+
+// 长记录必须滚动，不能压缩分页按钮；重试和结束仍沿原分页协议。
+for(const width of [390,1100]) test('earlier operation pager keeps its full hit area above overflowing history '+width,async t=>{
+ const page=await fixture(t,{width,height:700});await page.evaluate(async()=>{
+  window.pageAttempts=0;window.a=ihtml.mountChat('#a',{locale:'zh-CN',initialMessages:Array.from({length:30},(_,i)=>({id:'message-'+i,role:i%2?'assistant':'user',content:'长对话内容 '.repeat(30)})),operationHistory:{cursor:'older',load:async()=>{if(++pageAttempts===1)throw Error('offline');return {items:[],cursor:''}}}});await a.ready();
+ });
+ const button=page.locator('.t-history-more');await button.scrollIntoViewIfNeeded();
+ const size=await button.evaluate(e=>({height:e.getBoundingClientRect().height,scroll:e.scrollHeight,client:e.clientHeight,first:e.parentElement.firstElementChild===e,button:e.classList.contains('ui-btn')}));
+ assert.ok(size.height>=43.9,JSON.stringify(size));assert.ok(size.scroll<=size.client+1);assert.equal(size.first,true);assert.equal(size.button,true);
+ await page.locator('#a').screenshot({path:'/tmp/ihtml-history-pager-'+width+'.png'});
+ await button.click();await page.waitForFunction(()=>document.querySelector('.t-history-more')?.textContent.includes('重试'));assert.ok((await button.boundingBox()).height>=43.9);
+ await button.click();await page.waitForFunction(()=>!document.querySelector('.t-history-more'));
+});
