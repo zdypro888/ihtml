@@ -6,6 +6,7 @@ the first tagged release, changes are recorded under **Unreleased**.
 ## Unreleased
 
 ### Added
+- `ihtml.observeNotifications` shares host notification-status observation before chat mount, with cancellation, visibility refresh, coalesced requests and teardown; it never opens chat or marks notifications read.
 - Inline chat supports optional host-owned headers (`chatHeader: "none"`) and empty-conversation `starters` that scroll with messages and disappear after sending.
 
 - Add opt-in `mountChat({history})` rendering, paginated host callbacks, explicit
@@ -33,6 +34,7 @@ the first tagged release, changes are recorded under **Unreleased**.
   scheduling remains intact.
 
 ### Fixed
+- Browser-push consent, registration and save callbacks are fenced to the active authorization generation; late results after identity refresh/destruction cannot save a subscription for another user. Native push steps have bounded waiting and stale status reads cannot undo a newer action.
 
 - A confirmation deadline does not replace an in-flight cancellation acknowledgement; missing receipts remain unknown and cannot offer preview refresh.
 

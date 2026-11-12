@@ -6,12 +6,105 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const { chromium } = require('playwright');
+
+test('notification observer works before chat mount and coalesces overlapping refreshes', async t => {
+  const page = await fixture(t);
+  await page.evaluate(() => {
+    window.observerCalls = 0; window.observerUpdates = []; window.observerActive = 0; window.observerMax = 0;
+    window.notificationObserver = ihtml.observeNotifications({
+      load: () => new Promise(resolve => { observerCalls++; observerActive++; observerMax = Math.max(observerMax, observerActive); window.releaseNotification = value => { observerActive--; resolve({unread:value}); }; }),
+      onUpdate: status => observerUpdates.push(status.unread),
+    });
+  });
+  await page.waitForFunction(() => observerCalls === 1);
+  await page.evaluate(() => { for (let n=0;n<20;n++) notificationObserver.refresh(); releaseNotification(3); });
+  await page.waitForFunction(() => observerCalls === 2);
+  await page.evaluate(() => releaseNotification(4));
+  await page.waitForFunction(() => observerUpdates.length === 2);
+  const result = await page.evaluate(() => { notificationObserver.destroy(); return {updates:observerUpdates, max:observerMax, sockets:sockets.length}; });
+  assert.deepEqual(result, {updates:[3,4],max:1,sockets:0});
+});
+
+test('destroyed notification observers reject late identity results and stop refreshes', async t => {
+  const page = await fixture(t);
+  await page.evaluate(() => {
+    window.lateUpdates = []; window.observerCalls = 0;
+    window.notificationObserver = ihtml.observeNotifications({load:({signal}) => new Promise(resolve => {observerCalls++;window.oldNotificationSignal=signal;window.releaseNotification=resolve;}),onUpdate:status=>lateUpdates.push(status)});
+  });
+  await page.waitForFunction(() => observerCalls === 1);
+  await page.evaluate(async () => { notificationObserver.destroy(); releaseNotification({unread:99}); notificationObserver.refresh(); window.dispatchEvent(new Event('focus')); await new Promise(resolve=>setTimeout(resolve,50)); });
+  assert.deepEqual(await page.evaluate(()=>({aborted:oldNotificationSignal.aborted,updates:lateUpdates,calls:observerCalls})),{aborted:true,updates:[],calls:1});
+});
+
+test('notification failures keep prior state and permit a later refresh', async t => {
+  const page = await fixture(t);
+  await page.evaluate(() => {
+    window.observerCalls=0;window.observerErrors=0;window.observerUpdates=[];
+    window.notificationObserver=ihtml.observeNotifications({load:async()=>{if(++observerCalls===1)throw new Error('unavailable');return {unread:7};},onUpdate:status=>observerUpdates.push(status.unread),onError:()=>observerErrors++});
+  });
+  await page.waitForFunction(()=>observerErrors===1);
+  await page.evaluate(()=>notificationObserver.refresh());
+  await page.waitForFunction(()=>observerUpdates.length===1);
+  assert.deepEqual(await page.evaluate(()=>{notificationObserver.destroy();return observerUpdates}),[7]);
+});
 let browser;
+for(const reset of ['destroy','refreshAuth'])test('late browser notification consent cannot subscribe after '+reset,async t=>{
+ const page=await fixture(t);
+ await page.evaluate(async()=>{
+  window.pushSaved=0;window.pushRegistered=0;
+  Object.defineProperty(window,'Notification',{configurable:true,value:{permission:'default',requestPermission:()=>new Promise(resolve=>{window.resolvePushPermission=resolve})}});
+  Object.defineProperty(window,'PushManager',{configurable:true,value:function(){}});
+  Object.defineProperty(navigator,'serviceWorker',{configurable:true,value:{
+   getRegistration:async()=>null,
+   register:async()=>{
+    pushRegistered++;
+    return {active:{},pushManager:{getSubscription:async()=>null,subscribe:async()=>({endpoint:'https://fcm.googleapis.com/fcm/send/test',toJSON:()=>({endpoint:'test'})})}};
+   },
+  }});
+  window.a=ihtml.mountChat('#a',{notifications:{list:async()=>({items:[],unread:0}),push:{publicKey:'AAAA',subscriptionIds:[],subscribe:async()=>{pushSaved++;return{enabled:true}},remove:async()=>{}}}});await a.ready();a.chat.notifications.open();
+ });
+ await page.locator('.ihtml-chat-push-enable').click();await page.waitForFunction(()=>!!window.resolvePushPermission);
+ await page.evaluate(async action=>{if(action==='destroy')a.destroy();else{identity='bob';await a.refreshAuth()}resolvePushPermission('granted');await new Promise(resolve=>setTimeout(resolve,80))},reset);
+ assert.equal(await page.evaluate(()=>pushSaved),0,'old consent must not save in the next identity');
+ assert.equal(await page.evaluate(()=>pushRegistered),0,'old consent must not register a worker after identity change');
+});
+test('a host-hidden notification panel keeps unread observation without marking receipts seen', async t => {
+ const page=await fixture(t);
+ await page.evaluate(async()=>{
+  window.notices=[];window.noticeUnread=-1;window.seenIDs=[];
+  window.a=ihtml.mountChat('#a',{notifications:{list:async()=>({items:notices,unread:notices.length}),onUnreadChange:n=>{noticeUnread=n},seen:async({ids})=>{seenIDs.push(...ids);return{readIds:ids,unread:0}}}});
+  await a.ready();a.chat.notifications.open();
+ });
+ await page.waitForFunction(()=>noticeUnread===0);
+ await page.evaluate(()=>{document.querySelector('#a').style.display='none';notices=[{id:'new',title:'A new receipt',unread:true}];a.chat.notifications.refresh()});
+ await page.waitForFunction(()=>noticeUnread===1);
+ assert.deepEqual(await page.evaluate(()=>seenIDs),[],'hidden host must not acknowledge unseen receipts');
+ await page.evaluate(()=>{document.querySelector('#a').style.display='block'});
+ await page.waitForFunction(()=>seenIDs.includes('new'));
+ assert.equal(await page.evaluate(()=>noticeUnread),0,'showing the host refreshes and acknowledges rendered receipts');
+});
+
+test('a notification page loaded after the host hides never acknowledges its unseen result', async t=>{
+ const page=await fixture(t);
+ await page.evaluate(async()=>{
+  window.deferNotice=false;window.seenIDs=[];window.noticeUnread=-1;
+  window.a=ihtml.mountChat('#a',{notifications:{list:async()=>{if(deferNotice)await new Promise(resolve=>{window.releaseNotice=resolve});return{items:[{id:'late',title:'Late receipt',unread:true}],unread:1}},seen:async({ids})=>{seenIDs.push(...ids);return{readIds:ids,unread:0}},onUnreadChange:n=>{noticeUnread=n}}});
+  await a.ready();
+ });
+ await page.waitForFunction(()=>noticeUnread===1);
+ await page.evaluate(()=>{deferNotice=true;a.chat.notifications.open()});
+ await page.waitForFunction(()=>typeof releaseNotice==='function');
+ await page.evaluate(()=>{document.querySelector('#a').style.display='none';deferNotice=false;releaseNotice()});
+ await page.waitForTimeout(100);
+ assert.deepEqual(await page.evaluate(()=>seenIDs),[]);
+ assert.equal(await page.evaluate(()=>noticeUnread),1);
+});
+
 test.before(async () => { browser = await chromium.launch({ headless: true }); });
 test.after(async () => { if (browser) await browser.close(); });
 
 async function fixture(t, viewport = { width: 1100, height: 800 }, device = {}) {
-  const page = await browser.newPage({ viewport, ...device });
+  const page = await browser.newPage({ viewport, locale: 'en-US', ...device });
   t.after(() => page.close());
   const failures = [];
   page.on('pageerror', (error) => failures.push(error.message));

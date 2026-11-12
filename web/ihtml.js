@@ -5232,29 +5232,43 @@
         const supported = typeof Notification!=='undefined' && 'serviceWorker' in navigator && typeof PushManager!=='undefined' && isSecureContext;
         button.disabled=!supported;
         if (!supported) button.textContent=T('notifications_push_unsupported');
-        let registration=null,enabled=false;
+        let registration=null,enabled=false,pushBusy=false,knownEpoch=requestEpoch,pushSequence=0;
+        const syncPushOwner=()=>{
+          if(knownEpoch!==requestEpoch){knownEpoch=requestEpoch;subscriptionIds.clear();enabled=false;}
+          button.disabled=!supported||authRefreshing||pushBusy;
+          if(supported)button.textContent=T(enabled?'notifications_push_disable':'notifications_push_enable');
+        };
         button.onclick=async()=>{
-          if (button.disabled) return;button.disabled=true;
+          if(button.disabled||destroyed||authRefreshing)return;
+          syncPushOwner();pushBusy=true;syncPushOwner();pushSequence++;
+          const epoch=requestEpoch,abort=new AbortController();requestControllers.add(abort);
+          const alive=()=>!destroyed&&!authRefreshing&&requestEpoch===epoch&&!abort.signal.aborted;
+          // 浏览器权限/订阅不支持 AbortSignal；共享期限结束后拒绝迟到结果，尤其不能在新身份下保存旧请求。
+          const wait=async invoke=>{if(!alive())throw staleRequestError();const value=await boundedChatHook(invoke,abort.signal,30000);if(!alive())throw staleRequestError();return value;};
           try {
-            if (!enabled && await Notification.requestPermission()!=='granted') throw new Error('permission');
+            if (!enabled && await wait(()=>Notification.requestPermission())!=='granted') throw new Error('permission');
             const worker=new URL('ihtml-push-sw.js',baseURL);if(worker.origin!==location.origin)throw new Error('origin');
-            registration=registration||await navigator.serviceWorker.register(worker.href,{scope:new URL('./',worker).pathname,updateViaCache:'none'});
-            if (!registration.active) await new Promise((resolve,reject)=>{const instance=registration.installing||registration.waiting;if(!instance){reject(new Error('worker'));return;}const timer=setTimeout(()=>reject(new Error('worker timeout')),15000);instance.addEventListener('statechange',()=>{if(instance.state==='activated'){clearTimeout(timer);resolve();}});});
-            let subscription=await registration.pushManager.getSubscription();
-            if (enabled) {if(subscription){await push.remove(subscription.toJSON());await subscription.unsubscribe();subscriptionIds.delete(await subscriptionID(subscription.endpoint));}enabled=false;}
+            registration=registration||await wait(()=>navigator.serviceWorker.register(worker.href,{scope:new URL('./',worker).pathname,updateViaCache:'none'}));
+            if (!registration.active) await wait(()=>new Promise((resolve,reject)=>{const instance=registration.installing||registration.waiting;if(!instance){reject(new Error('worker'));return;}const timer=setTimeout(()=>reject(new Error('worker timeout')),15000);instance.addEventListener('statechange',()=>{if(instance.state==='activated'){clearTimeout(timer);resolve();}});}));
+            let subscription=await wait(()=>registration.pushManager.getSubscription());
+            if (enabled) {if(subscription){await wait(()=>push.remove(subscription.toJSON()));await wait(()=>subscription.unsubscribe());subscriptionIds.delete(await wait(()=>subscriptionID(subscription.endpoint)));}enabled=false;}
             else {
-              if(!subscription){const encoded=String(push.publicKey||'').replace(/-/g,'+').replace(/_/g,'/');const key=Uint8Array.from(atob(encoded),c=>c.charCodeAt(0));subscription=await registration.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:key});}
-              const saved=await push.subscribe(subscription.toJSON());if(saved?.enabled!==true)throw new Error('not saved');subscriptionIds.add(await subscriptionID(subscription.endpoint));enabled=true;
+              if(!subscription){const encoded=String(push.publicKey||'').replace(/-/g,'+').replace(/_/g,'/');const key=Uint8Array.from(atob(encoded),c=>c.charCodeAt(0));subscription=await wait(()=>registration.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:key}));}
+              const saved=await wait(()=>push.subscribe(subscription.toJSON()));if(saved?.enabled!==true)throw new Error('not saved');subscriptionIds.add(await wait(()=>subscriptionID(subscription.endpoint)));enabled=true;
             }
-            button.textContent=T(enabled?'notifications_push_disable':'notifications_push_enable');
-          }catch{status.textContent=T('notifications_push_error');}finally{button.disabled=false;}
+            syncPushOwner();
+          }catch(error){if(alive()&&!isStaleError(error))status.textContent=T('notifications_push_error');}
+          finally{requestControllers.delete(abort);abort.abort();pushBusy=false;if(!destroyed)syncPushOwner();}
         };
         refreshPushState=async()=>{
-          if(!supported||Notification.permission!=='granted')return;
+          syncPushOwner();
+          if(!supported||destroyed||authRefreshing||pushBusy||Notification.permission!=='granted')return;
+          const epoch=requestEpoch,sequence=pushSequence;
+          const alive=()=>!destroyed&&!authRefreshing&&!pushBusy&&requestEpoch===epoch&&pushSequence===sequence;
           try{const worker=new URL('ihtml-push-sw.js',baseURL);const found=await navigator.serviceWorker.getRegistration(new URL('./',worker).href);
-            if(!found?.active||new URL(found.active.scriptURL).pathname!==worker.pathname)return;
+            if(!alive()||!found?.active||new URL(found.active.scriptURL).pathname!==worker.pathname)return;
             registration=found;const current=await found.pushManager.getSubscription();
-            if(current){const id=await subscriptionID(current.endpoint);enabled=subscriptionIds.has(id);button.textContent=T(enabled?'notifications_push_disable':'notifications_push_enable');}
+            if(current){const id=await subscriptionID(current.endpoint);if(alive()){enabled=subscriptionIds.has(id);syncPushOwner();}}
           }catch{}
         };
         pane.appendChild(button);
@@ -5297,6 +5311,8 @@
         more.hidden = !cursor; sync();
       };
       const alive = (id, abort) => !destroyed && opened && id === generation && !abort.signal.aborted && !authRefreshing;
+      // 外层抽屉/窗口隐藏不会改变 opened；只有实际可见的通知面板才能确认已读。
+      const paneVisible=()=>document.visibilityState!=='hidden'&&(typeof pane.checkVisibility==='function'?pane.checkVisibility({checkOpacity:true,checkVisibilityCSS:true}):pane.getClientRects().length>0&&getComputedStyle(pane).visibility==='visible');
       const failure = (error, id, abort) => {
         if (!alive(id, abort)) return;
         // 不输出回调异常原文，避免 HTTP/认证错误携带宿主敏感信息。
@@ -5304,6 +5320,7 @@
       };
       async function load(append = false) {
         if (!opened || pending || destroyed || authRefreshing) return;
+        if(kind==='notifications'&&!paneVisible()){void refreshSummary();return;}
         const abort = new AbortController(), id = ++generation, before = append ? cursor : '';
         pending = abort; status.textContent = T('history_loading'); retry.hidden = true; sync();
         try {
@@ -5319,7 +5336,7 @@
           if (typeof source.onUnreadChange==='function') source.onUnreadChange(Math.max(0,Number(page.unread)||0));
           render();
           // 仅对已打开并实际渲染的这一页通知调用已读 hook；摘要轮询没有此副作用。
-          if(kind==='notifications'&&typeof source.seen==='function') {
+          if(kind==='notifications'&&paneVisible()&&typeof source.seen==='function') {
             try {
               const seen=await boundedChatHook(()=>source.seen({ids:rows.map(row=>row.id),signal:abort.signal}),abort.signal,30000);
               if(!alive(id,abort))return;
@@ -5369,13 +5386,17 @@
       }
       let summaryAbort=null;
       const refreshSummary=async()=>{
-        if(opened||summaryAbort||destroyed||authRefreshing||document.visibilityState==='hidden')return;
+        if((opened&&paneVisible())||pending||summaryAbort||destroyed||authRefreshing||document.visibilityState==='hidden')return;
         summaryAbort=new AbortController();const summaryGeneration=generation;
-        try{const page=await boundedChatHook(()=>source.list({cursor:'',signal:summaryAbort.signal}),summaryAbort.signal,30000);if(!destroyed&&!opened&&summaryGeneration===generation&&typeof source.onUnreadChange==='function')source.onUnreadChange(Math.max(0,Number(page?.unread)||0));}catch{}finally{summaryAbort?.abort();summaryAbort=null;}
+        try{const page=await boundedChatHook(()=>source.list({cursor:'',signal:summaryAbort.signal}),summaryAbort.signal,30000);if(!destroyed&&(!opened||!paneVisible())&&summaryGeneration===generation&&typeof source.onUnreadChange==='function')source.onUnreadChange(Math.max(0,Number(page?.unread)||0));}catch{}finally{summaryAbort?.abort();summaryAbort=null;}
       };
       const poll = kind==='notifications'?setInterval(refreshSummary,30000):0;
       if(poll)void refreshSummary();
-      addDisposer(()=>{if(poll)clearInterval(poll);summaryAbort?.abort();reset();});
+      const refreshVisibility=()=>{if(opened&&paneVisible())void load();else void refreshSummary();};
+      const visibilityObserver=kind==='notifications'&&typeof IntersectionObserver==='function'?new IntersectionObserver(refreshVisibility):null;
+      visibilityObserver?.observe(pane);
+      if(poll)document.addEventListener('visibilitychange',refreshVisibility);
+      addDisposer(()=>{if(poll){clearInterval(poll);document.removeEventListener('visibilitychange',refreshVisibility);}visibilityObserver?.disconnect();summaryAbort?.abort();reset();});
       return {open, close, reset, sync, refresh: () => opened?load():refreshSummary(), get opened() { return opened; }, get mutating() { return mutating; }};
     }
 
@@ -8516,11 +8537,42 @@
   const mountedHosts = new WeakMap();
   const mountingHosts = new WeakSet();
   const compatibilityProxyKeys = new Set();
-  const compatibilityReservedKeys = new Set(['version', 'mounted', 'instances', 'mount', 'mountChat', '__primary']);
+  // 通知入口可在聊天尚未挂载时观察服务端摘要；不创建连接、发消息或标记已读。
+  function observeNotifications(options = {}) {
+    if (typeof options.load !== 'function' || typeof options.onUpdate !== 'function') throw new TypeError('ihtml.observeNotifications: load and onUpdate are required');
+    const interval = options.intervalMS === undefined ? 30000 : options.intervalMS;
+    if (!Number.isFinite(interval) || interval < 1000) throw new TypeError('ihtml.observeNotifications: intervalMS must be at least 1000');
+    let destroyed = false, pending = false, refreshPending = false, timer = 0, controller = null;
+    const schedule = delay => { clearTimeout(timer); if (!destroyed) timer = setTimeout(run, delay); };
+    const refresh = () => { if (destroyed) return; if (pending) { refreshPending = true; return; } schedule(0); };
+    const run = async () => {
+      if (destroyed || pending) return;
+      if (doc.visibilityState === 'hidden') { schedule(interval); return; }
+      pending = true; refreshPending = false;
+      const abort = new AbortController(); controller = abort;
+      const deadline = setTimeout(() => abort.abort(), 30000);
+      try {
+        const status = await options.load({ signal: abort.signal });
+        if (!destroyed && !abort.signal.aborted) options.onUpdate(status);
+      } catch (error) {
+        if (!destroyed && !abort.signal.aborted && typeof options.onError === 'function') { try { options.onError(error); } catch {} }
+      } finally {
+        clearTimeout(deadline); abort.abort(); controller = null; pending = false;
+        schedule(refreshPending ? 0 : interval);
+      }
+    };
+    const visibility = () => { if (doc.visibilityState === 'hidden') controller?.abort(); else refresh(); };
+    doc.addEventListener('visibilitychange', visibility);
+    window.addEventListener('focus', refresh);
+    refresh();
+    return { refresh, destroy() { if (destroyed) return; destroyed = true; clearTimeout(timer); controller?.abort(); doc.removeEventListener('visibilitychange', visibility); window.removeEventListener('focus', refresh); } };
+  }
+  const compatibilityReservedKeys = new Set(['version', 'mounted', 'instances', 'mount', 'mountChat', 'observeNotifications', '__primary']);
   const globalAPI = {
     version: '0.6.0',
     mounted: false,
     __primary: null,
+    observeNotifications,
     instances: () => Array.from(liveInstances),
     mountChat(hostEl, options = {}) {
       return globalAPI.mount(hostEl, options, chatOnlyOption);
