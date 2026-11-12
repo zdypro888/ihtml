@@ -7352,7 +7352,7 @@
       async reviewToolConfirmations(records) {
         const selected=records.filter(rec=>this.needsConfirmationReview(rec));
         if(!selected.length)return;
-        const draft=this.dom.input.value,epoch=requestEpoch,user=resolvedUser,request=T('refresh_confirmation_request');
+        const draft=this.dom.input.value,epoch=requestEpoch,user=resolvedUser,request=T('review_confirmation_request');
         try {return await this.send(request,selected.map(rec=>rec.call.id||rec.id));}
         finally {
           // 程序发出的核对请求不吞掉用户在切换列表前保留的草稿。
