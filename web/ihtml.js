@@ -5793,9 +5793,15 @@
         if(!t.previousAnswers.some(v=>v.id===id))t.previousAnswers.push({id,text:t.text,format:t.contentFormat,at:t.answerAt});
         // 原文仍由宿主持久保存；单个视图限制回放窗口，避免自动续办无限增大 DOM。
         if(t.previousAnswers.length>64){t.previousAnswers.shift();t.answerHistoryTruncated=true;}
-        if(!t.answerHistory){const box=el('details','ihtml-answer-history ihtml-think');box.append(el('summary','think-head'),el('div','t-answer-versions'));t.card.insertBefore(box,t.answer);t.answerHistory=box}
-        t.answerHistory.firstElementChild.textContent=T('answer_versions',{n:t.previousAnswers.length});
-        const body=t.answerHistory.lastElementChild;body.replaceChildren();if(t.answerHistoryTruncated)body.append(el('p','t-meta',T('answer_versions_window')));
+        // 阶段性答复属于过程记录；实时续办和历史恢复都放回同一过程区，不另占最新答复的位置。
+        if(!t.answerHistory){
+          const box=el('details','ihtml-answer-history ihtml-think'),summary=el('summary','think-head');
+          const icon=doc.createElementNS('http://www.w3.org/2000/svg','svg');icon.classList.add('t-stage-icon');icon.setAttribute('viewBox','0 0 24 24');icon.setAttribute('aria-hidden','true');icon.setAttribute('focusable','false');
+          const path=doc.createElementNS('http://www.w3.org/2000/svg','path');path.setAttribute('d','M3 11a9 9 0 1 1 2.6 7.4M3 5v6h6M12 7v5l3 2');icon.append(path);
+          summary.append(icon,el('span','t-stage-title'));box.append(summary,el('div','t-answer-versions'));t.pBody.prepend(box);t.answerHistory=box;
+        }
+        t.answerHistory.querySelector('.t-stage-title').textContent=T('answer_versions',{n:t.previousAnswers.length});
+        const body=t.answerHistory.lastElementChild;body.replaceChildren(el('p','t-stage-note',T('answer_versions_note')));if(t.answerHistoryTruncated)body.append(el('p','t-meta',T('answer_versions_window')));
         for(const v of t.previousAnswers){const row=el('section','t-prior-answer');row.append(renderAssistant(v.text,v.format,row,false));body.append(row)}
         t.answerFinal=false;
       },
@@ -6701,10 +6707,10 @@
       processStepCount(t) {
         const reasoning = t.thinkingSegments ? t.thinkingSegments.size : 0;
         const deep = t.agentState && t.agentState.mode === 'deep' && t.agentState.plan.length ? 1 : 0;
-        return t.toolCount + reasoning + deep;
+        return t.toolCount + reasoning + deep + (t.previousAnswers?.length || 0);
       },
       processSummaryText(t) {
-        if (t.unknownCount > 0) return T('tools_unknown', {n: t.unknownCount});
+        if (t.unknownCount > 0) return this.processFailureText(t, 'unknown', T('tools_unknown', {n: t.unknownCount}));
         if (t.cancelled) return T('turn_stopped');
         if (t.pendingCount > 0) return T('tools_pending', { n: t.pendingCount });
         if (!t.done) {
@@ -6719,13 +6725,24 @@
           return t.lastStatusNode && t.lastStatusNode.dataset.persistent !== 'true' ? t.lastStatusNode.textContent : T('analyzing');
         }
         if (t.turnFailed) return T('turn_failed');
-        if (t.errorCount > 0) return T('tools_failed', { n: t.errorCount });
+        if (t.errorCount > 0) return this.processFailureText(t, 'error', T('tools_failed', { n: t.errorCount }));
         if (t.agentState && t.agentState.manualPaused && t.agentState.plan.length) return T('agent_plan_paused');
         // 已结束轮次的摘要是过程入口，不把某一项提交回执当成整个业务的当前结论。
         if (Array.from(t.tools.values()).some(rec => rec.status === 'expired')) return T('trace_expired');
         const steps = this.processStepCount(t);
         if (steps > 0) return T('process_steps');
         return T('done');
+      },
+      processFailureText(t, status, fallback) {
+        // 直接使用公开回执；折叠摘要也说明哪一步为何失败，不从业务工具名猜测原因。
+        const records = Array.from(t.tools.values()).filter(rec => rec.status === status);
+        if (records.length !== 1) return fallback;
+        const rec = records[0];
+        const title = String(rec.title.textContent || '').trim();
+        const reason = String(rec.lastEvent.tool_summary || '').replace(/\s+/g, ' ').trim();
+        const detail = [title, reason].filter(Boolean).join('：');
+        // 单项错误省去泛化计数，把窄屏首行留给步骤和原因；未知状态仍显式保留。
+        return detail ? (status === 'unknown' ? fallback + ' · ' : '') + detail.slice(0, 400) : fallback;
       },
       finishCancelled(t) {
         if (!t || t.done) { this.setActive(false); return; }
@@ -6776,6 +6793,7 @@
         const elapsed = t.elapsedMS + (t.clockStartedAt == null ? 0 : performance.now() - t.clockStartedAt);
         const parts = [];
         if (t.toolCount) parts.push(T('trace_tool_count', {n: t.toolCount}));
+        if (t.previousAnswers?.length) parts.push(T('answer_versions_count', {n: t.previousAnswers.length}));
         const seconds = Math.max(0, Math.floor(elapsed / 1000));
         if (!t.elapsedUnknown) parts.push(seconds >= 3600 ? T('trace_elapsed_hours', {h:Math.floor(seconds/3600),m:Math.floor(seconds/60)%60}) : seconds >= 60 ? T('trace_elapsed_minutes', {m:Math.floor(seconds/60),s:seconds%60}) : T('trace_elapsed', {n:seconds}));
         if(!t.done&&!t.cancelled&&!t.pendingCount&&t.progressUpdatedAt){const age=Math.floor((Date.now()-t.progressUpdatedAt)/1000);if(age>=0)parts.push(age<5?T('progress_updated_now'):T('progress_updated',{n:age}));}

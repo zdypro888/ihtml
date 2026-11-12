@@ -209,7 +209,11 @@ func (s *session) appendScopeTools(tools []agent.Tool, req *agent.TurnRequest) (
 		}
 		if runErr != nil {
 			state = authorization.Unknown
-			view = ToolResultView{Title: preview.Title, Status: ihtml.ChatToolUnknown, Summary: "执行结果尚未确认，请核对原记录。"}
+			failure := agent.TaskFailureFrom(runErr, "unknown", true, claim.Invocation, nil)
+			facts, _ := json.Marshal(failure)
+			view = ToolResultView{Title: preview.Title, Status: ihtml.ChatToolUnknown, Summary: failure.Message, Result: facts}
+			// 范围回执也只保存审定失败事实，不能将失败 Handler 的原始响应旁路公开。
+			result, _ = agent.TaskFailureJSON(failure, "unknown", true, claim.Invocation, nil)
 		}
 		if original.Completion == agent.ToolCompletionAsynchronous && runErr == nil && (view.Status == "" || view.Status == ihtml.ChatToolSuccess) {
 			view.Status = ihtml.ChatToolAccepted

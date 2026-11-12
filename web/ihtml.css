@@ -2216,9 +2216,15 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
 
 .ihtml-root .t-history-more { justify-self: start; margin: 8px 0; }
 
-/* 同一请求的旧说明在实时与回放中统一归档，不能与当前阶段正文并列冒充最新事实。 */
-.ihtml-answer-history {margin:8px 0;color:var(--ui-text-muted)}
-.ihtml-answer-history .t-prior-answer {padding:8px 10px;color:var(--ui-text);border-top:1px solid var(--ui-border);line-height:1.6;overflow-wrap:anywhere}
+/* 同一请求的早期说明收纳到处理过程，最新答复始终独立可见。 */
+.ihtml-process .ihtml-answer-history {margin:0;color:var(--ui-text-muted)}
+.ihtml-answer-history > summary .t-stage-title {font-weight:500;overflow-wrap:anywhere}
+.ihtml-answer-history .t-stage-icon {width:15px;height:15px;flex:0 0 auto;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+.ihtml-answer-history .t-stage-note {margin:2px 0 8px;color:var(--ui-text-muted);font-size:12px;line-height:1.5;overflow-wrap:anywhere}
+.ihtml-answer-history .t-answer-versions {padding:0 2px 2px;min-width:0}
+.ihtml-answer-history .t-prior-answer {padding:8px 0;color:var(--ui-text);border-top:1px solid var(--ui-border);font-size:13px;line-height:1.6;overflow-wrap:anywhere}
+.ihtml-answer-history .t-prior-answer > :first-child {margin-top:0}
+.ihtml-answer-history .t-prior-answer > :last-child {margin-bottom:0}
 /* 提交语义说明是展开回执的次要信息，单卡和清单共用同一层次。 */
 .ihtml-chat .t-submission-note {display:block;margin:8px 0;color:var(--ui-text-muted);font-size:12px;line-height:1.6}
 

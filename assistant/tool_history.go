@@ -8,7 +8,7 @@ import (
 )
 
 // ToolHistoryRecord 是公开操作显示快照，不包含签名、nonce 或任何可恢复执行的授权。
-// Call 只来自宿主已脱敏的提案，Result 只来自 PresentToolResult；不能传入原始 Handler 输出。
+// Call 只来自宿主已脱敏的提案，Result 只来自 PresentToolResult 或规范化失败事实；不能传入原始 Handler 输出。
 type ToolHistoryRecord struct {
 	FlowID           string                 `json:"flowId,omitempty"`
 	ID               string                 `json:"id"`

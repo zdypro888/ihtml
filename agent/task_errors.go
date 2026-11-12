@@ -18,7 +18,9 @@ type TaskFailure struct {
 	ReceiptID      string         `json:"receipt_id,omitempty" bson:"receiptID,omitempty"`
 	ResultRef      *TaskResultRef `json:"result_ref,omitempty" bson:"resultRef,omitempty"`
 	RetryAfterMS   int64          `json:"retry_after_ms,omitempty" bson:"retryAfterMS,omitempty"`
-	cause          error
+	// Public 仅保存宿主显式公开的原因，独立于框架 Code 与执行事实。
+	Public *PublicErrorDetails `json:"public,omitempty" bson:"public,omitempty"`
+	cause  error
 }
 
 // Error 仅提供固定公开说明，禁止把底层凭据、地址或响应原文串入模型错误。
@@ -42,6 +44,10 @@ func cloneTaskFailure(f *TaskFailure) *TaskFailure {
 	}
 	out := *f
 	out.cause = nil
+	if f.Public != nil {
+		public := *f.Public
+		out.Public = &public
+	}
 	if f.ResultRef != nil {
 		ref := *f.ResultRef
 		out.ResultRef = &ref
@@ -57,6 +63,10 @@ func TaskFailureFrom(err error, execution string, admitted bool, receipt string,
 	var existing *TaskFailure
 	if errors.As(err, &existing) && existing != nil {
 		out := normalizedTaskFailure(existing)
+		var public *publicError
+		if errors.As(err, &public) && public != nil && public.details != nil {
+			out.Public = normalizedPublicError(public.details)
+		}
 		if admitted {
 			out.Admitted = true
 			out.AdmissionState = "admitted"
@@ -84,6 +94,10 @@ func TaskFailureFrom(err error, execution string, admitted bool, receipt string,
 		return out
 	}
 	f := &TaskFailure{Code: "operation_failed", ExecutionState: execution, Admitted: admitted, ReceiptID: receipt, Message: "操作未能完成；请核对当前状态和原回执。", cause: err}
+	var public *publicError
+	if errors.As(err, &public) && public != nil {
+		f.Public = normalizedPublicError(public.details)
+	}
 	if admitted {
 		f.AdmissionState = "admitted"
 	} else {
@@ -263,6 +277,14 @@ func normalizedTaskFailure(f *TaskFailure) *TaskFailure {
 	}
 	if out.Admitted && out.ExecutionState == "not_started" && (out.Code == "budget_exhausted" || out.Code == "capacity_exhausted") {
 		out.Message = "调用已登记，但资源准入未通过，Handler尚未开始；请按原记录核对。"
+	}
+	out.Public = normalizedPublicError(out.Public)
+	if out.Public != nil {
+		out.Message = out.Public.Message
+		if out.ExecutionState == "unknown" {
+			// 已知失败原因不等于确定业务没有发生；不能把 unknown 改写成可安全重试。
+			out.Message += " 当前执行结果尚未确认；请核对原回执，不自动重放。"
+		}
 	}
 	out.RetryAfterMS = max(0, min(out.RetryAfterMS, int64(86400000)))
 	return out

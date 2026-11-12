@@ -483,13 +483,11 @@ func (s *session) runConfirmedTool(ctx context.Context, cancel context.CancelFun
 		view := ToolResultView{}
 		if evidence != nil {
 			view.Title = evidence.Call.Title
-			if runErr == nil {
-				public := s.publicToolResult(ctx, evidence.Tool, evidence.Args, evidence.Result)
-				if public.Title != "" {
-					view.Title = public.Title
-				}
-				view.Summary, view.Result, view.Status = public.Summary, public.Result, public.Status
+			public := s.publicToolResult(ctx, evidence.Tool, evidence.Args, evidence.Result)
+			if public.Title != "" {
+				view.Title = public.Title
 			}
+			view.Summary, view.Result, view.Status = public.Summary, public.Result, public.Status
 		}
 		if evidence != nil && evidence.Tool.Completion == agent.ToolCompletionAsynchronous {
 			status = ihtml.ChatToolAccepted
@@ -497,9 +495,14 @@ func (s *session) runConfirmedTool(ctx context.Context, cancel context.CancelFun
 		}
 		if runErr != nil {
 			status, summary = ihtml.ChatToolError, "Not executed."
+			execution := "not_started"
 			if started {
 				status, summary = ihtml.ChatToolUnknown, "Execution outcome unknown; check the original record before retrying."
+				execution = "unknown"
 			}
+			failure := agent.TaskFailureFrom(runErr, execution, started, "", nil)
+			summary, view.Summary = failure.Message, failure.Message
+			view.Result, _ = json.Marshal(failure)
 		}
 		if runErr == nil && view.Status != "" && !(status == ihtml.ChatToolAccepted && view.Status == ihtml.ChatToolSuccess) {
 			status = view.Status

@@ -2210,8 +2210,14 @@ test('live and restored goal continuations share one flow and archive superseded
   window.restoredOriginal=original;
  });
  for(const selector of ['#a','#b']) {
-  assert.equal(await page.locator(selector+' .ihtml-msg.assistant').count(),2);const flow=page.locator(selector+' .ihtml-msg.assistant').filter({has:page.locator('.ihtml-tool')});assert.equal(await flow.count(),1);assert.match(await flow.innerText(),/CURRENT_COMPLETED_1/);assert.doesNotMatch(await flow.innerText(),/OLD_PENDING|OLD_ZERO_COMPLETED/);assert.equal(await flow.locator('.ihtml-tool').getAttribute('data-status'),'accepted');assert.equal(await flow.locator('.ihtml-answer-history').count(),1);assert.equal(await flow.locator('.ihtml-answer-history').evaluate(e=>e.open),false);await flow.locator('.ihtml-answer-history > summary').click();assert.match(await flow.innerText(),/OLD_PENDING/);assert.match(await flow.innerText(),/OLD_ZERO_COMPLETED/);
+  assert.equal(await page.locator(selector+' .ihtml-msg.assistant').count(),2);const flow=page.locator(selector+' .ihtml-msg.assistant').filter({has:page.locator('.ihtml-tool')});assert.equal(await flow.count(),1);assert.match(await flow.innerText(),/CURRENT_COMPLETED_1/);assert.doesNotMatch(await flow.innerText(),/OLD_PENDING|OLD_ZERO_COMPLETED/);assert.equal(await flow.locator('.ihtml-tool').getAttribute('data-status'),'accepted');assert.equal(await flow.locator('.ihtml-answer-history').count(),1);assert.equal(await flow.locator('.ihtml-answer-history').evaluate(e=>e.open),false);
+  // 阶段说明属于过程详情；按真实阅读路径先展开过程，再查看旧说明。
+  await flow.locator('.ihtml-process > summary').click();
+  assert.equal(await flow.locator('.ihtml-answer-history > summary').isVisible(),true);
+  await flow.locator('.ihtml-answer-history > summary').click();assert.match(await flow.innerText(),/OLD_PENDING/);assert.match(await flow.innerText(),/OLD_ZERO_COMPLETED/);
  }
+ await page.evaluate(()=>{for(const socket of sockets)socket.emit({type:'assistant_status',run_id:'r3',seq:4,flow_id:'goal-f',status:'CURRENT_COMPLETED_2'})});
+ for(const selector of ['#a','#b']){const process=page.locator(selector+' .ihtml-process');assert.equal(await process.evaluate(e=>e.open),true,'background updates preserve the reader’s process disclosure');assert.equal(await process.locator('.t-prior-answer').first().isVisible(),true);}
  assert.deepEqual(await page.locator('#a .t-prior-answer').allTextContents(),await page.locator('#b .t-prior-answer').allTextContents());
  assert.equal(await page.evaluate(()=>restoredOriginal.isConnected),true);
 });
@@ -2286,6 +2292,7 @@ test('equal revision signed proposal restores historical approval without regres
 for(const mode of ['light','dark'])for(const width of [390,1100])test(`answer versions keep live and restored presentation identical ${mode} ${width}`,async(t)=>{
  const page=await fixture(t,{width,height:900});
  await page.evaluate(async({mode,width})=>{
+  document.body.style.margin='0';
   backgroundExecution=true;
   window.call={id:'change',name:'arbitrary_write',title:'Apply selected scope',method:'POST',path:'/objects',body:{target:'one'},confirmation_nonce:'n',confirmation_token:'SIGNED'};
   window.savedMessages=[{id:'u',role:'user',content:'Original goal'},{id:'a1',role:'assistant',contentFormat:'markdown',flowId:'f',runId:'r1',content:'Review the selected scope.'}];
@@ -2310,6 +2317,9 @@ for(const mode of ['light','dark'])for(const width of [390,1100])test(`answer ve
  const compare=async()=>{await page.evaluate(()=>Promise.all(document.getAnimations().map(a=>a.finished.catch(()=>{}))));const live=await snapshot('#a'),restored=await snapshot('#b');assert.deepEqual(restored,live);assert.equal(live.answerVisible,true);assert.equal(live.authorVisible,true);assert.equal(live.archiveOpen,false);assert.equal(live.overflow,false)};
  await compare();
  assert.equal(await page.locator('#a .t-prior-answer').count(),1);
+ assert.equal(await page.locator('#a .ihtml-msg.assistant > .ihtml-answer-history').count(),0,'stage updates belong to the process, not another top-level card');
+ assert.equal(await page.locator('#a .ihtml-process > .pbody > .ihtml-answer-history').count(),1);
+ assert.match(await page.locator('#a .ihtml-process .p-meta').innerText(),/1 stage updates/);
  await page.evaluate(()=>{
   // 新一轮的结论可以与上一轮相同；身份由 flow/run 决定，文字不是去重键。
   for(const socket of [liveSocket,restoredSocket]){const base={run_id:'r3',flow_id:'f',background_replay:socket===restoredSocket};socket.emit({...base,type:'turn_start',seq:1});socket.emit({...base,type:'assistant_status',seq:2,status:'Checking the original work'});socket.emit({...base,type:'assistant_done',seq:3,message:'The original work is still running.'})}
@@ -2318,10 +2328,37 @@ for(const mode of ['light','dark'])for(const width of [390,1100])test(`answer ve
  assert.equal(await page.locator('#a .t-prior-answer').count(),2);
  await page.evaluate(async()=>{savedMessages.push({id:'a3',role:'assistant',contentFormat:'markdown',flowId:'f',runId:'r3',content:'The original work is still running.'});await restore()});
  await compare();
+ await page.locator('#b').screenshot({path:`/tmp/ihtml-stage-updates-collapsed-${mode}-${width}.png`});
+ for(const selector of ['#a','#b'])await page.locator(selector+' .ihtml-process > summary').click();
+ assert.equal(await page.locator('#b .ihtml-answer-history > summary').isVisible(),true);
+ assert.match(await page.locator('#b .ihtml-answer-history > summary').innerText(),/Stage updates · 2/);
  for(const selector of ['#a','#b'])await page.locator(selector+' .ihtml-answer-history > summary').click();
  assert.deepEqual(await snapshot('#b'),await snapshot('#a'));
  assert.equal(await page.locator('#b .t-prior-answer').first().isVisible(),true);
- await page.locator('#b').screenshot({path:`/tmp/ihtml-answer-versions-${mode}-${width}.png`});
+ assert.match(await page.locator('#b .t-stage-note').innerText(),/latest answer and operation receipts/);
+ await page.evaluate(()=>Promise.all(document.getAnimations().map(a=>a.finished.catch(()=>{}))));
+ await page.locator('#b').screenshot({path:`/tmp/ihtml-stage-updates-expanded-${mode}-${width}.png`});
+});
+
+test('stage updates remain discoverable without tools and retain content through live continuation',async t=>{
+ const page=await fixture(t,{width:390,height:844});
+ await page.evaluate(async()=>{
+  document.body.style.margin='0';backgroundExecution=true;agentModes=['deep'];
+  window.a=ihtml.mountChat('#a',{locale:'zh-CN',initialMessages:[{id:'u',role:'user',content:'更新所选资料'},{id:'a1',role:'assistant',flowId:'f',runId:'r1',content:'已读取资料，正在核对修改范围。'},{id:'a2',role:'assistant',flowId:'f',runId:'r2',content:'范围已核对，当前没有执行修改。'}]});await a.ready();a.theme.set({mode:'dark'},{persist:false});a.root.style.width='390px';while(!sockets.length)await new Promise(r=>setTimeout(r,0));
+ });
+ const flow=page.locator('#a .ihtml-msg.assistant').filter({has:page.locator('.ihtml-answer-history')}),process=flow.locator('.ihtml-process'),archive=flow.locator('.ihtml-answer-history');
+ assert.equal(await process.isVisible(),true);assert.equal(await process.evaluate(e=>e.open),false);assert.match(await process.locator('.p-title').innerText(),/处理过程/);assert.match(await process.locator('.p-meta').innerText(),/1 条阶段说明/);
+ assert.equal(await flow.locator(':scope > .ihtml-answer-history').count(),0);assert.equal(await flow.locator(':scope > .answer').innerText(),'范围已核对，当前没有执行修改。');
+ await page.locator('#a').screenshot({path:'/tmp/ihtml-stage-updates-zh-mobile-collapsed.png'});
+ await process.locator(':scope > summary').click();await archive.locator(':scope > summary').click();
+ assert.match(await archive.innerText(),/阶段性说明 · 1 条/);assert.match(await archive.innerText(),/最新答复和操作回执/);assert.match(await archive.innerText(),/正在核对修改范围/);
+ await page.evaluate(()=>Promise.all(document.getAnimations().map(a=>a.finished.catch(()=>{}))));
+ await page.locator('#a').screenshot({path:'/tmp/ihtml-stage-updates-zh-mobile-expanded.png'});
+ await page.evaluate(()=>{
+  const s=sockets[0];s.emit({type:'turn_start',run_id:'r3',flow_id:'f',seq:1,background_replay:true});s.emit({type:'assistant_done',run_id:'r3',flow_id:'f',seq:2,message:'核对完成，最新结果已保存。',background_replay:true});
+ });
+ assert.equal(await archive.evaluate(e=>e.open),true,'new stage updates preserve the reader’s expansion');assert.equal(await process.evaluate(e=>e.open),true);assert.equal(await archive.locator('.t-prior-answer').count(),2);assert.equal(await flow.locator(':scope > .answer').innerText(),'核对完成，最新结果已保存。');assert.equal(await flow.evaluate(e=>e.scrollWidth>e.clientWidth),false);
+ const messages=await page.evaluate(()=>a.chat.getMessages());assert.equal(messages.filter(m=>m.role==='assistant').length,3,'moving display content into process does not discard saved answers');
 });
 
 // 历史和通知只导航到原对话；没有签名的卡提供核对入口，不假装已经获得批准。
@@ -2459,4 +2496,22 @@ test('visible idle transport is checked periodically and destroying cancels the 
  await page.evaluate(async()=>{connectionProbeSupported=true;window.a=ihtml.mountChat('#a');await a.ready();await a.chat.send('original')});
  await page.clock.runFor(25010);assert.equal(await page.evaluate(()=>sockets[0].sent.at(-1).type),'connection_ping');
  await page.evaluate(()=>a.destroy());await page.clock.runFor(60000);assert.equal(await page.evaluate(()=>sockets.length),1);
+});
+
+// 公开错误原因在折叠过程和历史中一致；渲染为文本，不把错误描述当HTML。
+for(const status of ['error','unknown'])test(`public failure reason is visible in collapsed live and restored summaries: ${status}`,async t=>{
+ const page=await fixture(t,{width:390,height:850});
+ await page.evaluate(async status=>{
+  const call={id:'read-error',name:'arbitrary_lookup',title:'查询原记录'};
+  const summary=(status==='unknown'?'执行结果未知。':'')+'未找到请求的记录（HTTP 404）。<img src=x onerror=alert(1)>';
+  window.a=ihtml.mountChat('#a',{locale:'zh'});await a.ready();await a.chat.send('查询记录');
+  sockets[0].emit({type:'turn_start',run_id:'r',seq:1});
+  sockets[0].emit({type:'tool_result',run_id:'r',seq:2,tool_call:call,tool_status:status,tool_summary:summary});
+  sockets[0].emit({type:'assistant_done',run_id:'r',seq:3,message:'已核对'});
+  window.b=ihtml.mountChat('#b',{locale:'zh',initialMessages:[{id:'u',role:'user',content:'查询记录'},{id:'a',role:'assistant',content:'已核对'}],initialOperations:[{id:call.id,afterMessageId:'u',runId:'r',sequence:2,call,status,summary}]});await b.ready();
+ },status);
+ const live=await page.locator('#a .ihtml-process .p-title').innerText();
+ assert.match(live,/查询原记录/);assert.match(live,/HTTP 404/);
+ assert.equal(await page.locator('#b .ihtml-process .p-title').innerText(),live);
+ for(const selector of ['#a','#b']){assert.equal(await page.locator(selector+' .ihtml-process').evaluate(e=>e.open),false);assert.equal(await page.locator(selector+' .ihtml-process-head img').count(),0);}
 });

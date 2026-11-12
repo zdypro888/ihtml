@@ -1188,21 +1188,17 @@ func (p *projection) step(step agent.Step, host func(agent.Step)) {
 			}
 		}
 		status, summary := ihtml.ChatToolSuccess, "Invocation returned; no public result details were provided."
-		var admission struct {
-			Status         string `json:"status"`
-			ExecutionState string `json:"execution_state"`
-		}
-		_ = json.Unmarshal([]byte(step.Result), &admission)
+		failure, failed := agent.ParseTaskFailureJSON(step.Result)
 		switch {
-		case step.Err != "":
-			status, summary = ihtml.ChatToolError, "Tool failed."
-		case admission.Status == "not_admitted" && admission.ExecutionState == "not_started":
+		case failed && failure.AdmissionState == "not_admitted" && failure.ExecutionState == "not_started":
 			// 通用接纳协议优先于工具异步声明，不能把共享预算拒绝展示成已受理。
 			status, summary = ihtml.ChatToolCancelled, "调用未受理，原工具未执行。"
-		case admission.Status == "operation_failed" && admission.ExecutionState == "unknown":
+		case failed && failure.ExecutionState == "unknown":
 			status, summary = ihtml.ChatToolUnknown, "调用结果未知，请核对原回执。"
-		case admission.Status == "operation_failed":
+		case failed:
 			status, summary = ihtml.ChatToolError, "调用未完成，请核对执行状态与回执。"
+		case step.Err != "":
+			status, summary = ihtml.ChatToolError, "Tool failed."
 		case previewRefresh:
 			status, summary = ihtml.ChatToolCancelled, "Preview needs refreshing; nothing executed."
 		case step.ApprovalRejected:
@@ -1215,15 +1211,20 @@ func (p *projection) step(step agent.Step, host func(agent.Step)) {
 		}
 		p.toolSeq++
 		event := ihtml.ChatStreamEvent{Type: ihtml.ChatStreamToolResult, ToolID: fmt.Sprintf("%s_tool_%d", p.id, p.toolSeq), ToolName: step.ToolName, ToolStatus: status, ToolSummary: summary}
+		// 失败同样保留公开标题与结构化事实；展示钩子不能把失败/未知改成完成。
+		view := p.session.publicToolResult(p.ctx, p.tools[step.ToolName], step.Args, step.Result)
+		event.ToolTitle, event.ToolResult = view.Title, view.Result
 		if status == ihtml.ChatToolSuccess || status == ihtml.ChatToolAccepted || previewRefresh {
-			view := p.session.publicToolResult(p.ctx, p.tools[step.ToolName], step.Args, step.Result)
-			event.ToolTitle, event.ToolResult = view.Title, view.Result
 			if view.Status != "" && !(status == ihtml.ChatToolAccepted && view.Status == ihtml.ChatToolSuccess) {
 				event.ToolStatus = view.Status
 			}
 			if view.Summary != "" {
 				event.ToolSummary = view.Summary
 			}
+		}
+		if failed {
+			event.ToolSummary = failure.Message
+			event.ToolResult, _ = json.Marshal(failure)
 		}
 		if p.resumedCard != nil && p.resumedToolCallID != "" && p.resumedToolCallID == step.ToolCallID && p.resumedCard.Name == step.ToolName {
 			event.ToolID = p.resumedCard.ID
