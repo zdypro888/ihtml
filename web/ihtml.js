@@ -6628,7 +6628,8 @@
         processDot.setAttribute('aria-hidden', 'true');
         const label = el('span', 'p-title', T('process_steps'));
         const note = el('small', 'p-meta', T('analyzing'));
-        summary.append(processDot, label, note);
+        const progressLine=el('span','p-progress');progressLine.hidden=true;
+        summary.append(processDot,label,note,progressLine);
         const pBody = el('div', 'pbody');
         process.append(summary, pBody);
         const answer = el('div', 'answer');
@@ -6640,7 +6641,7 @@
         card.append(process, actions, answer);
         this.log.appendChild(card);
         const turn = {
-          card, process, processSummary: summary, processLabel: label, processDot, note, pBody, answer, actions,
+          card, process, processSummary: summary, processLabel: label, processDot, note, pBody, answer, actions, progressLine, progressSnapshot:null, progressUpdatedAt:0,
           processPinned: false, elapsedMS: 0, clockStartedAt: null, clock: 0,
           agentMode: chatAgentCore.selectMode(this.agentModes, agentMode),
           agentState: chatAgentCore.initialState(agentMode), agentOverview: null,
@@ -6724,12 +6725,29 @@
         if (t.pendingCount > 0 || t.errorCount > 0 || t.unknownCount > 0) return true;
         return Array.from(t.tools.values()).some((rec) => rec.status === 'running');
       },
+      renderProgress(t) {
+        const p=t.progressSnapshot,parts=[];
+        if(p&&!t.done&&!t.cancelled&&!t.pendingCount&&!t.unknownCount){
+          if(p.phase&&p.phase!==p.message)parts.push(p.phase);
+          const state=['queued','waiting','cooldown'].includes(p.state)?T('progress_state_'+p.state):'';
+          if(state&&state!==p.message&&state!==p.phase)parts.push(state);
+          for(const c of p.counters)parts.push(c.label+' '+c.current.toLocaleString(opts.locale)+(c.total==null||c.total===0?'':'/'+c.total.toLocaleString(opts.locale))+(c.unit?' '+c.unit:''));
+          if(p.waitReason&&p.waitReason!==p.message)parts.push(p.waitReason);
+          if(p.retryAt)parts.push(T('progress_retry',{time:new Date(p.retryAt).toLocaleTimeString(opts.locale||navigator.language)}));
+        }
+        t.progressLine.textContent=parts.join(' · ');t.progressLine.title=t.progressLine.textContent;t.progressLine.hidden=!parts.length;
+        // 折叠摘要保持紧凑，完整结构化事实按同一份快照展开查看，不创建另一张工具卡。
+        let detail=t.pBody.querySelector('.ihtml-progress-details');
+        if(parts.length){if(!detail){detail=el('div','ihtml-pline ihtml-progress-details');t.pBody.prepend(detail)}detail.textContent=[...(t.processLabel.scrollHeight>t.processLabel.clientHeight+1?[p.message]:[]),...parts].join('\n');}
+        else detail?.remove();
+      },
       renderProcessMeta(t) {
         const elapsed = t.elapsedMS + (t.clockStartedAt == null ? 0 : performance.now() - t.clockStartedAt);
         const parts = [];
         if (t.toolCount) parts.push(T('trace_tool_count', {n: t.toolCount}));
         const seconds = Math.max(0, Math.floor(elapsed / 1000));
         if (!t.elapsedUnknown) parts.push(seconds >= 3600 ? T('trace_elapsed_hours', {h:Math.floor(seconds/3600),m:Math.floor(seconds/60)%60}) : seconds >= 60 ? T('trace_elapsed_minutes', {m:Math.floor(seconds/60),s:seconds%60}) : T('trace_elapsed', {n:seconds}));
+        if(!t.done&&!t.cancelled&&!t.pendingCount&&t.progressUpdatedAt){const age=Math.floor((Date.now()-t.progressUpdatedAt)/1000);if(age>=0)parts.push(age<5?T('progress_updated_now'):T('progress_updated',{n:age}));}
         t.note.textContent = parts.join(' · ');
         t.note.hidden = parts.length === 0;
       },
@@ -6760,14 +6778,16 @@
         t.process.dataset.state = t.cancelled ? 'cancelled' : (t.turnFailed || t.errorCount > 0 ? 'error' : (t.pendingCount > 0 ? 'pending' : (t.done ? 'complete' : 'running')));
         t.process.setAttribute('aria-busy', String(!t.done));
         const status = this.processSummaryText(t);
-        t.processLabel.textContent = status;
+        t.processLabel.textContent = status;t.processLabel.title=status;
+        this.renderProgress(t);
         this.syncProcessClock(t);
         t.actions.hidden = !t.actions.childNodes.length;
         // 无实际计划时，不再用第二张“操作确认”概览重复待确认工具卡。
         if (t.agentOverview) t.agentOverview.hidden = !t.agentOverview._pinned && !t.agentState.plan.length && (t.pendingCount > 0 || t.agentState.manualPaused);
         // 通用等待提示只在摘要显示一次；不同的状态详情、错误和工具卡仍保留。
         for (const node of t.pBody.querySelectorAll('.ihtml-pline[data-persistent="false"]')) {
-          node.hidden = node.textContent.trim() === status.trim() || node.textContent.trim() === T('analyzing');
+          const clipped=t.processLabel.scrollHeight>t.processLabel.clientHeight+1;
+          node.hidden=node.textContent.trim()===status.trim()&&!clipped||node.textContent.trim()===T('analyzing');
         }
         t.pBody.hidden = !Array.from(t.pBody.children).some((node) => !node.hidden);
         t.process.classList.toggle('is-empty', t.pBody.hidden);
@@ -6787,16 +6807,16 @@
         }
       },
       clearTransientStatus(t, preserveProgress = false) {
-        if (t && !preserveProgress) t.liveStatus = '';
+        if(t&&!preserveProgress){t.liveStatus='';t.progressSnapshot=null;t.progressUpdatedAt=0;}
         if (!t || !t.pBody) return;
         for (const node of t.pBody.querySelectorAll('.ihtml-pline[data-persistent="false"]')) node.remove();
         if (t.lastStatusNode && t.lastStatusNode.dataset.persistent !== 'true') t.lastStatusNode = null;
         if (t.lastKind === 'status') t.lastKind = '';
       },
-      appendStatus(text, isError, t = this.turn) {
-        text = (text || '').trim();
+      appendStatus(text,isError,t=this.turn,progress=null,updatedAt='') {
+        text=chatTraceCore.safeText((text||'').trim(),1024);
         if (!t || !text) return;
-        if (!isError){t.liveStatus=text;if(t.text?.trim()&&!t.done){this.archiveAnswer(t);t.answerStale=true;t.answer.hidden=true;t.answer.style.display='none'}}
+        if (!isError){t.progressSnapshot=chatTraceCore.progressView(progress);const at=Date.parse(t.progressSnapshot?.updatedAt||updatedAt);t.progressUpdatedAt=Number.isFinite(at)?at:0;t.liveStatus=t.progressSnapshot?.message||text;text=t.liveStatus;if(t.text?.trim()&&!t.done){this.archiveAnswer(t);t.answerStale=true;t.answer.hidden=true;t.answer.style.display='none'}}
         let node = null;
         if (!isError) node = t.pBody.querySelector('.ihtml-pline[data-persistent="false"]');
         else if (t.lastStatusNode && t.lastStatusNode.dataset.persistent === 'true') node = t.lastStatusNode;
@@ -7185,6 +7205,7 @@
           primary.id = rec.domID + '-primary';
           rec.body.appendChild(primary);
         }
+        rec.card.dataset.hasPrimary=String(!!primary);
         if (view.reason) {
           const reason = el('div', 't-reason');
           reason.append(el('strong', '', view.reasonLabel), doc.createTextNode(view.reason));
@@ -7932,7 +7953,7 @@
         }
         switch (ev.type) {
           case 'turn_start': this.appendStatus(T('analyzing'), false, t); break;
-          case 'assistant_status': this.appendStatus(ev.status, false, t); break;
+          case 'assistant_status': this.appendStatus(ev.status||ev.progress?.message,false,t,ev.progress,ev.status_updated_at); break;
           case 'assistant_thinking': this.appendThinking(ev.thinking || '', ev, t); break;
           case 'assistant_reset': this.resetAssistant(ev, t); break;
           case 'assistant_delta': this.appendDelta(ev.delta || '', ev.content_format, t); break;

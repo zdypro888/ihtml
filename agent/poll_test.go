@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"github.com/zdypro888/ihtml/progress"
 	"testing"
 	"time"
 )
@@ -67,5 +68,31 @@ func TestPollUntilSpacesFastProbes(t *testing.T) {
 	}, nil)
 	if err != nil || got != 42 || calls != 2 {
 		t.Fatal(got, err, calls)
+	}
+}
+
+func TestPollUntilUsesStructuredChannelOnceAndPreservesCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	typed, plain := 0, 0
+	ctx = WithProgressReporter(ctx, func(progress.Snapshot) { typed++; cancel() })
+	_, err := PollUntil(ctx, time.Second, func(context.Context) (PollResult[int], error) {
+		return PollResult[int]{Progress: "legacy", ProgressSnapshot: &progress.Snapshot{Message: "structured"}}, nil
+	}, func(string) { plain++ })
+	if !errors.Is(err, context.Canceled) || typed != 1 || plain != 0 {
+		t.Fatal(err, typed, plain)
+	}
+	ctx2, cancel2 := context.WithCancel(t.Context())
+	defer cancel2()
+	_, err = PollUntil(ctx2, time.Second, func(context.Context) (PollResult[int], error) {
+		return PollResult[int]{ProgressSnapshot: &progress.Snapshot{Message: "fallback"}}, nil
+	}, func(text string) {
+		if text != "fallback" {
+			t.Error(text)
+		}
+		cancel2()
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
 	}
 }

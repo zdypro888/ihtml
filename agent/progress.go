@@ -2,7 +2,9 @@ package agent
 
 import (
 	"context"
+	"github.com/zdypro888/ihtml/progress"
 	"strings"
+	"time"
 )
 
 type statusReporterKey struct{}
@@ -35,5 +37,40 @@ func ReportStatus(ctx context.Context, text string) (sent bool) {
 		}
 	}()
 	report(text)
+	return true
+}
+
+type progressReporterKey struct{}
+
+// WithProgressReporter 为当前执行绑定结构化进度；与纯文本通道共存，不创建额外线程。
+func WithProgressReporter(ctx context.Context, report func(progress.Snapshot)) context.Context {
+	if ctx == nil || report == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, progressReporterKey{}, report)
+}
+
+// ReportProgress 仅报告经校验的公开事实；旧宿主继续收到 Message，取消后不再报告。
+func ReportProgress(ctx context.Context, snapshot progress.Snapshot) (sent bool) {
+	if ctx == nil || ctx.Err() != nil {
+		return false
+	}
+	snapshot, ok := progress.Normalize(snapshot)
+	if !ok {
+		return false
+	}
+	if snapshot.UpdatedAt.IsZero() {
+		snapshot.UpdatedAt = time.Now().UTC()
+	}
+	report, _ := ctx.Value(progressReporterKey{}).(func(progress.Snapshot))
+	if report == nil {
+		return ReportStatus(ctx, snapshot.Message)
+	}
+	defer func() {
+		if recover() != nil {
+			sent = false
+		}
+	}()
+	report(snapshot)
 	return true
 }

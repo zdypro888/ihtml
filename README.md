@@ -662,3 +662,9 @@ SDK 将同一签名提案轮次中同类操作汇总为一张卡：展示公共�
 [最小任务宿主](examples/task-host/README.md) 不依赖 iClouder、模型或云账号，可直接运行验证后台同步Handler、完整结果保存/分段读取、取消、挂起及外部事件唤醒。
 
 宿主等待原业务回执时可使用 `agent.PollUntil[T]`：只读探针返回 `PollResult[T]{Value, Done, Progress}`。共享库处理上下文取消和探针间隔，不解析 `accounts/items/rows` 等领域字段，不重试错误或发起业务写入。宿主负责授权、原API读取和完成条件/进度投影；AI仍通过已有任务工具决定是否后台执行、并发或挂起。
+
+### 结构化执行进度
+
+`agent.ReportProgress(ctx, progress.Snapshot{Message: "正在核对范围", Phase: "核对", Counters: []progress.Counter{{Label: "已处理", Unit: "个文件", Current: 7, Total: &total}}, UpdatedAt: receiptTime})` 通过当前执行通道发布事实；`agent.PollUntil` 的探针也可返回 `ProgressSnapshot`。没有结构化报告通道时自动退回原有文字摘要。
+
+计数由业务系统提供完整范围，未知总量保持 `nil`，不得用分页样例推算。可提供 `State`（running/queued/waiting/cooldown）、`WaitReason` 和 `RetryAt`；它们不改变执行、批准或完成状态。最多8项计数，负数、总量小于当前值及非法状态被拒绝。`UpdatedAt` 是原回执时间，回放不会改成重连时间。UI 折叠时展示简短摘要，展开保留完整明细；不会根据计数自行计算百分比或宣布完成。

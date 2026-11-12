@@ -2389,3 +2389,37 @@ for(const mode of ['light','dark'])for(const width of [390,1100])test(`operation
  await page.locator('#b .ihtml-tool-batch').screenshot({path:`/tmp/ihtml-review-action-${mode}-${width}.png`});
  assert.equal(await page.evaluate(()=>sockets.some(s=>s.sent.some(f=>f.type==='confirm_tool'||f.type==='confirm_tools'))),false);
 });
+
+for(const mode of ['light','dark'])for(const width of [390,1100])test(`structured progress stays compact and factual ${mode} ${width}`,async t=>{
+ const page=await fixture(t,{width,height:900});await page.clock.install({time:new Date('2026-11-12T08:00:00Z')});
+ await page.evaluate(async({mode,width})=>{
+  window.a=ihtml.mountChat('#a',{locale:'en'});await a.ready();a.theme.set({mode,primary:'#ff9f43',contrast:'#2b1700'},{persist:false});a.root.style.width=width+'px';await a.chat.send('Original goal');
+  const socket=sockets[0];socket.emit({type:'turn_start',run_id:'r',seq:1});
+  window.progress={message:'Verifying the original scope',phase:'Verify',state:'cooldown',counters:[{label:'Processed',unit:'files',current:7,total:19},{label:'Scanned',unit:'records',current:803}],wait_reason:'Provider requested a pause; api_key=PRIVATE_PROGRESS',retry_at:'2026-11-12T08:00:30Z',updated_at:'2026-11-12T07:59:50Z'};
+  for(let i=0;i<4;i++)socket.emit({type:'assistant_status',run_id:'r',seq:2+i,status:progress.message,progress});
+ },{mode,width});
+ const process=page.locator('.ihtml-process');assert.equal(await process.evaluate(e=>e.open),false);
+ assert.match(await process.locator('.p-progress').innerText(),/7\/19 files.*803 records/);assert.doesNotMatch(await process.innerText(),/PRIVATE_PROGRESS|803\/0|%/);
+ assert.match(await process.locator('.p-meta').innerText(),/10s ago/);assert.equal(await page.locator('.ihtml-msg.assistant:has(.ihtml-process)').count(),1);assert.equal(await page.locator('.ihtml-tool').count(),0);
+ assert.equal(await process.locator('.ihtml-progress-details').count(),1);
+ await process.locator('summary').click();assert.equal(await process.locator('.p-progress').isVisible(),false);assert.match(await process.locator('.ihtml-progress-details').innerText(),/Scanned 803 records/);await process.locator('summary').click();
+ assert.equal(await process.evaluate(e=>e.scrollWidth>e.clientWidth),false);
+ await process.screenshot({path:`/tmp/ihtml-progress-${mode}-${width}.png`});
+ await page.evaluate(()=>sockets[0].emit({type:'assistant_status',run_id:'r',seq:6,status:'Waiting',progress:{...progress,counters:[{label:'Processed',unit:'files',current:19,total:19}]}}));
+ assert.equal(await page.evaluate(()=>a.chat.busy),true,'counts alone do not finish the turn');
+ await page.evaluate(()=>sockets[0].emit({type:'assistant_done',run_id:'r',seq:7,message:'Original receipt returned'}));assert.equal(await process.locator('.p-progress').isVisible(),false);assert.doesNotMatch(await page.locator('#a').innerText(),/Updated (?:just now|\d+s ago)/);
+});
+
+test('replayed progress retains source update time and legacy status clears old counters',async t=>{
+ const page=await fixture(t);await page.clock.install({time:new Date('2026-11-12T08:00:00Z')});
+ await page.evaluate(async()=>{backgroundExecution=true;window.a=ihtml.mountChat('#a',{locale:'en'});await a.ready()});await page.waitForFunction(()=>sockets.length===1);
+ await page.evaluate(()=>{sockets[0].emit({type:'turn_start',run_id:'r',seq:1,background_replay:true});window.snapshot={message:'Still waiting',state:'waiting',counters:[{label:'Processed',unit:'items',current:1,total:19}],updated_at:'2026-11-12T07:59:00Z'};sockets[0].emit({type:'assistant_status',run_id:'r',seq:2,background_replay:true,status:snapshot.message,progress:snapshot})});
+ assert.match(await page.locator('.p-meta').innerText(),/60s ago/);await page.clock.fastForward(5000);
+ await page.evaluate(()=>sockets[0].emit({type:'assistant_status',run_id:'r',seq:3,background_replay:true,status:snapshot.message,progress:snapshot}));assert.match(await page.locator('.p-meta').innerText(),/65s ago/);
+ await page.evaluate(()=>sockets[0].emit({type:'assistant_status',run_id:'r',seq:4,status:'Waiting for the next receipt'}));assert.equal(await page.locator('.p-progress').isVisible(),false);assert.doesNotMatch(await page.locator('.p-meta').innerText(),/ago/);
+});
+
+test('long plain status is clamped in summary and fully readable after expansion',async t=>{
+ const page=await fixture(t,{width:390,height:900});await page.evaluate(async()=>{window.a=ihtml.mountChat('#a');await a.ready();await a.chat.send('Original');sockets[0].emit({type:'turn_start',run_id:'r',seq:1});sockets[0].emit({type:'assistant_status',run_id:'r',seq:2,status:'正在核对原任务的冻结范围，保留所有实际回执并等待外部系统返回。'.repeat(6)})});
+ const title=page.locator('.p-title');assert.equal(await title.evaluate(e=>e.scrollHeight>e.clientHeight),true);await page.locator('.ihtml-process > summary').click();assert.match(await page.locator('.pbody').innerText(),/冻结范围/);
+});

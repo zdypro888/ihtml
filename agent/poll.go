@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"github.com/zdypro888/ihtml/progress"
 	"time"
 )
 
@@ -12,6 +13,8 @@ type PollResult[T any] struct {
 	Value    T
 	Done     bool
 	Progress string
+	// ProgressSnapshot 优先报告给当前结构化通道，notify 仅作纯文本兼容。
+	ProgressSnapshot *progress.Snapshot
 }
 
 // PollUntil 只重复调用只读探针，不创建任务、不重试错误或重放写操作。
@@ -41,8 +44,18 @@ func PollUntil[T any](ctx context.Context, interval time.Duration, probe func(co
 		if result.Done {
 			return result.Value, nil
 		}
-		if notify != nil && result.Progress != "" {
-			notify(result.Progress)
+		reported := false
+		text := result.Progress
+		if result.ProgressSnapshot != nil {
+			if snapshot, ok := progress.Normalize(*result.ProgressSnapshot); ok {
+				reported = ReportProgress(ctx, snapshot)
+				if text == "" {
+					text = snapshot.Message
+				}
+			}
+		}
+		if !reported && notify != nil && text != "" {
+			notify(text)
 		}
 		if pause := interval - time.Since(started); pause > 0 {
 			timer := time.NewTimer(pause)

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"github.com/zdypro888/ihtml/progress"
 	"strings"
 	"testing"
 )
@@ -36,5 +37,25 @@ func TestStatusReporterCallbackIsolation(t *testing.T) {
 	}
 	if WithStatusReporter(nil, func(string) {}) != nil {
 		t.Fatal("missing context replaced with background")
+	}
+}
+
+func TestStructuredProgressUsesCurrentContextAndLegacyFallback(t *testing.T) {
+	total := int64(19)
+	snapshot := progress.Snapshot{Message: "waiting", State: "waiting", Counters: []progress.Counter{{Label: "processed", Unit: "items", Current: 3, Total: &total}}}
+	var typed progress.Snapshot
+	plain := 0
+	ctx := WithStatusReporter(t.Context(), func(string) { plain++ })
+	ctx = WithProgressReporter(ctx, func(s progress.Snapshot) { typed = s })
+	if !ReportProgress(ctx, snapshot) || plain != 0 || typed.UpdatedAt.IsZero() || typed.Counters[0].Current != 3 {
+		t.Fatal("typed channel missing")
+	}
+	if !ReportProgress(WithStatusReporter(t.Context(), func(string) { plain++ }), snapshot) || plain != 1 {
+		t.Fatal("legacy channel lost")
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if ReportProgress(canceled, snapshot) {
+		t.Fatal("cancelled report accepted")
 	}
 }

@@ -1226,3 +1226,12 @@ test('public operation merge matches shared persistence conformance vectors',()=
  const subset=(actual,expected)=>{for(const [key,value]of Object.entries(expected)){if(value&&typeof value==='object'&&!Array.isArray(value))subset(actual[key],value);else assert.deepEqual(actual[key],value,key)}};
  for(const vector of vectors){const before=JSON.stringify(vector);subset(chatTrace.mergeOperationRecord(vector.previous,vector.next),vector.expected);assert.equal(JSON.stringify(vector),before,vector.name)}
 });
+
+// 总量必须来自显式公开事实；计数、单位和等待说明不能借进度通道绕过脱敏。
+test('structured progress preserves units and unknown totals without guessing percentages',()=>{
+ const source={message:'Processing',phase:'Verify',state:'waiting',counters:[{label:'Processed',unit:'files',current:7,total:19},{label:'Scanned',unit:'records',current:803}],wait_reason:'api_key=PRIVATE_PROGRESS'};
+ const view=chatTrace.progressView(source);assert.equal(view.counters[1].total,null);assert.equal(view.counters[0].unit,'files');assert.doesNotMatch(JSON.stringify(view),/PRIVATE_PROGRESS/);
+ assert.equal(chatTrace.progressView({...source,counters:[{label:'x',current:20,total:19}]}),null);
+ assert.equal(chatTrace.progressView({...source,state:'completed'}),null);
+ assert.equal(source.counters[1].total,undefined);
+});

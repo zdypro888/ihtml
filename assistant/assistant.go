@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/zdypro888/ihtml/progress"
 	"reflect"
 	"strings"
 	"sync"
@@ -1010,6 +1011,11 @@ func (s *session) governTools(tools []agent.Tool, ev *ihtml.ChatClientEvent, p *
 					req.OnEvent(agent.Step{Kind: agent.StepStatus, Result: text})
 				}
 			})
+			ctx = agent.WithProgressReporter(ctx, func(snapshot progress.Snapshot) {
+				if req.OnEvent != nil {
+					req.OnEvent(agent.Step{Kind: agent.StepStatus, Result: snapshot.Message, Progress: &snapshot})
+				}
+			})
 			return handler(ctx, args)
 		}
 		out = append(out, tool)
@@ -1127,7 +1133,19 @@ func (p *projection) step(step agent.Step, host func(agent.Step)) {
 		}
 		if step.Kind == agent.StepStatus {
 			if text := strings.TrimSpace(step.Result); text != "" && len(text) <= 1024 {
-				p.send(ihtml.ChatStreamEvent{Type: ihtml.ChatStreamAssistantStatus, Status: text})
+				now := time.Now().UTC()
+				event := ihtml.ChatStreamEvent{Type: ihtml.ChatStreamAssistantStatus, Status: text, StatusUpdatedAt: &now}
+				if step.Progress != nil {
+					if snapshot, ok := progress.Normalize(*step.Progress); ok {
+						if snapshot.UpdatedAt.IsZero() {
+							snapshot.UpdatedAt = now
+						}
+						event.Progress = &snapshot
+						event.Status = snapshot.Message
+						event.StatusUpdatedAt = &snapshot.UpdatedAt
+					}
+				}
+				p.send(event)
 			}
 			return
 		}

@@ -3,8 +3,10 @@ package assistant
 import (
 	"context"
 	"encoding/json"
+	"github.com/zdypro888/ihtml/progress"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/zdypro888/ihtml"
 	"github.com/zdypro888/ihtml/agent"
@@ -71,5 +73,33 @@ func TestConfirmedToolContextCanReportProgress(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatal("confirmed progress lost", count)
+	}
+}
+
+func TestStructuredToolProgressCarriesCountersAndSourceTime(t *testing.T) {
+	at := time.Date(2026, 11, 12, 1, 2, 3, 0, time.UTC)
+	cfg := approvalConfig(t, func(ctx context.Context, _ json.RawMessage) (string, error) {
+		total := int64(19)
+		if !agent.ReportProgress(ctx, progress.Snapshot{Message: "Waiting for original result", State: "cooldown", WaitReason: "Provider requested a pause", UpdatedAt: at, Counters: []progress.Counter{{Label: "processed", Unit: "items", Current: 7, Total: &total}}}) {
+			t.Error("progress reporter missing")
+		}
+		return `{}`, nil
+	})
+	recorder := newRecorder()
+	session := openSession(t, cfg, "user", recorder)
+	card := proposedCard(t, session, recorder)
+	session.HandleEvent(t.Context(), &ihtml.ChatClientEvent{Type: ihtml.ChatClientConfirmTool, ToolCall: &card})
+	events := recorder.wait(t, ihtml.ChatStreamAssistantDone, 2)
+	found := 0
+	for _, event := range events {
+		if event.Progress != nil {
+			found++
+			if event.Status != event.Progress.Message || !event.StatusUpdatedAt.Equal(at) || event.Progress.Counters[0].Current != 7 || event.Progress.State != "cooldown" {
+				t.Fatal("progress facts changed")
+			}
+		}
+	}
+	if found != 1 {
+		t.Fatal("missing or duplicated structured event", found)
 	}
 }

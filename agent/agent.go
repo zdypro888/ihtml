@@ -12,6 +12,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"github.com/zdypro888/ihtml/progress"
 )
 
 // Tool 是领域能力暴露给 AI 的最小单元。
@@ -159,6 +160,9 @@ const (
 
 // Step 一次引擎轮次内的执行轨迹条目，用于审计与回放。
 type Step struct {
+	// Progress 是可选公开事实；Result 保留旧宿主可读摘要。
+	Progress *progress.Snapshot
+
 	// ToolCallID correlates call/result evidence across suspended segments.
 	ToolCallID string
 	// ApprovalPending is an unresolved call, never successful execution evidence.

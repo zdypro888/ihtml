@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/zdypro888/ihtml/progress"
 	"io"
 	"net/http"
 	"net/url"
@@ -258,6 +259,10 @@ type ChatReplayCompletion struct {
 }
 
 type ChatStreamEvent struct {
+	// Progress 与纯文本 Status 同步下发，旧客户端可继续只显示摘要。
+	Progress        *progress.Snapshot `json:"progress,omitempty"`
+	StatusUpdatedAt *time.Time         `json:"status_updated_at,omitempty"`
+
 	// FlowID 关联同一用户目标的多个运行轮次，仅用于公开展示，不授予执行权限。
 	FlowID string `json:"flow_id,omitempty"`
 	// RestoredApproval marks a server-restored pending run, not client history.

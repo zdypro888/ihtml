@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/zdypro888/ihtml/progress"
 	"reflect"
 	"time"
 
@@ -572,6 +573,9 @@ func (s *session) runConfirmedTool(ctx context.Context, cancel context.CancelFun
 	callCtx, stop := context.WithTimeout(agent.WithToolInvocationKey(values, agent.ToolInvocationKey(item.invocation)), s.backend.cfg.Confirmation.ToolTimeout)
 	// 进度绑定本次确认轮次，不能写回已结束的提案。
 	callCtx = agent.WithStatusReporter(callCtx, func(text string) { p.step(agent.Step{Kind: agent.StepStatus, Result: text}, nil) })
+	callCtx = agent.WithProgressReporter(callCtx, func(snapshot progress.Snapshot) {
+		p.step(agent.Step{Kind: agent.StepStatus, Result: snapshot.Message, Progress: &snapshot}, nil)
+	})
 	defer stop()
 	stopParent := context.AfterFunc(ctx, stop)
 	defer stopParent()

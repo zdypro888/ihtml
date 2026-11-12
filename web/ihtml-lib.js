@@ -6,7 +6,7 @@
   /* ---------- i18n: 内核 chrome 文案(zh/en, 宿主可经 mount strings 覆写) ---------- */
   const I18N = {
     zh: {
-      notifications_delete: '删除通知', notifications_clear: '清空通知', notifications_seen_error: '通知已显示，已读状态暂未同步。', history_title: '历史对话', history_back: '返回对话', history_loading: '正在读取…', chat_history_empty: '暂无历史对话', history_more: '更早的对话', history_retry: '重新加载', history_delete: '删除对话', history_error: '历史操作未完成，请重新核对记录。', history_unknown: '删除结果未确认，请到原记录核对，勿重复提交。',
+      progress_updated: '{n}秒前更新', progress_updated_now: '刚收到回执', progress_retry: '可重试时间：{time}', progress_state_queued: '排队中', progress_state_waiting: '等待外部结果', progress_state_cooldown: '冷却等待', notifications_delete: '删除通知', notifications_clear: '清空通知', notifications_seen_error: '通知已显示，已读状态暂未同步。', history_title: '历史对话', history_back: '返回对话', history_loading: '正在读取…', chat_history_empty: '暂无历史对话', history_more: '更早的对话', history_retry: '重新加载', history_delete: '删除对话', history_error: '历史操作未完成，请重新核对记录。', history_unknown: '删除结果未确认，请到原记录核对，勿重复提交。',
       chat_entry: 'AI 助手', notifications_push_enable:'开启系统推送', notifications_push_disable:'关闭系统推送', notifications_push_unsupported:'此浏览器暂不支持系统推送；iPhone 请从主屏幕打开应用。', notifications_push_error:'系统推送尚未设置成功，请检查通知权限后重试。', chat_title: 'AI 助手', send: '发送', stop: '停止',
       chat_latest: '回到最新', new_session: '新对话', close: '关闭', settings: '页面设置', menu: '菜单', dialog: '对话框', page_actions: '页面操作', conversation: '与 AI 助手的对话',
       refresh_models: '刷新模型', model_placeholder: '选择已加载模型, 或直接输入模型名',
@@ -130,7 +130,7 @@
       template_unassigned: '未放置内容', template_unassigned_empty: '没有未放置内容',
     },
     en: {
-      notifications_delete: 'Delete notification', notifications_clear: 'Clear notifications', notifications_seen_error: 'Notifications are shown; read status has not synced yet.', history_title: 'History', history_back: 'Back to chat', history_loading: 'Loading…', chat_history_empty: 'No saved conversations', history_more: 'Earlier conversations', history_retry: 'Reload', history_delete: 'Delete conversation', history_error: 'History request did not complete. Check the original record.', history_unknown: 'Deletion is unconfirmed. Check the original record; do not resubmit.',
+      progress_updated: 'Updated {n}s ago', progress_updated_now: 'Receipt just received', progress_retry: 'Retry time: {time}', progress_state_queued: 'Queued', progress_state_waiting: 'Waiting for external result', progress_state_cooldown: 'Cooling down', notifications_delete: 'Delete notification', notifications_clear: 'Clear notifications', notifications_seen_error: 'Notifications are shown; read status has not synced yet.', history_title: 'History', history_back: 'Back to chat', history_loading: 'Loading…', chat_history_empty: 'No saved conversations', history_more: 'Earlier conversations', history_retry: 'Reload', history_delete: 'Delete conversation', history_error: 'History request did not complete. Check the original record.', history_unknown: 'Deletion is unconfirmed. Check the original record; do not resubmit.',
       chat_entry: 'AI assistant', notifications_push_enable:'Enable system notifications', notifications_push_disable:'Disable system notifications', notifications_push_unsupported:'System notifications unavailable; on iPhone use the installed Home Screen app.', notifications_push_error:'Push setup failed. Check notification permission and retry.', chat_title: 'AI assistant', send: 'Send', stop: 'Stop',
       chat_latest: 'Jump to latest', new_session: 'New chat', close: 'Close', settings: 'Page settings', menu: 'Menu', dialog: 'Dialog', page_actions: 'Page actions', conversation: 'Conversation with the AI assistant',
       refresh_models: 'Refresh', model_placeholder: 'Pick a loaded model or type a name',
@@ -1212,7 +1212,20 @@
       return next;
     }
 
-    return { toolView, safeText, reviewView, mergeOperationRecord, operationUpdateAllowed };
+    // 公开进度使用独立协议，不解析工具名或自然语言；未知总量不会补零或生成百分比。
+    function progressView(value) {
+      if(!value||typeof value!=='object'||typeof value.message!=='string'||!value.message.trim()||value.message.length>1024)return null;
+      if(value.state&&!['running','queued','waiting','cooldown'].includes(value.state))return null;
+      if(value.counters!==undefined&&(!Array.isArray(value.counters)||value.counters.length>8))return null;
+      const counters=[];
+      for(const c of value.counters||[]) {
+        if(!c||typeof c.label!=='string'||!c.label.trim()||!Number.isSafeInteger(c.current)||c.current<0||c.total!=null&&(!Number.isSafeInteger(c.total)||c.total<c.current))return null;
+        counters.push({label:safeText(c.label,128),unit:safeText(typeof c.unit==='string'?c.unit:'',32),current:c.current,total:c.total??null});
+      }
+      const date=v=>typeof v==='string'&&Number.isFinite(Date.parse(v))?v:'';
+      return {message:safeText(value.message,1024),phase:safeText(typeof value.phase==='string'?value.phase:'',128),state:value.state||'',counters,waitReason:safeText(typeof value.wait_reason==='string'?value.wait_reason:'',512),retryAt:date(value.retry_at),updatedAt:date(value.updated_at)};
+    }
+    return { progressView, toolView, safeText, reviewView, mergeOperationRecord, operationUpdateAllowed };
   })();
 
   /* ---------- fmt: 数字/金额/时间格式化(AI 生成代码的标准件) ---------- */

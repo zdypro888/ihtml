@@ -2221,3 +2221,15 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
 .ihtml-answer-history .t-prior-answer {padding:8px 10px;color:var(--ui-text);border-top:1px solid var(--ui-border);line-height:1.6;overflow-wrap:anywhere}
 /* 提交语义说明是展开回执的次要信息，单卡和清单共用同一层次。 */
 .ihtml-chat .t-submission-note {display:block;margin:8px 0;color:var(--ui-text-muted);font-size:12px;line-height:1.6}
+
+/* 阶段/计数属于同一过程摘要，长说明展开读取，不把每次进度变成一张卡片。 */
+.ihtml-process .p-title { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.ihtml-process .p-progress { flex: 1 1 100%; grid-column: 2; margin-left: 14px; color: var(--ui-text-muted); font-size: 12px; font-weight: 400; line-height: 1.5; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.ihtml-process .p-progress[hidden] { display: none !important; }
+.ihtml-process .ihtml-progress-details { white-space: pre-line; font-variant-numeric: tabular-nums; }
+@container ihtml-chat-content (max-width: 520px) { .ihtml-process .p-progress { margin-left: 0; } }
+
+/* 展开时在正文读取完整结果，标题行不再重复同一句摘要。 */
+.ihtml-tool[open][data-has-primary="true"] > summary .t-summary { display: none; }
+
+.ihtml-process[open] .p-progress { display: none; }
