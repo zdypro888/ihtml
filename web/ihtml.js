@@ -7313,8 +7313,8 @@
         }
         if (!rec.historical && rec.status === 'pending') {
           const bar = el('div', 't-actions');
-          const okBtn = el('button', 'ok', view.confirmText);
-          const noBtn = el('button', '', view.cancelText);
+          const okBtn = this.toolAction(el('button','ok'),'confirm',view.confirmText);
+          const noBtn = this.toolAction(el('button'),'cancel',view.cancelText);
           okBtn.setAttribute('aria-label', view.confirmText + ' · ' + view.title);
           noBtn.setAttribute('aria-label', view.cancelText + ' · ' + view.title);
           const interactionBusy = !!this.confirmationBusy || this.active || this.sending || !!rec.cancelPending || !!rec.confirmPending;
@@ -7322,7 +7322,7 @@
           noBtn.disabled = interactionBusy;
           okBtn.onclick = (event) => { event.preventDefault(); okBtn.disabled = true; noBtn.disabled = true; this.confirmTool(rec); };
           noBtn.onclick = (event) => { event.preventDefault(); okBtn.disabled = true; noBtn.disabled = true; this.cancelTool(rec); };
-          bar.append(okBtn, noBtn);
+          bar.append(noBtn, okBtn);
           rec.body.appendChild(bar);
           rec.body.setAttribute('role', 'group');
           rec.body.setAttribute('aria-labelledby', rec.title.id);
@@ -7330,7 +7330,7 @@
         }
         if (this.needsConfirmationReview(rec)) {
           const bar=el('div','t-actions');
-          const refresh=el('button','t-refresh',T(rec.historical?'restore_confirmation':'refresh_confirmation'));
+          const refresh=this.toolAction(el('button','t-refresh'),'review',T(rec.historical?'restore_confirmation':'refresh_confirmation'));
           refresh.disabled=destroyed||readOnly||authRefreshing||!this.enabled||!!this.confirmationBusy||this.active||this.sending;
           refresh.title=T('restore_confirmation_hint');
           refresh.onclick=event=>{event.preventDefault();void this.reviewToolConfirmations([rec]);};
@@ -7344,6 +7344,20 @@
           const target = owner && rec.card.parentNode === owner.pBody && !owner.process.open ? owner.processSummary : rec.summary;
           if (target && target.isConnected) target.focus({ preventScroll: true });
         });
+      },
+      // 单卡与汇总共用图标/文字结构，文案更新不重建按钮，保留焦点和已有确认逻辑。
+      toolAction(button,action,label) {
+        button.classList.add('ui-btn');
+        if(button.dataset.action!==action||!button.querySelector('.t-action-label')) {
+          button.dataset.action=action;button.replaceChildren();
+          const svg=doc.createElementNS('http://www.w3.org/2000/svg','svg');
+          svg.classList.add('t-action-icon');svg.setAttribute('viewBox','0 0 24 24');svg.setAttribute('aria-hidden','true');svg.setAttribute('focusable','false');
+          const path=doc.createElementNS('http://www.w3.org/2000/svg','path');
+          path.setAttribute('d',action==='confirm'?'M12 3 20 6v6c0 4-4 7-8 9-4-2-8-5-8-9V6l8-3Z M8.5 12l2.5 2.5 4.5-5':action==='review'?'M3 12a9 9 0 0 1 15.4-6.4L21 8M21 3v5h-5M21 12A9 9 0 0 1 5.6 18.4L3 16M8 16H3v5':'m7 7 10 10M17 7 7 17');
+          svg.appendChild(path);button.append(svg,el('span','t-action-label'));
+        }
+        button.querySelector('.t-action-label').textContent=label;
+        return button;
       },
       // 公开历史和已过期签名不能消费；恢复仅发送原记录引用，绝不提交旧签名或业务调用。
       needsConfirmationReview(rec) {
@@ -7397,7 +7411,7 @@
             const list = el('details', 't-batch-list'), summary = el('summary'), items = el('div', 't-batch-items');
             list.append(summary, items);
             const bar = el('div', 't-actions'), confirm = el('button', 'ok');
-            const review=el('button','t-refresh',T('restore_confirmation'));bar.append(confirm,review);head.append(title, operation, counts);card.append(head, reason, facts, submission, list, bar);t.actions.appendChild(card);
+            const review=this.toolAction(el('button','t-refresh'),'review',T('restore_confirmation'));bar.append(review,confirm);head.append(title, operation, counts);card.append(head, reason, facts, submission, list, bar);t.actions.appendChild(card);
             g = {card, head, title, operation, reason, facts, counts, submission, list, summary, items, confirm, review, records: [], error: '', manualOpen: null};
             // 仅明确用户操作覆盖默认值；分页和状态刷新不得把手动展开的历史重新收起。
             head.addEventListener('click', () => {g.manualOpen = !card.open;if(g.manualOpen)this.setFollowing(false);});
@@ -7438,10 +7452,10 @@
           g.card.open = this.toolDisclosureOpen(records.map(rec => rec.status), g.manualOpen ?? (records.some(rec => rec.manualOpen === true) ? true : undefined));
           const pending = records.filter(rec => !rec.historical && rec.status === 'pending' && !rec.expired && rec.call.confirmation_nonce && rec.call.confirmation_token);
           g.review.hidden=!records.some(rec=>this.needsConfirmationReview(rec));
-          if(g.review.hidden)g.review.remove();else if(!g.review.isConnected)g.confirm.parentNode.appendChild(g.review);
+          if(g.review.hidden)g.review.remove();else if(!g.review.isConnected)g.confirm.parentNode.insertBefore(g.review,g.confirm);
           g.review.title=T('restore_confirmation_hint');
           g.review.disabled=destroyed||readOnly||authRefreshing||!this.enabled||this.active||this.sending||!!this.confirmationBusy;
-          g.confirm.textContent = T('tool_batch_confirm', {n: pending.length});
+          this.toolAction(g.confirm,'confirm',T('tool_batch_confirm', {n: pending.length}));
           g.confirm.hidden = pending.length === 0 || !this.modelInfo?.batch_confirmations;
           g.confirm.disabled = destroyed || readOnly || authRefreshing || !this.enabled || this.active || this.sending || !!this.confirmationBusy || pending.some(rec => rec.call.review?.blocking_reason || rec.cancelPending || rec.confirmPending);
           // 批准按钮消失或回执自动收起后，键盘焦点留在原清单摘要，不能掉回整个页面。

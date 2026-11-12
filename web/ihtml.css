@@ -1888,18 +1888,24 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
   white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
   font-family: var(--ui-font-mono); font-size: 11.5px; line-height: 1.5;
 }
-.ihtml-tool .t-actions { display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; }
-.ihtml-tool .t-actions button {
-  min-height: 32px; padding: 5px 14px; font: inherit; font-size: 13px; cursor: pointer;
-  border-radius: 8px; border: 1px solid var(--ui-control-border);
+/* 单项和汇总使用同一操作栏；恢复是次操作，批准是主操作，不再落到浏览器默认按钮。 */
+:where(.ihtml-root) :is(.ihtml-tool, .ihtml-tool-batch) .t-actions { display: flex; justify-content: flex-end; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; }
+:where(.ihtml-root) :is(.ihtml-tool, .ihtml-tool-batch) .t-actions button {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  min-height: 44px; max-width: 100%; padding: 10px 16px;
+  font: inherit; font-size: 13px; font-weight: 600; line-height: 1.4; cursor: pointer;
+  border-radius: min(var(--ui-radius), 22px); border: 1px solid var(--ui-control-border);
   background: var(--ui-surface); color: var(--ui-text);
-  transition: background 0.15s ease, border-color 0.15s ease;
+  transition: background .15s ease, border-color .15s ease;
 }
-.ihtml-tool .t-actions button:hover:not(:disabled) { background: var(--ui-surface-hover); border-color: var(--ui-primary-border); }
-.ihtml-tool .t-actions button.ok {
-  background: var(--ui-primary); border-color: var(--ui-primary); color: var(--ui-primary-contrast); font-weight: 700;
-}
-.ihtml-tool .t-actions button:disabled { opacity: 0.5; cursor: not-allowed; }
+:where(.ihtml-root) :is(.ihtml-tool, .ihtml-tool-batch) .t-actions button:hover:not(:disabled) { background: var(--ui-surface-hover); border-color: var(--ui-primary-border); }
+:where(.ihtml-root) :is(.ihtml-tool, .ihtml-tool-batch) .t-actions button.t-refresh { background: var(--ui-primary-soft); border-color: var(--ui-primary-border); color: var(--ui-primary-text); }
+:where(.ihtml-root) :is(.ihtml-tool, .ihtml-tool-batch) .t-actions button.ok { background: var(--ui-primary); border-color: var(--ui-primary); color: var(--ui-primary-contrast); }
+:where(.ihtml-root) :is(.ihtml-tool, .ihtml-tool-batch) .t-actions button.ok:hover:not(:disabled) { filter: brightness(1.08); }
+:where(.ihtml-root) :is(.ihtml-tool, .ihtml-tool-batch) .t-actions button:disabled { opacity: .5; cursor: not-allowed; }
+.ihtml-root .t-actions .t-action-icon { width: 18px; height: 18px; flex: 0 0 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.ihtml-root .t-actions [hidden] { display: none !important; }
+.ihtml-root .t-actions .t-action-label { min-width: 0; overflow-wrap: anywhere; }
 
 .ihtml-root.ihtml-mobile .ihtml-process > summary,
 .ihtml-root.ihtml-mobile .ihtml-process > .ihtml-process-head,
@@ -1908,7 +1914,7 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
 .ihtml-root.ihtml-mobile .ihtml-think > .think-head,
 .ihtml-root.ihtml-mobile .ihtml-tool > summary,
 .ihtml-root.ihtml-mobile .ihtml-tool > .t-head { min-height: 44px; }
-.ihtml-root.ihtml-mobile .ihtml-tool .t-actions button { min-height: 44px; }
+.ihtml-root.ihtml-mobile :is(.ihtml-tool, .ihtml-tool-batch) .t-actions button { min-height: 44px; }
 
 @media (max-width: 640px) {
   .ihtml-process .pbody { margin-left: 2px; padding-left: 9px; }
@@ -1924,7 +1930,7 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
   .ihtml-tool .t-summary { -webkit-line-clamp: 2; }
   .ihtml-tool .tbody { padding: 8px; }
   :is(.ihtml-tool, .ihtml-tool-batch) .t-facts { grid-template-columns: minmax(0, 1fr); }
-  .ihtml-tool .t-actions button { flex: 1 1 120px; min-height: 44px; }
+  :is(.ihtml-tool, .ihtml-tool-batch) .t-actions button { flex: 0 1 auto; min-height: 44px; }
   .ihtml-tool pre { max-height: 200px; }
 }
 
@@ -1944,8 +1950,8 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
   .ihtml-tool[data-status="error"],
   .ihtml-tool[data-status="failed"] { border-width: 2px; }
   .ihtml-chip, .ihtml-tool .t-status { border: 1px solid currentColor; }
-  .ihtml-tool .t-actions button { border: 1px solid ButtonText; }
-  .ihtml-tool .t-actions button.ok { background: Highlight; color: HighlightText; }
+  :where(.ihtml-root) :is(.ihtml-tool, .ihtml-tool-batch) .t-actions button { border: 1px solid ButtonText; }
+  :where(.ihtml-root) :is(.ihtml-tool, .ihtml-tool-batch) .t-actions button.ok { background: Highlight; color: HighlightText; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -2189,10 +2195,7 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
 .ihtml-root .ihtml-tool-batch .t-batch-items { display: grid; gap: 6px; }
 .ihtml-root .ihtml-tool-batch .t-batch-items .ihtml-tool { margin: 0; }
 
-.ihtml-root .ihtml-tool-batch > .t-actions { display: flex; flex-wrap: wrap; gap: 8px; }
-.ihtml-root .ihtml-tool-batch > .t-actions button { min-height: 44px; padding: 8px 16px; border: 1px solid var(--ui-control-border); border-radius: 8px; font: inherit; cursor: pointer; }
-.ihtml-root .ihtml-tool-batch > .t-actions button.ok { background: var(--ui-primary); border-color: var(--ui-primary); color: var(--ui-primary-contrast); font-weight: 700; }
-.ihtml-root .ihtml-tool-batch > .t-actions button:disabled { opacity: .5; cursor: not-allowed; }
+
 .ihtml-root .ihtml-tool-batch .t-facts { display: grid; gap: 6px; margin: 0; }
 .ihtml-root .ihtml-tool-batch .t-fact { display: flex; flex-wrap: wrap; gap: 8px; overflow-wrap: anywhere; }
 .ihtml-root .ihtml-tool-batch .t-fact dd { margin: 0; white-space: pre-line; }

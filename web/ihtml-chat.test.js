@@ -1353,7 +1353,7 @@ test('confirmation shows exact shared deadline, expires without confirming and o
  assert.equal(await page.locator('#a .t-actions .ok').count(),0);
  assert.equal(await page.locator('#a .t-refresh').isVisible(),true);
  await page.locator('#a .t-refresh').click();
- await page.waitForFunction(()=>sockets.some(s=>s.sent.some(m=>m.type==='user_message'&&m.messages?.some(x=>x.content.includes('刷新过期预览')))));
+ await page.waitForFunction(()=>sockets.some(s=>s.sent.some(m=>m.type==='user_message'&&m.client_context?.operation_ids?.includes('expires')&&m.messages?.some(x=>x.content.includes('只核对本次选中')))));
  assert.equal(await page.evaluate(()=>sockets.flatMap(s=>s.sent).some(m=>m.type==='confirm_tool')),false);
 });
 
@@ -2360,5 +2360,32 @@ test('restored aggregate can review nineteen original records without approving 
  await group.screenshot({path:'/tmp/ihtml-restored-confirmation-19.png'});
  await group.locator(':scope > .t-actions > .t-refresh').click();
  await page.waitForFunction(()=>sockets.some(s=>s.sent.some(f=>f.client_context?.operation_ids?.length===19)));
+ assert.equal(await page.evaluate(()=>sockets.some(s=>s.sent.some(f=>f.type==='confirm_tool'||f.type==='confirm_tools'))),false);
+});
+
+// 确认和核对按钮共享结构/尺寸，只有动作图标和主次颜色不同；不同宿主主题不另写一套按钮。
+for(const mode of ['light','dark'])for(const width of [390,1100])test(`operation action buttons share layout and accessible icons ${mode} ${width}`,async t=>{
+ const page=await fixture(t,{width,height:900});await page.evaluate(async({mode,width})=>{
+  backgroundExecution=true;
+  const original=window.fetch;window.fetch=async(...args)=>{const r=await original(...args),text=r.text;return {...r,text:async()=>JSON.stringify({...JSON.parse(await text()),batch_confirmations:true})}};
+  window.a=ihtml.mountChat('#a',{locale:'zh-CN'});await a.ready();a.theme.set({mode,primary:'#ff9f43',contrast:'#2b1700',radius:18},{persist:false});await a.chat.send('Review');
+  const socket=sockets[0];socket.emit({type:'turn_start',run_id:'r',seq:1});socket.emit({type:'confirmation_required',run_id:'r',seq:2,tool_call:{id:'one',name:'arbitrary_change',title:'修改原范围',confirmation_nonce:'fresh',confirmation_token:'SIGNED'}});socket.emit({type:'assistant_done',run_id:'r',seq:3,message:'请核对原范围'});
+  window.b=ihtml.mountChat('#b',{locale:'zh-CN',initialOperations:[0,1].map(i=>({id:'old-'+i,status:'pending',proposalRecorded:true,call:{name:'arbitrary_change',title:'修改原范围',confirmation_group:'g'}}))});await b.ready();b.theme.set({mode,primary:'#ff9f43',contrast:'#2b1700',radius:18},{persist:false});a.root.style.width=width+'px';b.root.style.width=width+'px';
+ },{mode,width});
+ const confirm=page.locator('#a .t-actions button.ok'),review=page.locator('#b .ihtml-tool-batch > .t-actions .t-refresh');
+ const dimensions=locator=>locator.evaluate(e=>{const s=getComputedStyle(e);return Object.fromEntries(['minHeight','padding','gap','borderRadius','fontSize','fontWeight','lineHeight','display','alignItems','justifyContent'].map(k=>[k,s[k]]))});
+ assert.deepEqual(await dimensions(confirm),await dimensions(review));
+ for(const button of [confirm,review]){assert.equal(await button.locator('svg[aria-hidden="true"][focusable="false"]').count(),1);assert.ok((await button.innerText()).trim());assert.equal(await button.evaluate(e=>e.scrollWidth>e.clientWidth),false)}
+ assert.equal(await review.evaluate(e=>getComputedStyle(e).color===getComputedStyle(e).backgroundColor),false);
+ assert.equal(await confirm.evaluate(e=>e.dataset.action),'confirm');assert.equal(await review.evaluate(e=>e.dataset.action),'review');
+ await review.focus();assert.equal(await review.evaluate(e=>document.activeElement===e),true);
+ // 宿主可以按既有主题覆盖圆角，两种卡片须一起生效，不靠 !important 补丁。
+ await page.addStyleTag({content:'.test-host :is(.ihtml-tool,.ihtml-tool-batch) .ui-btn {border-radius:22px}'});
+ await page.evaluate(()=>{document.querySelector('#a').classList.add('test-host');document.querySelector('#b').classList.add('test-host')});
+ for(const button of [confirm,review])assert.equal(await button.evaluate(e=>getComputedStyle(e).borderRadius),'22px');
+ await review.evaluate(e=>e.blur());
+
+ await page.locator('#a .ihtml-tool').screenshot({path:`/tmp/ihtml-confirm-action-${mode}-${width}.png`});
+ await page.locator('#b .ihtml-tool-batch').screenshot({path:`/tmp/ihtml-review-action-${mode}-${width}.png`});
  assert.equal(await page.evaluate(()=>sockets.some(s=>s.sent.some(f=>f.type==='confirm_tool'||f.type==='confirm_tools'))),false);
 });
