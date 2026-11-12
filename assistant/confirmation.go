@@ -68,7 +68,11 @@ type pendingTool struct {
 
 func (s *session) prepareTool(ctx context.Context, tool agent.Tool, args json.RawMessage, p *projection, req *agent.TurnRequest) (string, error) {
 	cfg := s.backend.cfg.Confirmation
-	if len(args) > 64<<10 || !json.Valid(args) {
+	maxArgs := 64 << 10
+	if s.backend.cfg.ScopeApproval != nil && tool.Name == authorizationRequest {
+		maxArgs = 1 << 20
+	}
+	if len(args) > maxArgs || !json.Valid(args) {
 		return "", errors.New("assistant: invalid or oversized tool arguments")
 	}
 	ctx, cancel := context.WithTimeout(ctx, cfg.ToolTimeout)
@@ -80,7 +84,12 @@ func (s *session) prepareTool(ctx context.Context, tool agent.Tool, args json.Ra
 		return "", errors.New("assistant: confirmation scope unavailable")
 	}
 	host = s.sctx
-	call, err := cfg.Preview(ctx, &host, tool, append(json.RawMessage(nil), args...))
+	var call ihtml.ProposedToolCall
+	if s.backend.cfg.ScopeApproval != nil && tool.Name == authorizationRequest {
+		call, args, err = s.prepareScopeProposal(ctx, args, p, req)
+	} else {
+		call, err = cfg.Preview(ctx, &host, tool, append(json.RawMessage(nil), args...))
+	}
 	if errors.Is(err, ErrInvalidToolArguments) {
 		return invalidToolArgumentsResult, nil
 	}
@@ -395,6 +404,10 @@ func (s *session) cancelToolLoop() {
 					s.pendingMu.Lock()
 					delete(s.pendingTools, call.ConfirmationNonce)
 					s.pendingMu.Unlock()
+					// nonce 已撤销后再回收范围，数据库等待不占用确认锁。
+					if err := s.revokePendingScope(ctx, item); err != nil {
+						ok = false
+					}
 				}
 			}
 			stop()
@@ -417,7 +430,9 @@ func (s *session) cleanupPendingTools() {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(s.ctx), s.backend.cfg.Confirmation.ToolTimeout)
 	defer cancel()
 	for _, item := range items {
-		_, _ = s.backend.cfg.Confirmation.Signer.Revoke(ctx, s.sctx.User, item.scope, item.call)
+		if ok, _ := s.backend.cfg.Confirmation.Signer.Revoke(ctx, s.sctx.User, item.scope, item.call); ok {
+			_ = s.revokePendingScope(ctx, item)
+		}
 	}
 }
 
@@ -583,7 +598,12 @@ func (s *session) runConfirmedTool(ctx context.Context, cancel context.CancelFun
 		stop()
 	}
 	host := s.sctx
-	if err := s.backend.cfg.ToolExecutionGuard(callCtx, &host, item.tool, append(json.RawMessage(nil), item.args...)); err != nil {
+	if err := func() error {
+		if s.backend.cfg.ScopeApproval != nil && scopeTool(item.tool.Name) {
+			return nil
+		}
+		return s.backend.cfg.ToolExecutionGuard(callCtx, &host, item.tool, append(json.RawMessage(nil), item.args...))
+	}(); err != nil {
 		runErr = ihtml.ErrAccessDenied
 		return
 	}

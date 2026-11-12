@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/zdypro888/ihtml/authorization"
 	"github.com/zdypro888/ihtml/progress"
 	"reflect"
 	"strings"
@@ -60,6 +61,7 @@ type Config struct {
 	// never a client claim. Already-governed Handlers still own live revocation.
 	ToolExecutionGuard func(context.Context, *ihtml.ChatSessionContext, agent.Tool, json.RawMessage) error
 	Confirmation       *ConfirmationConfig
+	ScopeApproval      *ScopeApprovalConfig
 	// NativeConfirmation and manual Confirmation are mutually exclusive.
 	NativeConfirmation *NativeConfirmationConfig
 	// PresentToolResult 仅在接口执行成功时提供公开回执；可标记部分失败或未知，不扩大批准范围。
@@ -86,6 +88,13 @@ var _ ihtml.ModelLister = (*Backend)(nil)
 
 // NewChecked validates dependencies without invoking the Engine or host hooks.
 func NewChecked(cfg Config) (*Backend, error) {
+	if cfg.ScopeApproval != nil {
+		if cfg.Confirmation == nil || cfg.ScopeApproval.StoreProvider == nil || cfg.ScopeApproval.Lifetime < 0 || cfg.ScopeApproval.Lifetime > 7*24*time.Hour {
+			return nil, errors.New("assistant: invalid scope approval config")
+		}
+		copyScope := *cfg.ScopeApproval
+		cfg.ScopeApproval = &copyScope
+	}
 	if isNil(cfg.Engine) {
 		return nil, errors.New("assistant: Engine is required")
 	}
@@ -317,34 +326,35 @@ type pendingTurn struct {
 }
 
 type session struct {
-	shutdownOnce       sync.Once
-	shutdownDone       chan struct{}
-	backend            *Backend
-	tasks              *agent.TaskRuntime
-	asyncConfirmations int
-	confirmationTasks  sync.WaitGroup
-	taskWakeDone       chan struct{}
-	taskWakeStopped    bool
-	taskWakes          map[string]taskWakeState
-	sctx               ihtml.ChatSessionContext
-	ctx                context.Context
-	cancel             context.CancelFunc
-	runner             *SessionRunner
-	wake               chan struct{}
-	done               chan struct{}
-	mu                 sync.Mutex
-	emitMu             sync.Mutex
-	queue              []pendingTurn
-	rejections         []pendingTurn
-	pendingMu          sync.Mutex
-	pendingTools       map[string]*pendingTool
-	pendingReserved    int
-	cancelTools        chan pendingTurn
-	cancelDone         chan struct{}
-	active             context.CancelFunc
-	activeOutput       *projection
-	queueRejected      bool
-	closed             bool
+	shutdownOnce         sync.Once
+	shutdownDone         chan struct{}
+	backend              *Backend
+	tasks                *agent.TaskRuntime
+	asyncConfirmations   int
+	confirmationTasks    sync.WaitGroup
+	taskWakeDone         chan struct{}
+	taskWakeStopped      bool
+	taskWakes            map[string]taskWakeState
+	sctx                 ihtml.ChatSessionContext
+	ctx                  context.Context
+	cancel               context.CancelFunc
+	runner               *SessionRunner
+	wake                 chan struct{}
+	done                 chan struct{}
+	mu                   sync.Mutex
+	emitMu               sync.Mutex
+	queue                []pendingTurn
+	rejections           []pendingTurn
+	pendingMu            sync.Mutex
+	pendingTools         map[string]*pendingTool
+	scopeApprovalBinding authorization.Binding
+	pendingReserved      int
+	cancelTools          chan pendingTurn
+	cancelDone           chan struct{}
+	active               context.CancelFunc
+	activeOutput         *projection
+	queueRejected        bool
+	closed               bool
 }
 
 // Close cancels active and queued work and waits for all host work to unwind.
@@ -375,6 +385,9 @@ func (s *session) Close() {
 func (s *session) HandleEvent(ctx context.Context, ev *ihtml.ChatClientEvent) {
 	if ev == nil || ctx == nil || ctx.Err() != nil {
 		return
+	}
+	if ev.Type == ihtml.ChatClientCancel {
+		defer s.revokeScopeApprovals(ctx)
 	}
 	if ev.Type == ihtml.ChatClientUserMessage {
 		s.restartTaskWakes(ctx)
@@ -858,6 +871,10 @@ func (s *session) run(ctx context.Context, cancel context.CancelFunc, ev *ihtml.
 		req.RequireApproval = true
 	}
 	req.StreamReasoning = false
+	req.Tools, runErr = s.appendScopeTools(req.Tools, req)
+	if runErr != nil {
+		return
+	}
 	req.Tools, runErr = s.governTools(req.Tools, ev, p, req)
 	if runErr != nil {
 		return
@@ -996,7 +1013,7 @@ func (s *session) governTools(tools []agent.Tool, ev *ihtml.ChatClientEvent, p *
 			if original.ApprovalRequired && s.backend.cfg.Confirmation != nil {
 				return s.prepareTool(ctx, original, args, p, req)
 			}
-			if guard != nil {
+			if guard != nil && !(s.backend.cfg.ScopeApproval != nil && scopeTool(original.Name)) {
 				hostContext := s.sctx
 				if err := guard(ctx, &hostContext, original, args); err != nil {
 					if errors.Is(err, ErrInvalidToolArguments) {
@@ -1259,6 +1276,9 @@ func (s *session) publicToolResult(ctx context.Context, tool agent.Tool, args js
 			view = ToolResultView{}
 		}
 	}()
+	if internal, ok := s.scopeResultView(tool, result); ok {
+		return internal
+	}
 	if fn := s.backend.cfg.PresentToolResult; fn != nil {
 		host := s.sctx
 		view = fn(ctx, &host, tool, append(json.RawMessage(nil), args...), result)

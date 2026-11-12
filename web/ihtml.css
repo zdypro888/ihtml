@@ -2233,3 +2233,13 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
 .ihtml-tool[open][data-has-primary="true"] > summary .t-summary { display: none; }
 
 .ihtml-process[open] .p-progress { display: none; }
+
+/* 大范围确认复用同一审核视图：默认折叠，按页构造列表，避免移动端被完整清单撑满。 */
+.ihtml-root .t-review-collection {margin:8px 0;border:1px solid var(--ui-border);border-radius:10px;overflow:hidden}
+.ihtml-root .t-review-collection > summary {padding:10px 12px;cursor:pointer;color:var(--ui-text);font-weight:500;overflow-wrap:anywhere}
+.ihtml-root .t-review-collection-body {padding:0 12px 12px;min-width:0}
+.ihtml-root .t-review-collection ol {max-height:240px;overflow:auto;padding:8px 0 8px 28px;margin:8px 0;overflow-wrap:anywhere;line-height:1.7}
+.ihtml-root .t-review-collection li {padding:2px 4px}
+.ihtml-root .t-review-pages {display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.ihtml-root .t-review-pages small {color:var(--ui-text-muted)}
+.ihtml-root .t-review-pages .ui-btn {min-height:40px;padding:6px 10px}

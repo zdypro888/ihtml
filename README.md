@@ -672,3 +672,11 @@ SDK 将同一签名提案轮次中同类操作汇总为一张卡：展示公共�
 ### 浏览器恢复与连接探活
 
 内置 WS 的模型能力响应声明 `connection_probe:true`。前端在 `visibilitychange`、`pageshow`、`focus`、`online` 恢复时发送带随机编号的 `connection_ping`；可见页面也每25秒探活。服务端在认证检查后直接回 `connection_pong`，不调用模型、不写对话历史、不执行业务。8秒内未收到当前连接的匹配回执时，本地替换连接、刷新票据并沿用原会话恢复；不依赖 Safari 一定上报 `close`，也不重发消息或确认。隐藏、销毁及显式断开会回收探活计时器。未声明此能力的旧后端保持原连接协议。
+
+### 先批准任务范围，再逐项执行
+
+`assistant.Config.ScopeApproval` 接受受控持久 `authorization.Store` 提供器和授权期限；共享 Mongo 适配位于 `authorization/mongostore`，与模型可写任务上下文分开。只有宿主在 `agent.Tool.ScopeTargets` 明确声明的字符串资源选择字段可用于范围授权，修改值、服务类型、版本检查字段不能由模型设为可变范围。
+
+SDK 注入 `authorization_request`、`authorization_execute`、`authorization_status`、`authorization_revoke`。请求固定工具契约、其余参数及有限目标名单，签发一张确认卡；用户批准后，AI 再用授权 ID 和目标逐项执行，可组合现有后台/并发能力。无需先为每个目标签卡；没有可信目标声明或前置条件不能固定的接口继续原确认流程。宿主 `ContinueAfterTool` 复用批准后的自动续办，目标明细由通用确认视图呈现。
+
+原 guard、业务预览校验及 Handler 在单项执行时仍然生效；稳定 invocation 和原子 claim 防止重连或模型重复提交。同一授权的已保存回执可再次读取；结果未知保留领取记录，不自动重做。大结果未能可靠保存时保留 unknown，不能把保存失败当作重新执行资格。停止同时撤销授权并复用持久执行代次屏障；普通断线保持已批准范围。新会话、权限变化、契约变化、越界目标和固定参数变化均不继承授权。

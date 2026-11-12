@@ -7197,6 +7197,24 @@
         parent.appendChild(section);
         return true;
       },
+      renderReviewCollection(rec, parent, row, side) {
+        const collection=row[side+'Collection'];if(!collection)return;
+        rec.reviewCollections ||= new Map();const key=side+'\0'+row.label;
+        const state=rec.reviewCollections.get(key)||{open:false,page:0,query:''};rec.reviewCollections.set(key,state);
+        const details=el('details','t-review-collection'),summary=el('summary','',row.label+' · '+T(side==='before'?'review_before':'review_after')+' · '+T(collection.truncated?'review_partial_list':'review_list',{n:collection.truncated?collection.items.length:collection.total}));details.append(summary);details.open=state.open;
+        const content=el('div','t-review-collection-body');details.append(content);let ready=false;
+        const mount=()=>{if(ready)return;ready=true;
+          const search=el('input','ui-input');search.type='search';search.placeholder=T('review_search');search.setAttribute('aria-label',row.label+' · '+T('review_search'));search.value=state.query;
+          const list=el('ol'),nav=el('div','t-review-pages'),prev=el('button','ui-btn',T('previous_page')),next=el('button','ui-btn',T('next_page')),meta=el('small');prev.type=next.type='button';nav.append(prev,meta,next);content.append(search,list,nav);
+          const render=()=>{const query=state.query.toLocaleLowerCase(opts.locale),items=query?collection.items.filter(v=>v.toLocaleLowerCase(opts.locale).includes(query)):collection.items;const pages=Math.max(1,Math.ceil(items.length/50));state.page=Math.max(0,Math.min(state.page,pages-1));list.replaceChildren();list.start=state.page*50+1;
+            for(const value of items.slice(state.page*50,state.page*50+50))list.append(el('li','',value));
+            if(!items.length)list.append(el('li','t-review-empty',T('review_no_matches')));
+            meta.textContent=T('review_page',{page:state.page+1,pages,n:items.length});prev.disabled=state.page===0;next.disabled=state.page===pages-1;list.scrollTop=0;
+          };
+          search.oninput=()=>{state.query=search.value;state.page=0;render()};prev.onclick=()=>{state.page--;render()};next.onclick=()=>{state.page++;render()};render();
+        };
+        details.addEventListener('toggle',()=>{state.open=details.open;if(details.open)mount()});if(details.open)mount();parent.append(details);
+      },
       renderToolRecord(rec, ev, t) {
         if (!rec || !t) return;
         const hadFocus = rec.body.contains(doc.activeElement);
@@ -7293,6 +7311,7 @@
             }
             table.appendChild(body);section.appendChild(table);
           }
+          for(const row of review.rows){this.renderReviewCollection(rec,section,row,'before');this.renderReviewCollection(rec,section,row,'after');}
           if (review.truncated) section.appendChild(el('small', '', T('review_partial')));
           rec.body.appendChild(section);
         }

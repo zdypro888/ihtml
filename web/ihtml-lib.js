@@ -36,7 +36,7 @@
       params_title: '操作参数', debug_title: '调试详情', tools_called: '调用 {n} 个工具',
       answer_versions_window:'当前视图只保留最近64版说明；较早内容以宿主保存的历史为准。',answer_versions:'此前的说明（{n}）', process_steps: '处理过程', trace_completed: '本轮处理结束', agent_continuing:'正在继续处理原请求', background_call_returned:'后台调用已返回（{id}），业务结果以原回执为准', trace_tool_count: '{n} 条工具记录', trace_elapsed: '{n}秒', trace_elapsed_minutes:'{m}分{s}秒', trace_elapsed_hours:'{h}小时{m}分', steps_completed: '已完成 {n} 个步骤', tools_running: '正在执行 {n} 项', answering: '正在整理回答',
       reasoning_step: '分析摘要 {n}', reasoning_streaming: '正在分析', reasoning_complete: '分析完成', technical_details: '技术详情',
-      submission_receipt: '提交回执', submission_only: '已提交表示请求已受理；最终处理结果请查看执行回执和助手答复。', request_summary: '请求摘要', result_data: '返回结果', diagnostic_data: '诊断信息', tool_reason: '为什么需要确认', review_field: '设置项', review_before: '修改前', review_after: '修改后', review_missing: '未设置', review_partial: '这里只展示部分变更，请核对完整操作内容。',
+      submission_receipt: '提交回执', submission_only: '已提交表示请求已受理；最终处理结果请查看执行回执和助手答复。', request_summary: '请求摘要', result_data: '返回结果', diagnostic_data: '诊断信息', tool_reason: '为什么需要确认', review_list: '查看完整列表（{n} 项）', review_partial_list: '查看已显示的列表（{n} 项）', review_collection: '共 {n} 项', review_search: '筛选此列表', review_page: '第 {page}/{pages} 页 · {n} 项', review_no_matches: '没有匹配项', review_field: '设置项', review_before: '修改前', review_after: '修改后', review_missing: '未设置', review_partial: '这里只展示部分变更，请核对完整操作内容。',
       confirm_this_action: '确认此操作', dismiss_tool: '暂不执行', answer_complete: '回答已完成',
       tool_history_note:'记录说明', tool_history_readonly: '操作历史 · 确认范围与执行结果', tool_history_missing_proposal: '此旧记录未保存原确认范围；以下仅展示已保存的实际回执。', tool_history_more:'加载更早的操作记录',tool_history_more_failed:'加载失败，点击重试',
       tool_history_title: '操作回执 · {n} 项', tool_batch_title: '操作清单 · {n} 项', tool_batch_list: '查看完整操作清单（{n} 项）', tool_batch_confirm: '确认这 {n} 项操作', tool_batch_status: '待确认 {pending} · 处理中 {running} · 成功 {success} · 已受理 {accepted} · 异常 {error} · 结果未知 {unknown} · 已取消 {cancelled} · 已过期 {expired}',
@@ -160,7 +160,7 @@
       params_title: 'Parameters', debug_title: 'Debug', tools_called: '{n} tool calls',
       answer_versions_window:'This view retains the latest 64 updates. Earlier content depends on host history retention.',answer_versions:'Earlier updates ({n})', process_steps: 'Process', trace_completed: 'Turn finished', agent_continuing:'Continuing the original request', background_call_returned:'Background call returned ({id}); check the original receipt for the business outcome', trace_tool_count: '{n} tool records', trace_elapsed: '{n}s', trace_elapsed_minutes:'{m}m {s}s', trace_elapsed_hours:'{h}h {m}m', steps_completed: '{n} steps completed', tools_running: '{n} running', answering: 'Preparing the answer',
       reasoning_step: 'Reasoning step {n}', reasoning_streaming: 'Analyzing', reasoning_complete: 'Analysis complete', technical_details: 'Technical details',
-      submission_receipt: 'Submission receipt', submission_only: 'Submitted means the request was accepted. See the execution receipts and assistant reply for the final outcome.', request_summary: 'Request summary', result_data: 'Result', diagnostic_data: 'Diagnostics', tool_reason: 'Why confirmation is required', review_field: 'Setting', review_before: 'Before', review_after: 'After', review_missing: 'Not set', review_partial: 'Only part of the changes is shown. Review the complete operation.',
+      submission_receipt: 'Submission receipt', submission_only: 'Submitted means the request was accepted. See the execution receipts and assistant reply for the final outcome.', request_summary: 'Request summary', result_data: 'Result', diagnostic_data: 'Diagnostics', tool_reason: 'Why confirmation is required', review_list: 'Review complete list ({n} items)', review_partial_list: 'Review available list ({n} items)', review_collection: '{n} items', review_search: 'Filter this list', review_page: 'Page {page}/{pages} · {n} items', review_no_matches: 'No matching items', review_field: 'Setting', review_before: 'Before', review_after: 'After', review_missing: 'Not set', review_partial: 'Only part of the changes is shown. Review the complete operation.',
       confirm_this_action: 'Confirm this action', dismiss_tool: 'Not now', answer_complete: 'Answer complete',
       tool_history_note:'Record details', tool_history_readonly: 'Operation history · approved scope and results', tool_history_missing_proposal: 'The original approval scope was not saved for this older record. Only the saved receipt is shown.',tool_history_more:'Load earlier operations',tool_history_more_failed:'Loading failed. Retry',
       tool_history_title: 'Operation receipts · {n}', tool_batch_title: 'Operations · {n}', tool_batch_list: 'Review all {n} operations', tool_batch_confirm: 'Confirm these {n} operations', tool_batch_status: 'Pending {pending} · Running {running} · Succeeded {success} · Accepted {accepted} · Failed {error} · Unknown {unknown} · Cancelled {cancelled} · Expired {expired}',
@@ -1093,6 +1093,14 @@
       if (!review || typeof review !== 'object') return null;
       const t = typeof translator === 'function' ? translator : makeT('en');
       const rows = []; let truncated = false;
+      // 长标量清单保留有界完整值供分页查看；摘要不能冒充完整确认范围。
+      const collection = value => {
+        if(!Array.isArray(value)||value.length<=8||value.some(v=>v!==null&&typeof v==='object'))return null;
+        const items=[];let size=0,partial=false;
+        for(const v of value){if(items.length>=10000){partial=true;break;}const raw=String(v??'');if(raw.length>4096)partial=true;const text=safeText(raw,4096);size+=text.length;if(size>1048576){partial=true;break;}items.push(text);}
+        if(partial)truncated=true;
+        return {items,total:value.length,truncated:partial};
+      };
       const display = value => {
         if (value === undefined) return t('review_missing');
         const text = technicalText(value, t);
@@ -1112,7 +1120,8 @@
           }
           return;
         }
-        const left = display(before), right = display(after);
+        const beforeCollection=collection(before),afterCollection=collection(after);
+        const left=beforeCollection?t('review_collection',{n:beforeCollection.total}):display(before),right=afterCollection?t('review_collection',{n:afterCollection.total}):display(after);
         let label = path || t('review_field');
         if (typeof fieldLabel === 'function') {
           try {
@@ -1121,7 +1130,7 @@
             if (typeof supplied === 'string' && supplied) label = safeText(supplied, 320);
           } catch { /* keep the original field path */ }
         }
-        if (left !== right || (truncated && JSON.stringify(before) !== JSON.stringify(after))) rows.push({label, before: left, after: right});
+        if (left !== right || ((truncated||beforeCollection||afterCollection) && JSON.stringify(before) !== JSON.stringify(after))) rows.push({label, before: left, after: right,...(beforeCollection?{beforeCollection}:{}),...(afterCollection?{afterCollection}:{})});
         if (depth >= 4 && (object(before) || object(after))) truncated = true;
       };
       visit(review.before, review.after, '', 0);

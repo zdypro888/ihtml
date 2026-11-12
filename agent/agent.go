@@ -52,6 +52,9 @@ type Tool struct {
 	GroupSensitive          bool // true 表示不得暴露给群共享会话
 	// ApprovalRequired marks a destructive capability for the host's approval
 	// wrapper. Runtime alone does not verify approvals; hosts must gate execution.
+	// ScopeTargets 是宿主明确允许范围授权的资源选择字段（RFC6901）；空值保持单项确认。
+	// 只声明资源身份字段，不能声明操作模式、修改值或业务版本检查字段。
+	ScopeTargets     []string
 	ApprovalRequired bool
 	// InputSchema 是 JSON Schema（object 类型）。
 	InputSchema map[string]any
