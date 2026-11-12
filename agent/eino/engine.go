@@ -321,11 +321,13 @@ func (e *Engine) RunTurn(ctx context.Context, req *ai.TurnRequest) (turnResult *
 	var replayedToolCall func(string, string) bool
 	var rejectedToolCall func(string, string) bool
 	var approvalArguments func(string, string) json.RawMessage
+	var toolMetadata func(string) ai.ToolMetadata
 	if toolScope != nil {
 		blockedToolCall = toolScope.blocked
 		replayedToolCall = toolScope.replayed
 		rejectedToolCall = toolScope.rejected
 		approvalArguments = toolScope.approvalArguments
+		toolMetadata = toolScope.metadata
 	}
 	runOptions := turnRunOptions(e.cfg.Provider, req)
 	if e.cfg.Provider == ProviderOpenAI && e.cfg.OpenAIAPI == "responses" {
@@ -363,7 +365,7 @@ func (e *Engine) RunTurn(ctx context.Context, req *ai.TurnRequest) (turnResult *
 		iter = runner.Run(ctx, msgs, runOptions...)
 	}
 	result, err := collect(iter, req.OnEvent, req.OnDelta, req.StreamReasoning,
-		outputLimit, blockedToolCall, replayedToolCall, toolCompletions(req.Tools), toolObservation{rejected: rejectedToolCall, args: approvalArguments})
+		outputLimit, blockedToolCall, replayedToolCall, toolCompletions(req.Tools), toolObservation{rejected: rejectedToolCall, args: approvalArguments, metadata: toolMetadata})
 	terminalFailure := err != nil || result != nil && result.FinishReason == "agent_error"
 	if terminalFailure && managedSession {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
@@ -562,6 +564,12 @@ func (e *Engine) newDeepAgent(
 		return nil, nil, err
 	}
 	toolScope.tasks, toolScope.taskScope, toolScope.taskApproval = req.Tasks, ai.TaskScope(req), req.RequireApproval
+	toolScope.onEvent = req.OnEvent
+	toolScope.metadata = func(name string) ai.ToolMetadata {
+		t := toolScope.tools[name]
+		t.Name = name
+		return ai.ResolveToolMetadata(t, e)
+	}
 	dynamicTools := make([]tool.BaseTool, 0, len(req.Tools))
 	immediateTools := make([]tool.BaseTool, 0, 2)
 	for _, t := range req.Tools {
@@ -1005,10 +1013,17 @@ func readStream(sr *schema.StreamReader[*schema.Message], role schema.RoleType, 
 type toolObservation struct {
 	rejected func(string, string) bool
 	args     func(string, string) json.RawMessage
+	metadata func(string) ai.ToolMetadata
 }
 
 func collect(iter *adk.AsyncIterator[*adk.AgentEvent], onEvent func(ai.Step), onDelta func(string), showReasoning bool, maxTokens int, blockedToolCall, replayedToolCall func(string, string) bool, completions map[string]ai.ToolCompletion, observations ...toolObservation) (*ai.TurnResult, error) {
 	res := &ai.TurnResult{}
+	toolTitle := func(name string) string {
+		if len(observations) > 0 && observations[0].metadata != nil {
+			return observations[0].metadata(name).Title
+		}
+		return ""
+	}
 	// tool_call 步骤按 ToolCallID 待配对；结果事件到达时回填。
 	pending := map[string]int{} // tool call id -> res.Steps 下标
 	var finalText string
@@ -1119,6 +1134,7 @@ func collect(iter *adk.AsyncIterator[*adk.AgentEvent], onEvent func(ai.Step), on
 					ToolCallID: tc.ID,
 					Kind:       ai.StepToolCall,
 					ToolName:   tc.Function.Name,
+					ToolTitle:  toolTitle(tc.Function.Name),
 					Args:       json.RawMessage(tc.Function.Arguments),
 					Completion: completions[tc.Function.Name],
 				}
@@ -1136,7 +1152,7 @@ func collect(iter *adk.AsyncIterator[*adk.AgentEvent], onEvent func(ai.Step), on
 			idx, found := pending[msg.ToolCallID]
 			if !found {
 				// 理论上不会发生；单独记一条避免丢审计。
-				res.Steps = append(res.Steps, ai.Step{Kind: ai.StepToolCall, ToolCallID: msg.ToolCallID, ToolName: mo.ToolName, Result: msg.Content, Completion: completions[mo.ToolName]})
+				res.Steps = append(res.Steps, ai.Step{Kind: ai.StepToolCall, ToolCallID: msg.ToolCallID, ToolName: mo.ToolName, ToolTitle: toolTitle(mo.ToolName), Result: msg.Content, Completion: completions[mo.ToolName]})
 				idx = len(res.Steps) - 1
 			} else {
 				delete(pending, msg.ToolCallID)

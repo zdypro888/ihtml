@@ -49,7 +49,11 @@ const (
 	ChatStreamTurnContext     = "turn_context"
 	ChatStreamAssistantStatus = "assistant_status"
 	// ChatStreamTaskComplete 是会话级调用终态通知，不代表业务成功或自动开启模型轮次。
-	ChatStreamTaskComplete      = "task_complete"
+	ChatStreamTaskComplete = "task_complete"
+	// ChatStreamTaskProgress 是原目标后台调用已持久化的公开进度，不启动模型或证明业务完成。
+	ChatStreamTaskProgress = "task_progress"
+	// ChatStreamTaskScopeStatus 是当前会话可停止任务的权威快照，不属于某个历史轮次。
+	ChatStreamTaskScopeStatus   = "task_scope_status"
 	ChatStreamAssistantThinking = "assistant_thinking"
 	ChatStreamAssistantDelta    = "assistant_delta"
 	// ChatStreamAssistantSnapshot 是后台重连的完整文本快照，替换该轮已有文本，不是追加。
@@ -260,6 +264,7 @@ type ChatReplayCompletion struct {
 }
 
 type ChatStreamEvent struct {
+	TaskScope *ChatTaskScopeStatus `json:"task_scope,omitempty"`
 	// ProbeID 仅用于连接探活回执，不属于对话、确认或业务事件。
 	ProbeID string `json:"probe_id,omitempty"`
 	// Progress 与纯文本 Status 同步下发，旧客户端可继续只显示摘要。
@@ -455,6 +460,19 @@ type ChatBackend interface {
 type ChatSession interface {
 	HandleEvent(ctx context.Context, ev *ChatClientEvent)
 	Close()
+}
+
+// ChatTaskScopeStatus 只公开当前作用域的活跃计数，不包含任务参数或新的执行授权。
+type ChatTaskScopeStatus struct {
+	ActiveTasks int       `json:"active_tasks"`
+	ActiveWaits int       `json:"active_waits"`
+	CanStop     bool      `json:"can_stop"`
+	CheckedAt   time.Time `json:"checked_at"`
+}
+
+// ChatSessionStateProvider 在重连回放后提供当前只读状态；旧展示事件不能代表现在仍可操作。
+type ChatSessionStateProvider interface {
+	SnapshotEvents(context.Context) ([]ChatStreamEvent, error)
 }
 
 // ModelLister 是 ChatBackend 的可选扩展: 提供可用模型列表。

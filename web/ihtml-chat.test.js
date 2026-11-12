@@ -2166,7 +2166,7 @@ for(const mode of ['light','dark'])for(const width of [390,1100])test(`live and 
   const styles=e=>e?Object.fromEntries(['color','backgroundColor','borderColor','borderRadius','fontSize','fontWeight','lineHeight','padding','margin','display'].map(k=>[k,getComputedStyle(e)[k]])):null;
   return {author:article.querySelector('.author')?.textContent,processOpen:article.querySelector('.ihtml-process').open,processNames:[...article.querySelectorAll('.pbody > .ihtml-tool')].map(c=>c.querySelector('.t-title').textContent),actionNames:[...article.querySelectorAll('.ihtml-trace-actions > .ihtml-tool')].map(c=>c.querySelector('.t-title').textContent),processStyles:styles(article.querySelector('.ihtml-process')),actionStyles:styles(article.querySelector('.ihtml-trace-actions > .ihtml-tool')),chipStyles:styles(article.querySelector('.ihtml-trace-actions .t-status')),answerStyles:styles(article.querySelector('.answer')),historyLabels:article.querySelectorAll('.t-history-label').length,overflow:article.scrollWidth>article.clientWidth};
  });
- const live=await read('#a'),history=await read('#b');assert.deepEqual(history,live);assert.equal(live.processOpen,false);assert.deepEqual(live.processNames,['tool_search','future_internal','arbitrary_read']);assert.deepEqual(live.actionNames,['Apply original scope']);assert.equal(live.historyLabels,0);assert.equal(live.overflow,false);
+ const live=await read('#a'),history=await read('#b');assert.deepEqual(history,live);assert.equal(live.processOpen,false);assert.deepEqual(live.processNames,['Tool call','Tool call','Tool call']);assert.deepEqual(live.actionNames,['Apply original scope']);assert.equal(live.historyLabels,0);assert.equal(live.overflow,false);
  assert.equal(await page.locator('#a .ihtml-trace-actions button:visible').count(),2);assert.equal(await page.locator('#b .ihtml-trace-actions button.ok:visible').count(),0);
  for(const selector of ['#a','#b']) {await page.locator(selector+' .ihtml-process > summary').click();assert.equal(await page.locator(selector+' .pbody > .ihtml-tool').first().isVisible(),true);await page.locator(selector+' .pbody > .ihtml-tool > summary').first().click();assert.match(await page.locator(selector+' .pbody > .ihtml-tool').first().innerText(),/checked/)}
  await page.locator('#b').screenshot({path:`/tmp/ihtml-process-history-${mode}-${width}.png`});
@@ -2514,4 +2514,200 @@ for(const status of ['error','unknown'])test(`public failure reason is visible i
  assert.match(live,/查询原记录/);assert.match(live,/HTTP 404/);
  assert.equal(await page.locator('#b .ihtml-process .p-title').innerText(),live);
  for(const selector of ['#a','#b']){assert.equal(await page.locator(selector+' .ihtml-process').evaluate(e=>e.open),false);assert.equal(await page.locator(selector+' .ihtml-process-head img').count(),0);}
+});
+
+// 同一公开调用在实时与历史中都先展示说明，技术名只在用户展开后的详情中出现。
+for(const mode of ['light','dark'])for(const width of [390,1100])test(`readable tool steps and technical disclosure match history ${mode} ${width}`,async t=>{
+ const page=await fixture(t,{width,height:900});
+ await page.evaluate(async({mode,width})=>{
+  window.savedSteps=[
+   {call:{id:'lookup',name:'api_identity_transfer_status',title:'查询身份转移进度',body:{id:'original-job'}},status:'error',summary:'未找到原任务（HTTP 404）'},
+   {call:{id:'read',name:'task_read',title:'读取后台任务状态',body:{task_id:'original'}},status:'success',summary:'已读取原任务状态'},
+   {call:{id:'trace',name:'task_trace',title:'查看任务执行记录'},status:'success',summary:'已核对执行记录'},
+   {call:{id:'unknown',name:'plugin_future_operation',title:'plugin_future_operation'},status:'success',summary:'已返回查询结果'},
+  ];
+  window.a=ihtml.mountChat('#a',{locale:'zh'});await a.ready();a.theme.set({mode,primary:'#ff9f43',contrast:'#2b1700'},{persist:false});a.root.style.width=width+'px';await a.chat.send('核对原任务');
+  sockets[0].emit({type:'turn_start',run_id:'labels',seq:1});
+  savedSteps.forEach((step,i)=>sockets[0].emit({type:'tool_result',run_id:'labels',seq:i+2,tool_call:step.call,tool_title:i===0?step.call.name:step.call.title,tool_status:step.status,tool_summary:step.summary}));
+  sockets[0].emit({type:'assistant_done',run_id:'labels',seq:6,message:'原任务已核对。'});
+  window.b=ihtml.mountChat('#b',{locale:'zh',initialMessages:[{id:'u',role:'user',content:'核对原任务'},{id:'a',role:'assistant',content:'原任务已核对。'}],initialOperations:savedSteps.map((step,i)=>({id:step.call.id,afterMessageId:'u',runId:'labels',sequence:i+2,...step}))});await b.ready();b.theme.set({mode,primary:'#ff9f43',contrast:'#2b1700'},{persist:false});b.root.style.width=width+'px';
+ },{mode,width});
+ const snapshot=selector=>page.locator(selector+' .ihtml-process').evaluate(root=>({state:root.dataset.state,open:root.open,tools:[...root.querySelectorAll('.ihtml-tool')].map(card=>({open:card.open,title:card.querySelector('.t-title').textContent,status:card.dataset.status,head:card.querySelector('.t-head').textContent,styles:[getComputedStyle(card).color,getComputedStyle(card).backgroundColor,getComputedStyle(card.querySelector('.t-status')).color]}))}));
+ assert.deepEqual(await snapshot('#b'),await snapshot('#a'));
+ for(const selector of ['#a','#b']){
+  await page.locator(selector+' .ihtml-process > summary').click();
+  assert.deepEqual(await page.locator(selector+' .t-title').allTextContents(),['查询身份转移进度','读取后台任务状态','查看任务执行记录','工具调用']);
+  assert.doesNotMatch(await page.locator(selector+' .ihtml-process').innerText(),/api_identity_transfer_status|task_read|task_trace|plugin_future_operation/);
+  const step=page.locator(selector+' .ihtml-tool').nth(1);await step.locator(':scope > summary').click();
+  assert.match(await step.innerText(),/已读取原任务状态/);assert.doesNotMatch(await step.innerText(),/task_read/);
+  await step.locator('.t-tech > summary').click();assert.match(await step.innerText(),/task_read/);assert.match(await step.innerText(),/original/);
+  assert.equal(await step.evaluate(e=>e.scrollWidth>e.clientWidth),false,'expanded technical details stay within the tool row');
+ }
+ assert.deepEqual(await snapshot('#b'),await snapshot('#a'));
+ await page.locator('#a').screenshot({path:`/tmp/ihtml-tool-step-labels-${mode}-${width}.png`});
+});
+
+test('a failed child step does not color subsequent active work as a failed turn',async t=>{
+ const page=await fixture(t,{width:390,height:844});
+ await page.evaluate(async()=>{
+  window.a=ihtml.mountChat('#a',{locale:'zh'});await a.ready();a.theme.set({mode:'dark',primary:'#ff9f43',contrast:'#2b1700'},{persist:false});await a.chat.send('继续核对');
+  sockets[0].emit({type:'turn_start',run_id:'working',seq:1});
+  sockets[0].emit({type:'tool_result',run_id:'working',seq:2,tool_call:{id:'old',name:'custom_missing',title:'查询原任务'},tool_status:'error',tool_summary:'原记录不存在'});
+  sockets[0].emit({type:'assistant_status',run_id:'working',seq:3,status:'正在核对其他原始记录'});
+ });
+ const process=page.locator('#a .ihtml-process');assert.equal(await process.getAttribute('data-state'),'running');assert.equal(await process.evaluate(e=>e.classList.contains('error')),false);
+ await process.locator(':scope > summary').click();
+ const state=await process.evaluate(root=>({title:root.querySelector('.p-title').textContent,color:getComputedStyle(root.querySelector('.p-title')).color,childColor:getComputedStyle(root.querySelector('.t-status')).color,child:root.querySelector('.ihtml-tool').dataset.status,open:root.open}));
+ assert.equal(state.title,'正在核对其他原始记录');assert.equal(state.child,'error');assert.notEqual(state.color,state.childColor);assert.equal(state.open,true);
+ await page.evaluate(()=>sockets[0].emit({type:'assistant_status',run_id:'working',seq:4,status:'正在读取保存的结果'}));assert.equal(await process.evaluate(e=>e.open),true);
+ await page.evaluate(()=>sockets[0].emit({type:'assistant_done',run_id:'working',seq:5,message:'原任务无法找到，请核对编号。'}));
+ assert.equal(await process.getAttribute('data-state'),'error');assert.match(await process.locator('.p-title').innerText(),/查询原任务.*原记录不存在/);
+ assert.equal(await page.locator('#a .ihtml-chat-stop').count(),0);
+});
+
+test('slow work without a measured total shows its current step and elapsed time without invented progress',async t=>{
+ const page=await fixture(t,{width:390,height:844});await page.clock.install();
+ await page.evaluate(async()=>{
+  window.a=ihtml.mountChat('#a',{locale:'zh'});await a.ready();await a.chat.send('核对原任务');
+  sockets[0].emit({type:'turn_start',run_id:'slow',seq:1});
+  sockets[0].emit({type:'tool_start',run_id:'slow',seq:2,tool_call:{id:'original',name:'custom_scan',title:'核对原始文件索引'}});
+ });
+ await page.clock.runFor(6500);
+ const process=page.locator('#a .ihtml-process');assert.match(await process.locator('.p-title').innerText(),/核对原始文件索引/);assert.match(await process.locator('.p-meta').innerText(),/6秒/);
+ assert.equal(await process.locator('.p-progress').isVisible(),false);assert.doesNotMatch(await process.locator(':scope > summary').innerText(),/%|100/);
+ await page.evaluate(()=>sockets[0].emit({type:'assistant_status',run_id:'slow',seq:3,status:'等待原服务返回核对结果',progress:{message:'等待原服务返回核对结果',phase:'核对文件索引',state:'waiting',wait_reason:'远端请求尚未返回',updated_at:new Date().toISOString()}}));
+ await page.clock.runFor(6000);
+ assert.match(await process.locator('.p-title').innerText(),/等待原服务返回核对结果/);assert.match(await process.locator('.p-progress').innerText(),/核对文件索引.*远端请求尚未返回/);assert.match(await process.locator('.p-meta').innerText(),/秒前更新/);assert.doesNotMatch(await process.locator(':scope > summary').innerText(),/%/);
+});
+
+// 模型挂起后的带外进度与历史恢复走相同过程分项；单项总量不能被用作整个目标的百分比。
+for(const mode of ['light','dark'])for(const width of [390,1100])test(`suspended background progress shares history rows and disclosure ${mode} ${width}`,async t=>{
+ const page=await fixture(t,{width,height:900});
+ await page.evaluate(async({mode,width})=>{
+  backgroundExecution=true;window.a=ihtml.mountChat('#a',{locale:'zh'});await a.ready();a.theme.set({mode,primary:'#ff9f43',contrast:'#2b1700'},{persist:false});a.root.style.width=width+'px';await a.chat.send('处理原范围');window.live=sockets[0];
+  live.emit({type:'turn_start',run_id:'suspended',seq:1,flow_id:'original-flow'});live.emit({type:'assistant_done',run_id:'suspended',seq:2,flow_id:'original-flow',message:'原范围已确定，正在等待后台核对。',finish_reason:'task_waiting'});
+  window.backgroundRows=[
+   {task_id:'one',tool_name:'custom_scan',tool_title:'核对原始资料',task_state:'running',progress:{message:'正在读取文件索引',phase:'核对资料',state:'running',counters:[{label:'已核对',current:6,total:10,unit:'项'}],updated_at:'2026-11-13T01:00:00Z'}},
+   {task_id:'two',tool_name:'custom_other',tool_title:'读取关联记录',task_state:'running',progress:{message:'正在读取关联记录',state:'waiting',wait_reason:'等待原服务响应',counters:[{label:'已读',current:803,unit:'条'}],updated_at:'2026-11-13T01:00:00Z'}},
+  ].map(row=>({...row,type:'task_progress',flow_id:'original-flow',tool_id:'task-progress/'+row.task_id,tool_updated_at:'2026-11-13T01:00:01Z'}));
+  backgroundRows.forEach(row=>live.emit(row));a.chat.draft('尚未发送的草稿');
+  window.b=ihtml.mountChat('#b',{locale:'zh',initialMessages:[{id:'u',flowId:'original-flow',role:'user',content:'处理原范围'},{id:'a',flowId:'original-flow',runId:'suspended',role:'assistant',content:'原范围已确定，正在等待后台核对。'}],initialOperations:backgroundRows.map(row=>({id:row.tool_id,flowId:row.flow_id,afterMessageId:'u',taskId:row.task_id,taskState:row.task_state,progress:row.progress,updatedAt:row.tool_updated_at,status:'running',call:{name:row.tool_name,title:row.tool_title}}))});await b.ready();b.theme.set({mode,primary:'#ff9f43',contrast:'#2b1700'},{persist:false});b.root.style.width=width+'px';while(sockets.length<2||sockets.at(-1).readyState!==1)await new Promise(resolve=>setTimeout(resolve,0));window.restored=sockets.at(-1);
+ },{mode,width});
+ assert.equal(await page.locator('#a .ihtml-chat-foot button.stop').count(),1,'explicit model suspension keeps the original stop control');
+ assert.equal(await page.locator('#b .ihtml-chat-foot button.stop').count(),0,'stored running snapshots alone cannot revive stop authority');
+ const snapshot=selector=>page.locator(selector+' .ihtml-task-progress').evaluateAll(rows=>rows.map(row=>({open:row.open,state:row.dataset.taskState,title:row.querySelector('.think-title').textContent,chip:row.querySelector('.t-status').textContent,message:row.querySelector('p').textContent,facts:row.querySelector('.ihtml-progress-details').textContent,at:row.querySelector('time').dateTime,colors:[getComputedStyle(row).color,getComputedStyle(row).backgroundColor,getComputedStyle(row.querySelector('.t-status')).color]})));
+ assert.deepEqual(await snapshot('#b'),await snapshot('#a'));
+ for(const selector of ['#a','#b']){
+  assert.equal(await page.locator(selector+' .ihtml-tool').count(),0,'background updates do not create operation cards');
+  assert.match(await page.locator(selector+' .p-title').innerText(),/后台进度.*2/);assert.equal(await page.locator(selector+' .p-progress').isVisible(),false,'multiple tasks have no invented aggregate percentage');
+  await page.locator(selector+' .ihtml-process > summary').click();await page.locator(selector+' .ihtml-task-progress > summary').first().click();await page.locator(selector+' .ihtml-task-progress > summary').nth(1).click();
+  assert.match(await page.locator(selector+' .ihtml-task-progress').first().innerText(),/6\/10\s*项/);
+  assert.equal(await page.locator(selector+' .ihtml-process').evaluate(e=>e.scrollWidth>e.clientWidth),false);
+ }
+ await page.evaluate(()=>{const next={...backgroundRows[0],tool_updated_at:'2026-11-13T01:00:03Z',progress:{...backgroundRows[0].progress,updated_at:'2026-11-13T01:00:02Z',counters:[{label:'已核对',current:7,total:10,unit:'项'}]}};for(const socket of [live,restored]){socket.emit(next);socket.emit(backgroundRows[0])}});
+ assert.deepEqual(await snapshot('#b'),await snapshot('#a'));assert.equal((await snapshot('#a'))[0].open,true);assert.match((await snapshot('#a'))[0].facts,/7\/10\s*项/);
+ await page.evaluate(()=>{document.querySelector('#a').style.height='1000px'});
+ await page.locator('#a').screenshot({path:`/tmp/ihtml-task-progress-${mode}-${width}.png`});
+ await page.evaluate(()=>{for(const socket of [live,restored])socket.emit({...backgroundRows[0],task_state:'completed',tool_updated_at:'2026-11-13T01:00:04Z'})});
+ assert.deepEqual(await snapshot('#b'),await snapshot('#a'));assert.equal((await snapshot('#a'))[0].chip,'调用已返回');assert.match((await snapshot('#a'))[0].message,/最后进度/);assert.match((await snapshot('#a'))[0].facts,/7\/10\s*项/);
+ assert.equal(await page.locator('#a .ihtml-chat-foot button.stop').count(),1,'one returned call does not prove the suspended goal is complete');assert.equal(await page.locator('#a textarea').inputValue(),'尚未发送的草稿');
+});
+
+test('background progress cannot contaminate another flow or revive a completed task',async t=>{
+ const page=await fixture(t,{width:390,height:844});
+ await page.evaluate(async()=>{
+  window.a=ihtml.mountChat('#a',{locale:'zh'});await a.ready();await a.chat.send('原目标');sockets[0].emit({type:'turn_start',run_id:'old',flow_id:'old-flow',seq:1});sockets[0].emit({type:'assistant_done',run_id:'old',flow_id:'old-flow',seq:2,message:'原目标阶段已结束。'});
+  await a.chat.send('新目标');sockets[0].emit({type:'turn_start',run_id:'new',flow_id:'new-flow',seq:1});sockets[0].emit({type:'assistant_status',run_id:'new',flow_id:'new-flow',seq:2,status:'正在处理新目标'});a.chat.draft('保持草稿');
+  window.oldProgress={type:'task_progress',flow_id:'old-flow',task_id:'original',tool_name:'arbitrary_scan',tool_title:'读取原目标',task_state:'running',tool_updated_at:'2026-11-13T01:00:01Z',progress:{message:'原目标资料已读',state:'running',updated_at:'2026-11-13T01:00:00Z',counters:[{label:'已读',current:803,unit:'条'}]}};
+  sockets[0].emit(oldProgress);sockets[0].emit({...oldProgress,flow_id:'unrelated-flow',task_id:'unrelated'});sockets[0].emit({...oldProgress,flow_id:'',task_id:'missing-flow'});
+ });
+ const current=page.locator('#a .ihtml-msg.assistant').last();assert.match(await current.locator('.p-title').innerText(),/正在处理新目标/);assert.equal(await current.locator('.ihtml-task-progress').count(),0);assert.equal(await page.locator('#a .ihtml-task-progress').count(),1);assert.equal(await page.locator('#a textarea').inputValue(),'保持草稿');
+ await page.evaluate(()=>{sockets[0].emit({...oldProgress,task_state:'unknown',tool_updated_at:'2026-11-13T01:00:02Z'});sockets[0].emit({...oldProgress,tool_updated_at:'2026-11-13T01:00:03Z'});});
+ assert.equal(await page.locator('#a .ihtml-task-progress').getAttribute('data-task-state'),'unknown');
+ await page.evaluate(()=>{sockets[0].emit({...oldProgress,task_state:'completed',tool_updated_at:'2026-11-13T01:00:04Z'});sockets[0].emit({type:'assistant_done',run_id:'new',flow_id:'new-flow',seq:3,message:'新目标已核对。'});sockets[0].emit({...oldProgress,tool_updated_at:'2026-11-13T01:00:05Z'});});
+ assert.equal(await page.locator('#a .ihtml-task-progress').getAttribute('data-task-state'),'completed');assert.equal(await page.locator('#a .ihtml-chat-foot button.stop').count(),0);assert.equal(await current.locator('.answer').innerText(),'新目标已核对。');assert.equal(await page.locator('#a textarea').inputValue(),'保持草稿');
+ assert.equal(await page.evaluate(()=>sockets[0].sent.filter(e=>e.type==='user_message').length),2,'progress does not submit a model turn');
+});
+
+test('authoritative task completion wins over later delivery without reverting source progress',async t=>{
+ const page=await fixture(t);
+ await page.evaluate(async()=>{
+  window.a=ihtml.mountChat('#a',{locale:'zh'});await a.ready();await a.chat.send('核对原任务');sockets[0].emit({type:'turn_start',run_id:'r',flow_id:'f',seq:1});
+  window.row={type:'task_progress',flow_id:'f',task_id:'original',tool_name:'custom_read',tool_title:'读取原资料',task_state:'running',tool_updated_at:'2026-11-13T01:10:00Z',progress:{message:'已读取较新资料',state:'running',updated_at:'2026-11-13T01:02:00.000000002Z',counters:[{label:'已读',current:9,total:10,unit:'项'}]}};
+  sockets[0].emit(row);sockets[0].emit({...row,task_state:'queued',tool_updated_at:'2026-11-13T01:11:00Z'});
+  sockets[0].emit({...row,progress:{...row.progress,updated_at:'2026-11-13T01:02:00.000000001Z',counters:[{label:'已读',current:1,total:10,unit:'项'}]}});
+ });
+ assert.equal(await page.locator('.ihtml-task-progress').getAttribute('data-task-state'),'running');
+ await page.evaluate(()=>sockets[0].emit({...row,task_state:'completed',tool_updated_at:'2026-11-13T01:03:00Z',progress:{...row.progress,message:'较早的最终阶段',updated_at:'2026-11-13T01:01:00Z',counters:[{label:'已读',current:6,total:10,unit:'项'}]}}));
+ assert.equal(await page.locator('.ihtml-task-progress').getAttribute('data-task-state'),'completed');assert.match(await page.locator('.ihtml-task-progress .ihtml-progress-details').textContent(),/9\/10\s*项/);assert.equal(await page.locator('.ihtml-task-progress time').getAttribute('datetime'),'2026-11-13T01:02:00.000Z');
+ await page.evaluate(()=>{for(const state of ['failed','cancelled','unknown','running'])sockets[0].emit({...row,task_state:state,tool_updated_at:'2026-11-13T01:12:00Z'})});
+ assert.equal(await page.locator('.ihtml-task-progress').getAttribute('data-task-state'),'completed','a definitive terminal result cannot be rewritten by other late states');
+});
+
+test('explicit task suspension retains stop and draft without requiring any progress callbacks',async t=>{
+ const page=await fixture(t,{width:390,height:844});
+ await page.evaluate(async()=>{
+  backgroundExecution=true;window.a=ihtml.mountChat('#a',{locale:'zh'});await a.ready();await a.chat.send('后台读取');sockets[0].emit({type:'turn_start',run_id:'waiting',flow_id:'wait-flow',seq:1});sockets[0].emit({type:'assistant_done',run_id:'waiting',flow_id:'wait-flow',seq:2,message:'等待原任务结果。',finish_reason:'task_waiting'});a.chat.draft('待补充说明');
+ });
+ assert.equal(await page.locator('#a .ihtml-chat-foot button.stop').count(),1);assert.match(await page.locator('#a .p-title').innerText(),/正在等待后台结果/);
+ await page.locator('#a .ihtml-chat-foot button.stop').click();await page.waitForFunction(()=>sockets[0].sent.some(e=>e.type==='cancel'));
+ assert.equal(await page.locator('#a .ihtml-chat-foot button.stop').count(),0);assert.equal(await page.locator('#a textarea').inputValue(),'待补充说明');
+ await page.evaluate(()=>sockets[0].emit({type:'task_progress',flow_id:'wait-flow',task_id:'old',task_state:'running',tool_title:'读取原资料',progress:{message:'迟到的原快照',state:'running',updated_at:'2026-11-13T01:00:00Z'}}));
+ assert.equal(await page.locator('#a .ihtml-chat-foot button.stop').count(),0,'late progress cannot undo an explicit stop');
+});
+
+test('a late historical progress anchor cannot merge an older flow into a newer question',async t=>{
+ const page=await fixture(t);
+ await page.evaluate(async()=>{
+  window.a=ihtml.mountChat('#a',{locale:'zh',initialMessages:[{id:'new-user',flowId:'new-flow',role:'user',content:'新目标'},{id:'new-answer',flowId:'new-flow',role:'assistant',content:'新目标说明'}],initialOperations:[
+   {id:'task-progress/old',afterMessageId:'new-user',flowId:'old-flow',taskId:'old',taskState:'running',status:'running',call:{name:'custom_old',title:'旧目标读取'},progress:{message:'旧目标的最后进度',state:'running',updated_at:'2026-11-13T01:00:00Z'}},
+   {id:'new-read',afterMessageId:'new-user',flowId:'new-flow',status:'success',call:{name:'custom_new',title:'新目标读取'},summary:'新目标的回执'},
+  ]});await a.ready();
+ });
+ const newer=page.locator('#a .ihtml-msg.assistant').filter({has:page.locator('.answer', {hasText:'新目标说明'})});
+ assert.equal(await newer.count(),1);assert.equal(await newer.locator('.ihtml-task-progress').count(),0);assert.equal(await newer.locator('.ihtml-tool .t-title').textContent(),'新目标读取');
+ assert.equal(await page.locator('#a .ihtml-task-progress .think-title').textContent(),'旧目标读取');
+});
+
+test('only current task scope restores stop after history replay, without changing the draft or task ownership',async t=>{
+ const page=await fixture(t,{width:390,height:844});
+ await page.evaluate(async()=>{
+  backgroundExecution=true;window.a=ihtml.mountChat('#a',{locale:'zh',initialMessages:[{id:'u',role:'user',flowId:'old-flow',content:'读取原资料'},{id:'a',role:'assistant',flowId:'old-flow',runId:'old-run',content:'等待原结果。'}]});await a.ready();while(!sockets.length||sockets[0].readyState!==1)await new Promise(r=>setTimeout(r,0));a.chat.draft('保留待发送内容');
+  window.scope={type:'task_scope_status',task_scope:{active_tasks:2,active_waits:1,can_stop:true,checked_at:'2026-11-13T02:00:00Z'}};
+  sockets[0].emit({type:'assistant_done',flow_id:'old-flow',run_id:'old-run',seq:2,background_replay:true,finish_reason:'task_waiting',message:'旧等待'});sockets[0].emit({...scope,background_replay:true});
+ });
+ assert.equal(await page.locator('#a .ihtml-chat-foot button.stop').count(),0,'old replay is not authority for current execution');
+ await page.evaluate(()=>sockets[0].emit(scope));
+ assert.equal(await page.locator('#a .ihtml-chat-foot button.stop').count(),1);assert.equal(await page.locator('#a textarea').inputValue(),'保留待发送内容');assert.equal(await page.locator('#a .answer').last().innerText(),'等待原结果。');
+ await page.evaluate(()=>sockets[0].emit({...scope,task_scope:{...scope.task_scope,active_tasks:0,active_waits:0,can_stop:false,checked_at:'2026-11-13T01:59:00Z'}}));
+ assert.equal(await page.locator('#a .ihtml-chat-foot button.stop').count(),1,'older scope cannot discard current authority');
+ await page.locator('#a .ihtml-chat-foot button.stop').click();await page.waitForFunction(()=>sockets[0].sent.some(e=>e.type==='cancel'));
+ assert.equal(await page.locator('#a .ihtml-chat-foot button.stop').count(),0);assert.equal(await page.locator('#a textarea').inputValue(),'保留待发送内容');
+ await page.evaluate(()=>{sockets[0].emit({...scope,task_scope:{active_tasks:0,active_waits:0,can_stop:false,checked_at:'2026-11-13T02:00:02Z'}});sockets[0].emit(scope)});
+ assert.equal(await page.locator('#a .ihtml-chat-foot button.stop').count(),0,'late active snapshot cannot revive an acknowledged stop');
+});
+
+test('task scope completion clears suspension but never stops an active model run',async t=>{
+ const page=await fixture(t);
+ await page.evaluate(async()=>{
+  backgroundExecution=true;window.a=ihtml.mountChat('#a',{locale:'zh'});await a.ready();await a.chat.send('原任务');sockets[0].emit({type:'turn_start',run_id:'r',flow_id:'f',seq:1});sockets[0].emit({type:'assistant_done',run_id:'r',flow_id:'f',seq:2,finish_reason:'task_waiting',message:'等待原任务。'});
+  window.clearScope={type:'task_scope_status',task_scope:{active_tasks:0,active_waits:0,can_stop:false,checked_at:'2026-11-13T02:00:00Z'}};
+ });
+ assert.equal(await page.locator('#a .ihtml-chat-foot button.stop').count(),1);
+ await page.evaluate(()=>sockets[0].emit(clearScope));
+ assert.equal(await page.locator('#a .ihtml-chat-foot button.stop').count(),0);
+ await page.evaluate(async()=>{await a.chat.send('新请求');sockets[0].emit({type:'turn_start',run_id:'new',flow_id:'new-flow',seq:1});sockets[0].emit({...clearScope,task_scope:{...clearScope.task_scope,checked_at:'2026-11-13T02:00:02Z'}})});
+ assert.equal(await page.locator('#a .ihtml-chat-foot button.stop').count(),1,'scope state does not overwrite model run state');
+});
+
+test('task scope preserves submillisecond authority ordering',async t=>{
+ const page=await fixture(t);
+ await page.evaluate(async()=>{
+  backgroundExecution=true;window.a=ihtml.mountChat('#a',{locale:'zh'});await a.ready();await a.chat.send('核对');sockets[0].emit({type:'turn_start',run_id:'r',flow_id:'f',seq:1});sockets[0].emit({type:'assistant_done',run_id:'r',flow_id:'f',seq:2,message:'已核对'});
+  window.scopeAt=(checked_at,can_stop)=>({type:'task_scope_status',task_scope:{active_tasks:can_stop?1:0,active_waits:can_stop?1:0,can_stop,checked_at}});
+  sockets[0].emit(scopeAt('2026-11-13T02:00:00.000000001Z',true));
+ });
+ assert.equal(await page.locator('#a .ihtml-chat-foot button.stop').count(),1);
+ await page.evaluate(()=>{sockets[0].emit(scopeAt('2026-11-13T02:00:00.000000002Z',false));sockets[0].emit(scopeAt('2026-11-13T02:00:00.000000001Z',true))});
+ assert.equal(await page.locator('#a .ihtml-chat-foot button.stop').count(),0,'a later completion within the same millisecond wins over the old active snapshot');
 });

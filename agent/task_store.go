@@ -121,6 +121,7 @@ func NewMemoryTaskStore() *MemoryTaskStore {
 	return &MemoryTaskStore{observations: NewMemoryTaskObservationStore(), control: NewMemoryTaskControlStore(), results: NewMemoryTaskResultStore(), contexts: NewMemoryTaskContextStore(), tasks: map[string]TaskRecord{}, waits: map[string]TaskWaitRecord{}}
 }
 func cloneTaskRecord(r TaskRecord) TaskRecord {
+	r.Info.Progress = cloneTaskProgress(r.Info.Progress)
 	if r.Info.ResolutionRef != nil {
 		ref := *r.Info.ResolutionRef
 		r.Info.ResolutionRef = &ref

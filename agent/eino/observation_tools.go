@@ -54,5 +54,5 @@ func observationTools(req *ai.TurnRequest) []ai.Tool {
 			return taskJSON(result)
 		}
 	}
-	return []ai.Tool{{Name: "task_trace", Effect: ai.ToolEffectRead, Description: "查询当前授权作用域的调用、等待、上下文和事件追踪。只含关联ID与状态，不含参数/结果/事件正文。按after分页；并发写入期间这是有界快照，不是完整实时事件流。local_dropped/failed/pending公开当前执行器的观测背压，不证明业务失败。", InputSchema: taskSchema(properties), Handler: handler(false)}, {Name: "task_metrics", Effect: ai.ToolEffectRead, Description: "对当前授权作用域最多1024条追踪快照按kind/state/code汇总。truncated/next表示仍有后续数据，count不是全量业务成功次数；观测可能丢弃，真实执行以原账本/回执为准。你决定是否读取后续页或原记录。", InputSchema: taskSchema(properties), Handler: handler(true)}}
+	return []ai.Tool{{Name: "task_trace", Title: "查看任务执行记录", Effect: ai.ToolEffectRead, Description: "查询当前授权作用域的调用、等待、上下文和事件追踪。只含关联ID与状态，不含参数/结果/事件正文。按after分页；并发写入期间这是有界快照，不是完整实时事件流。local_dropped/failed/pending公开当前执行器的观测背压，不证明业务失败。", InputSchema: taskSchema(properties), Handler: handler(false)}, {Name: "task_metrics", Title: "查看任务运行统计", Effect: ai.ToolEffectRead, Description: "对当前授权作用域最多1024条追踪快照按kind/state/code汇总。truncated/next表示仍有后续数据，count不是全量业务成功次数；观测可能丢弃，真实执行以原账本/回执为准。你决定是否读取后续页或原记录。", InputSchema: taskSchema(properties), Handler: handler(true)}}
 }

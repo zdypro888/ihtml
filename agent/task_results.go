@@ -391,6 +391,8 @@ func (r *TaskRuntime) commitTaskResult(ctx context.Context, scope, id string, ou
 		}
 		if ok {
 			r.signal()
+			// 真实返回和崩溃窗口补账共用提交入口；明确终态都唤醒同一展示邮箱。
+			r.enqueueProgressCallback(record)
 			return record, nil
 		}
 	}

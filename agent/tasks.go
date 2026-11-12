@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
+	"github.com/zdypro888/ihtml/progress"
 	"go.opentelemetry.io/otel/attribute"
 )
 
@@ -23,12 +24,15 @@ type TaskConfig struct {
 	MaxConcurrent, MaxTasks, MaxResultBytes, MaxWakeAttempts, MaxWakeDepth int
 	Timeout, LeaseDuration, ResultRetention, LedgerRetention, PollInterval time.Duration
 	// Results 保存完整回执；MaxResultBytes 只限制向模型内联的正文，不决定执行成败。
-	Results                                  TaskResultStore
-	MaxStoredResultBytes                     int
-	ResultSaveTimeout                        time.Duration
-	Store                                    TaskStore
-	Scope                                    string
-	OnComplete                               func(TaskInfo)
+	Results              TaskResultStore
+	MaxStoredResultBytes int
+	ResultSaveTimeout    time.Duration
+	Store                TaskStore
+	Scope                string
+	OnComplete           func(TaskInfo)
+	// OnProgress 在公开进度/终态持久成功后通知；未上报进度的终态也通知，此时 Progress 为 nil。
+	// 有界邮箱合并中间进度，投递前重读原账本。
+	OnProgress                               func(TaskInfo)
 	ControlStore                             TaskControlStore
 	ControlNamespace                         string
 	BudgetPool                               string
@@ -53,6 +57,8 @@ type TaskInfo struct {
 	ContractVersion string         `json:"contract_version,omitempty" bson:"contractVersion,omitempty"`
 	ParentID        string         `json:"parent_id,omitempty" bson:"parentID,omitempty"`
 	Tool            string         `json:"tool" bson:"tool"`
+	Title           string         `json:"title,omitempty" bson:"title,omitempty"`
+	GoalID          string         `json:"goal_id,omitempty" bson:"goalID,omitempty"`
 	State           string         `json:"state" bson:"state"`
 	Completion      ToolCompletion `json:"completion,omitempty" bson:"completion,omitempty"`
 	TraceID         string         `json:"trace_id,omitempty" bson:"traceID,omitempty"`
@@ -65,6 +71,8 @@ type TaskInfo struct {
 	ResolutionRef *TaskResultRef  `json:"resolution_ref,omitempty" bson:"resolutionRef,omitempty"`
 	ResultRef     *TaskResultRef  `json:"result_ref,omitempty" bson:"resultRef,omitempty"`
 	Failure       *TaskFailure    `json:"failure,omitempty" bson:"failure,omitempty"`
+	// Progress 是 Handler 最近报告的公开事实；保留原时间，不能代替完成回执。
+	Progress *progress.Snapshot `json:"progress,omitempty" bson:"progress,omitempty"`
 }
 
 type toolTask struct {
@@ -74,6 +82,7 @@ type toolTask struct {
 	done            chan struct{}
 	background      bool
 	epoch           string
+	progress        *taskProgress
 }
 
 // TaskRuntime 只保留在途 goroutine；已完成调用由账本查询，不再占用执行容量。
@@ -99,6 +108,7 @@ type TaskRuntime struct {
 	workersDone     chan struct{}
 	shutdownDone    chan struct{}
 	callbackSlot    chan struct{}
+	progressMailbox *taskProgressMailbox
 	callbackDropped atomic.Uint64
 	observer        *taskObservationRuntime
 }
@@ -260,7 +270,7 @@ func NewTaskRuntime(ctx context.Context, cfg TaskConfig) (*TaskRuntime, error) {
 		cfg.StorageMode = TaskStorageMemory
 	}
 	ctx, cancel := context.WithCancel(ctx)
-	r := &TaskRuntime{cfg: cfg, ctx: ctx, cancel: cancel, owner: rand.Text(), tasks: map[string]*toolTask{}, seenScopes: map[string]bool{}, slots: make(chan struct{}, cfg.MaxConcurrent), changed: make(chan struct{}), completed: make(chan TaskInfo, cfg.MaxTasks), workersDone: make(chan struct{}), shutdownDone: make(chan struct{}), callbackSlot: make(chan struct{}, 1), maintenanceDone: make(chan struct{})}
+	r := &TaskRuntime{cfg: cfg, ctx: ctx, cancel: cancel, owner: rand.Text(), tasks: map[string]*toolTask{}, seenScopes: map[string]bool{}, slots: make(chan struct{}, cfg.MaxConcurrent), changed: make(chan struct{}), completed: make(chan TaskInfo, cfg.MaxTasks), workersDone: make(chan struct{}), shutdownDone: make(chan struct{}), callbackSlot: make(chan struct{}, 1), progressMailbox: newTaskProgressMailbox(cfg.MaxTasks), maintenanceDone: make(chan struct{})}
 	if cfg.StorageMode == TaskStorageDurable {
 		if _, err := r.Readiness(ctx); err != nil {
 			cancel()
@@ -269,6 +279,9 @@ func NewTaskRuntime(ctx context.Context, cfg TaskConfig) (*TaskRuntime, error) {
 	}
 	r.observer = newTaskObserver(cfg.Observations, cfg.ObservationTimeout)
 	go r.maintain()
+	if cfg.OnProgress != nil {
+		go r.dispatchTaskProgress()
+	}
 	return r, nil
 }
 func taskHash(v any) string {
@@ -384,7 +397,7 @@ func (r *TaskRuntime) Start(ctx context.Context, scope, turn, key string, tool T
 			r.releaseBudget(id)
 		}
 	}()
-	record := TaskRecord{StorageVersion: TaskStorageVersion, ID: id, Scope: scope, Epoch: epoch, Key: compound, Digest: digest, Turn: turn, Args: args, Invocation: ToolInvocationKey(ctx), Effect: tool.Effect, Info: TaskInfo{ID: id, ContractVersion: tool.Contract.Version, ParentID: TaskID(ctx), Tool: tool.Name, State: "queued", Completion: tool.Completion, Background: !synchronous, TraceID: TaskTraceID(ctx)}, Owner: r.owner, Revision: 1, CreatedAt: now, UpdatedAt: now, Deadline: deadline, LeaseUntil: minTaskTime(now.Add(r.cfg.LeaseDuration), deadline)}
+	record := TaskRecord{StorageVersion: TaskStorageVersion, ID: id, Scope: scope, Epoch: epoch, Key: compound, Digest: digest, Turn: turn, Args: args, Invocation: ToolInvocationKey(ctx), Effect: tool.Effect, Info: TaskInfo{ID: id, ContractVersion: tool.Contract.Version, ParentID: TaskID(ctx), Tool: tool.Name, Title: PublicToolTitle(tool.Name, tool.Title), GoalID: TaskGoalID(ctx), State: "queued", Completion: tool.Completion, Background: !synchronous, TraceID: TaskTraceID(ctx)}, Owner: r.owner, Revision: 1, CreatedAt: now, UpdatedAt: now, Deadline: deadline, LeaseUntil: minTaskTime(now.Add(r.cfg.LeaseDuration), deadline)}
 	saved, created, err := r.cfg.Store.CreateTask(op, record)
 	if err != nil {
 		return TaskInfo{}, TaskStorageCommitFailure(err, "not_started", id, nil)
@@ -398,7 +411,7 @@ func (r *TaskRuntime) Start(ctx context.Context, scope, turn, key string, tool T
 	ctx = context.WithValue(ctx, taskEpochKey{}, taskEpochContext{r.scopeControlKey(scope), epoch})
 	taskCtx, cancel := context.WithDeadline(context.WithoutCancel(ctx), deadline)
 	unlinkRoot := context.AfterFunc(r.ctx, cancel)
-	t := &toolTask{scope: scope, turn: turn, id: id, epoch: epoch, cancel: cancel, done: make(chan struct{}), background: !synchronous}
+	t := &toolTask{scope: scope, turn: turn, id: id, epoch: epoch, cancel: cancel, done: make(chan struct{}), background: !synchronous, progress: newTaskProgress()}
 	t.unlink = context.AfterFunc(ctx, cancel)
 	r.mu.Lock()
 	if r.ctx.Err() != nil {
@@ -419,6 +432,7 @@ func minTaskTime(a, b time.Time) time.Time {
 }
 func (r *TaskRuntime) visible(rec TaskRecord) TaskInfo {
 	info := rec.Info
+	info.Progress = cloneTaskProgress(info.Progress)
 	if info.ResolutionRef != nil {
 		ref := *info.ResolutionRef
 		info.ResolutionRef = &ref
@@ -478,12 +492,22 @@ func (r *TaskRuntime) run(ctx context.Context, t *toolTask, tool Tool, args json
 		defer close(renewDone)
 		ticker := time.NewTicker(r.cfg.LeaseDuration / 3)
 		defer ticker.Stop()
+		progressTicker := time.NewTicker(time.Second)
+		defer progressTicker.Stop()
+		firstProgress := true
 		for {
 			select {
 			case <-renewStop:
 				return
 			case <-ctx.Done():
 				return
+			case <-t.progress.changed:
+				if firstProgress {
+					firstProgress = false
+					r.flushTaskProgress(t)
+				}
+			case <-progressTicker.C:
+				r.flushTaskProgress(t)
 			case <-ticker.C:
 				op, stop := r.operation()
 				if r.checkEpoch(op, t.scope, t.epoch, false) != nil || r.updateBudget(op, t.id, "renew", minTaskTime(time.Now().Add(r.cfg.LeaseDuration), deadlineFromContext(ctx))) != nil {
@@ -582,8 +606,11 @@ func (r *TaskRuntime) run(ctx context.Context, t *toolTask, tool Tool, args json
 		if !tool.Contract.ResultInputs {
 			callCtx = context.WithValue(callCtx, taskResultReaderKey{}, TaskResultInputReader(nil))
 		}
+		callCtx = context.WithValue(callCtx, progressObserverKey{}, t.progress.report)
 		result, callErr = tool.Handler(context.WithValue(callCtx, backgroundInvocationKey{}, taskInvocation{ID: t.id, Background: t.background}), args)
 	}()
+	// 终态提交前保存最后快照；进度保存失败不改 Handler 结果，也不会再次执行 Handler。
+	r.flushTaskProgress(t)
 	// 输出不合约不能否认 Handler 已返回；保存原文和独立验证失败，不再执行 Handler。
 	validationErr := validateToolOutput(outputSchema, result)
 	// Handler 只调用一次；后续阶段只重试不可变回执提交和账本补写。
@@ -604,6 +631,9 @@ func (r *TaskRuntime) run(ctx context.Context, t *toolTask, tool Tool, args json
 	r.releaseBudget(t.id)
 	t.unlink()
 	retire := func() { r.mu.Lock(); delete(r.tasks, t.id); close(t.done); r.signalLocked(); r.mu.Unlock() }
+	if rec.ID != "" {
+		r.enqueueProgressCallback(rec)
+	}
 	if saveErr == nil {
 		r.observeRecord(ctx, rec, "task_finished")
 		// 完成channel先入队再关闭Done，回调仍在Done之后，避免Close漏通知且不改变回调等待约束。
@@ -694,6 +724,8 @@ func (r *TaskRuntime) refresh(ctx context.Context, rec TaskRecord) (TaskRecord, 
 	}
 	r.signal()
 	r.observeRecord(ctx, rec, "task_lease_expired")
+	// 失联终态同样刷新展示；不能等已经失联的 Handler 再返回才通知。
+	r.enqueueProgressCallback(rec)
 	r.notify(rec.Info)
 	return rec, nil
 }
@@ -962,6 +994,7 @@ func (r *TaskRuntime) cancelInvocation(ctx context.Context, scope, id string, al
 		r.signalLocked()
 		r.mu.Unlock()
 		r.observeRecord(ctx, rec, "task_cancel_requested")
+		r.enqueueProgressCallback(rec)
 		return rec.Info, nil
 	}
 	return TaskInfo{}, ErrTaskConflict

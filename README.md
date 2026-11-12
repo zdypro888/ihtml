@@ -669,6 +669,18 @@ SDK 将同一签名提案轮次中同类操作汇总为一张卡：展示公共�
 
 计数由业务系统提供完整范围，未知总量保持 `nil`，不得用分页样例推算。可提供 `State`（running/queued/waiting/cooldown）、`WaitReason` 和 `RetryAt`；它们不改变执行、批准或完成状态。最多8项计数，负数、总量小于当前值及非法状态被拒绝。`UpdatedAt` 是原回执时间，回放不会改成重连时间。UI 折叠时展示简短摘要，展开保留完整明细；不会根据计数自行计算百分比或宣布完成。
 
+受管调用将最后一份有效进度保存到 `TaskInfo.Progress`，`task_read`、`task_wait` 与跨实例读取都得到原时间的快照。运行时独立观察 `ReportProgress` 和 `ReportStatus`，宿主替换界面 reporter 不会取消持久记录。首条及时写入，高频报告合并为每秒一次维护写，Handler 返回前再保存最后快照；沿用原租约和 CAS，迟到进度不能改变终态或抢回执行权。进度缺失就保留缺失，不生成虚构百分比。
+
+可选 `TaskConfig.OnProgress` 在公开快照或终态持久成功后投递脱敏 `TaskInfo`，其中 `GoalID`、`ID`、`Title` 用于原目标和分项展示；没有进度的终态也会通知，此时 `Progress` 为 nil，通知不唤醒模型。单个运行时用一个分发器和有界状态邮箱合并同任务通知，不阻塞租约续期、完成回调或原 Handler；真实终态进入同一邮箱，不能因旧回调忙碌而丢失。邮箱溢出按已有账本分页核对，正常运行不轮询数据库。回调投递前重读状态，原进度通知可直接纠正为当前终态，不补发旧 running。
+
+后台 `task_progress` 按原 `GoalID` 和任务编号进入实时及历史的同一进度行。宿主可用 `TaskProgressHistory` / `RestoreTaskProgressHistory` 从同用户、同对话的原任务快照恢复展示，须将补充行计入分页容量，不能重放业务。`task_scope_status` 独立表示当前对话可停止的任务与等待；重连通过只读 `ChatSessionStateProvider` 核对账本，旧历史、某个分项结束或进度计数不能代替当前停止能力。
+
+### 工具的说明性标题
+
+`agent.Tool.Title` 是可信定义中的简短展示名称，宿主可按语言本地化；`Name` 始终保留为协议标识。Eino 内置原语在定义处声明标题，通过 `Step.ToolTitle` 进入同一实时、失败和持久历史链路。引擎可实现 `agent.ToolMetadataProvider` 补充其内部工具元数据，`agent.ResolveToolMetadata` 优先使用本轮宿主定义；查询元数据不授予执行权限。
+
+旧历史读取可用 `assistant.RestoreToolHistoryMetadata` 补齐缺失标题，不改状态、参数、结果或确认范围。没有可读标题的未知工具使用界面的通用文案，机器名与参数收进展开后的技术详情；不根据工具名猜测业务结果。
+
 ### 浏览器恢复与连接探活
 
 内置 WS 的模型能力响应声明 `connection_probe:true`。前端在 `visibilitychange`、`pageshow`、`focus`、`online` 恢复时发送带随机编号的 `connection_ping`；可见页面也每25秒探活。服务端在认证检查后直接回 `connection_pong`，不调用模型、不写对话历史、不执行业务。8秒内未收到当前连接的匹配回执时，本地替换连接、刷新票据并沿用原会话恢复；不依赖 Safari 一定上报 `close`，也不重发消息或确认。隐藏、销毁及显式断开会回收探活计时器。未声明此能力的旧后端保持原连接协议。

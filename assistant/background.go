@@ -179,6 +179,8 @@ func (b *BackgroundBackend) NewSession(ctx context.Context, sc *ihtml.ChatSessio
 	}
 	b.mu.Unlock()
 	client := &backgroundAttachment{session: e, emit: sc.Emit}
+	// 与实时投递同序锁定：回放后的权威快照不能被较早的发布越过，也不能倒序持锁。
+	e.publishMu.Lock()
 	// 先锁订阅再登记，实时事件不能越过历史回放，避免 Seq 去重误丢尚未回放的内容。
 	client.mu.Lock()
 	e.mu.Lock()
@@ -208,13 +210,39 @@ func (b *BackgroundBackend) NewSession(ctx context.Context, sc *ihtml.ChatSessio
 	}
 	e.mu.Unlock()
 	for _, event := range replay {
+		// 旧状态快照不是当前操作能力；下面会重新核对原账本。
+		if event.Type == ihtml.ChatStreamTaskScopeStatus {
+			continue
+		}
 		event.BackgroundReplay = true
 		if err = client.emit(event); err != nil {
 			client.closed = true
 			break
 		}
 	}
+	if err == nil {
+		if provider, ok := e.inner.(ihtml.ChatSessionStateProvider); ok {
+			snapshotCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			states, snapshotErr := provider.SnapshotEvents(snapshotCtx)
+			cancel()
+			// 查询不可用不伪造已完成，也不妨碍查看已有对话和回执。
+			if snapshotErr == nil {
+				for _, state := range states {
+					e.mu.Lock()
+					e.sequence++
+					state.BackgroundSession, state.BackgroundSeq = e.streamID, e.sequence
+					e.mu.Unlock()
+					state.BackgroundReplay = false
+					if err = client.emit(state); err != nil {
+						client.closed = true
+						break
+					}
+				}
+			}
+		}
+	}
 	client.mu.Unlock()
+	e.publishMu.Unlock()
 	if err != nil {
 		client.Close()
 	}

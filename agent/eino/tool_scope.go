@@ -42,6 +42,8 @@ type turnToolMiddleware struct {
 	tasks          *ai.TaskRuntime
 	taskScope      string
 	taskApproval   bool
+	onEvent        func(ai.Step)
+	metadata       func(string) ai.ToolMetadata
 	suspendAllowed map[string]bool
 
 	mu            sync.Mutex

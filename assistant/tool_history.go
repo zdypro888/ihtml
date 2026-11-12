@@ -5,11 +5,17 @@ import (
 	"time"
 
 	"github.com/zdypro888/ihtml"
+	"github.com/zdypro888/ihtml/agent"
+	"github.com/zdypro888/ihtml/progress"
 )
 
 // ToolHistoryRecord 是公开操作显示快照，不包含签名、nonce 或任何可恢复执行的授权。
 // Call 只来自宿主已脱敏的提案，Result 只来自 PresentToolResult 或规范化失败事实；不能传入原始 Handler 输出。
 type ToolHistoryRecord struct {
+	// 后台进度是处理过程的独立分项，不是另一张可执行操作卡。
+	TaskID           string                 `json:"taskId,omitempty"`
+	TaskState        string                 `json:"taskState,omitempty"`
+	Progress         *progress.Snapshot     `json:"progress,omitempty"`
 	FlowID           string                 `json:"flowId,omitempty"`
 	ID               string                 `json:"id"`
 	AfterMessageID   string                 `json:"afterMessageId,omitempty"`
@@ -24,10 +30,20 @@ type ToolHistoryRecord struct {
 	Sequence         int64                  `json:"sequence,omitempty"`
 }
 
+// RestoreToolHistoryMetadata 在读取旧历史时补齐缺失的公开名称，不改状态、范围、结果和授权信息。
+// metadata 必须来自可信当前工具目录；历史技术名相同才能补齐，不能用另一工具的标题掩盖原调用。
+func RestoreToolHistoryMetadata(record ToolHistoryRecord, metadata agent.ToolMetadata) ToolHistoryRecord {
+	if metadata.Name != record.Call.Name || agent.PublicToolTitle(record.Call.Name, record.Call.Title) != "" {
+		return record
+	}
+	record.Call.Title = agent.PublicToolTitle(metadata.Name, metadata.Title)
+	return record
+}
+
 // trackedToolHistoryEvent 区分“不属于历史”与“历史快照无效”，不能把保存失败当成可忽略事件。
 func trackedToolHistoryEvent(event ihtml.ChatStreamEvent) bool {
 	switch event.Type {
-	case ihtml.ChatStreamConfirmationRequired, ihtml.ChatStreamToolStart, ihtml.ChatStreamToolResult:
+	case ihtml.ChatStreamConfirmationRequired, ihtml.ChatStreamToolStart, ihtml.ChatStreamToolResult, ihtml.ChatStreamTaskProgress:
 		return true
 	case ihtml.ChatStreamCancelToolResult:
 		return event.ToolStatus == ihtml.ChatToolCancelled
@@ -76,6 +92,16 @@ func ToolHistoryEvent(event ihtml.ChatStreamEvent) (ToolHistoryRecord, bool) {
 	out.Result = append(json.RawMessage(nil), event.ToolResult...)
 	out.RunID, out.Sequence = event.RunID, event.Seq
 	out.FlowID = event.FlowID
+	if event.Type == ihtml.ChatStreamTaskProgress {
+		if event.TaskID == "" || event.FlowID == "" || event.Progress == nil {
+			return ToolHistoryRecord{}, false
+		}
+		snapshot, ok := progress.Normalize(*event.Progress)
+		if !ok || snapshot.UpdatedAt.IsZero() {
+			return ToolHistoryRecord{}, false
+		}
+		out.TaskID, out.TaskState, out.Progress = event.TaskID, event.TaskState, &snapshot
+	}
 	out.UpdatedAt = event.ToolUpdatedAt
 	if out.UpdatedAt == nil {
 		updatedAt := time.Now().UTC()
@@ -99,6 +125,11 @@ func MergeToolHistory(previous, next ToolHistoryRecord) ToolHistoryRecord {
 	}
 	if previous.ID != next.ID {
 		return previous
+	}
+	if previous.TaskID != "" || next.TaskID != "" {
+		if previous.TaskID != next.TaskID || previous.FlowID != next.FlowID || !taskProgressCanAdvance(previous.TaskState, previous.Progress, next.TaskState, next.Progress) {
+			return previous
+		}
 	}
 	// 原提案可迟于终态到达；只补齐公开范围，不能借补齐过程回退执行事实。
 	if !previous.ProposalRecorded && next.ProposalRecorded {

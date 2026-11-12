@@ -554,8 +554,10 @@ test('chat trace safely falls back for unknown tools and keeps result and diagno
     tool_result: { item: { sku: 'A-42', stock: 7 } },
     tool_debug: { status: 'ok', duration_ms: 18 },
   }, makeT('en'));
-  assert.equal(view.title, 'inventory_lookup');
-  assert.equal(view.action, 'Run inventory_lookup');
+  assert.equal(view.title, 'Tool call');
+  assert.equal(view.action, 'Tool call');
+  assert.match(view.request, /"name": "inventory_lookup"/);
+  assert.ok(!view.facts.some(fact => fact.value === 'inventory_lookup'));
   assert.ok(view.facts.some((fact) => fact.label === 'sku' && fact.value === 'A-42'));
   assert.match(view.result, /"stock": 7/);
   assert.doesNotMatch(view.result, /duration_ms/);
@@ -1234,4 +1236,17 @@ test('structured progress preserves units and unknown totals without guessing pe
  assert.equal(chatTrace.progressView({...source,counters:[{label:'x',current:20,total:19}]}),null);
  assert.equal(chatTrace.progressView({...source,state:'completed'}),null);
  assert.equal(source.counters[1].total,undefined);
+});
+
+test('tool labels use readable metadata and retain technical identity only in request details',()=>{
+ const call={name:'plugin_custom_lookup',title:'查找原始资料',body:{id:'original'}};
+ const view=chatTrace.toolView(call,{tool_title:'plugin_custom_lookup',tool_status:'error',tool_summary:'未找到原记录'},makeT('zh'));
+ assert.equal(view.title,'查找原始资料');assert.equal(view.action,'查找原始资料');
+ assert.match(view.request,/plugin_custom_lookup/);assert.doesNotMatch(JSON.stringify(view.facts),/plugin_custom_lookup/);
+ for(const name of ['any_new_tool','module.lookup','inspect']){
+  const missing=chatTrace.toolView({name,title:name},{},makeT('zh'));
+  assert.equal(missing.title,'工具调用');assert.equal(missing.action,'工具调用');assert.match(missing.request,new RegExp(name.replaceAll('.','\\.')));
+ }
+ const readable=chatTrace.toolView({name:'plugin_custom_lookup',title:'读取资料'}, {tool_title:'重新核对资料'}, makeT('zh'));
+ assert.equal(readable.title,'重新核对资料');
 });

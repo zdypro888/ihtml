@@ -90,7 +90,7 @@ func (s *session) appendScopeTools(tools []agent.Tool, req *agent.TurnRequest) (
 	}
 	str := map[string]any{"type": "string"}
 	// 请求本身只激活已签名的持久范围；从来不在 Handler 内批量执行业务。
-	request := agent.Tool{Name: authorizationRequest, Description: "先请求一次任务授权，再逐项执行。适用于同一操作、固定修改内容、已确定的有限目标集合；无需先生成每个目标的确认卡。arguments是一个目标的完整参数模板，target_pointer是模板中允许替换的字符串目标字段RFC6901路径，targets是精确目标名单。其他参数固定不变。批准后用authorization_execute执行，不能把目标指针指向修改值或放宽业务前置条件。", Effect: agent.ToolEffectWrite, ApprovalRequired: true, InputSchema: schema(map[string]any{"tool": str, "arguments": map[string]any{"type": "object"}, "target_pointer": str, "targets": map[string]any{"type": "array", "items": str, "minItems": 1, "maxItems": authorization.MaxTargets}}, "tool", "arguments", "target_pointer", "targets")}
+	request := agent.Tool{Name: authorizationRequest, Title: "申请任务授权", Description: "先请求一次任务授权，再逐项执行。适用于同一操作、固定修改内容、已确定的有限目标集合；无需先生成每个目标的确认卡。arguments是一个目标的完整参数模板，target_pointer是模板中允许替换的字符串目标字段RFC6901路径，targets是精确目标名单。其他参数固定不变。批准后用authorization_execute执行，不能把目标指针指向修改值或放宽业务前置条件。", Effect: agent.ToolEffectWrite, ApprovalRequired: true, InputSchema: schema(map[string]any{"tool": str, "arguments": map[string]any{"type": "object"}, "target_pointer": str, "targets": map[string]any{"type": "array", "items": str, "minItems": 1, "maxItems": authorization.MaxTargets}}, "tool", "arguments", "target_pointer", "targets")}
 	request.InputSchema["properties"].(map[string]any)["id"] = str
 	delete(request.InputSchema, "required")
 	request.InputSchema["oneOf"] = []any{map[string]any{"required": []string{"id"}, "not": map[string]any{"anyOf": []any{map[string]any{"required": []string{"tool"}}, map[string]any{"required": []string{"arguments"}}, map[string]any{"required": []string{"target_pointer"}}, map[string]any{"required": []string{"targets"}}}}}, map[string]any{"required": []string{"tool", "arguments", "target_pointer", "targets"}, "not": map[string]any{"required": []string{"id"}}}}
@@ -129,7 +129,7 @@ func (s *session) appendScopeTools(tools []agent.Tool, req *agent.TurnRequest) (
 		}
 		return scopeJSON(scopeResult{Status: authorization.Active, ID: record.ID, Targets: len(record.Plan.Targets), View: ToolResultView{Title: "任务已授权", Summary: fmt.Sprintf("已授权 %d 个目标，后续执行将持续显示进度和结果。", len(record.Plan.Targets)), Status: ihtml.ChatToolSuccess}}), nil
 	}
-	execute := agent.Tool{Name: authorizationExecute, Description: "执行已获用户批准的一个目标。仅传原授权id和名单中的target；工具从冻结模板构造原调用，检查当前权限与条件后执行。按依赖自主串行、并发或后台执行。重复调用只读取原记录，未知结果不可重做。", Effect: agent.ToolEffectWrite, InputSchema: schema(map[string]any{"id": str, "target": str}, "id", "target")}
+	execute := agent.Tool{Name: authorizationExecute, Title: "执行已授权操作", Description: "执行已获用户批准的一个目标。仅传原授权id和名单中的target；工具从冻结模板构造原调用，检查当前权限与条件后执行。按依赖自主串行、并发或后台执行。重复调用只读取原记录，未知结果不可重做。", Effect: agent.ToolEffectWrite, InputSchema: schema(map[string]any{"id": str, "target": str}, "id", "target")}
 	execute.Handler = func(ctx context.Context, args json.RawMessage) (string, error) {
 		var ref scopeReference
 		if json.Unmarshal(args, &ref) != nil {
@@ -260,7 +260,7 @@ func (s *session) appendScopeTools(tools []agent.Tool, req *agent.TurnRequest) (
 		return nil, nil
 	}
 
-	status := agent.Tool{Name: authorizationStatus, Description: "分段读取原任务授权的固定目标和状态；offset从0开始，limit默认50最多200。只查询，不执行。", Effect: agent.ToolEffectRead, InputSchema: schema(map[string]any{"id": str, "offset": map[string]any{"type": "integer", "minimum": 0}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 200}}, "id")}
+	status := agent.Tool{Name: authorizationStatus, Title: "查询任务授权状态", Description: "分段读取原任务授权的固定目标和状态；offset从0开始，limit默认50最多200。只查询，不执行。", Effect: agent.ToolEffectRead, InputSchema: schema(map[string]any{"id": str, "offset": map[string]any{"type": "integer", "minimum": 0}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 200}}, "id")}
 	status.Handler = func(ctx context.Context, args json.RawMessage) (string, error) {
 		var ref scopeReference
 		if json.Unmarshal(args, &ref) != nil {
@@ -283,7 +283,7 @@ func (s *session) appendScopeTools(tools []agent.Tool, req *agent.TurnRequest) (
 		end := min(len(r.Plan.Targets), ref.Offset+ref.Limit)
 		return scopeJSON(map[string]any{"id": r.ID, "status": r.State, "tool": r.Plan.Tool, "targets": r.Plan.Targets[ref.Offset:end], "total": len(r.Plan.Targets), "next_offset": end, "has_more": end < len(r.Plan.Targets), "expires_at": r.ExpiresAt}), nil
 	}
-	revoke := agent.Tool{Name: authorizationRevoke, Description: "撤销本会话指定任务授权，阻止尚未开始的目标执行；已执行的结果不会撤回。", Effect: agent.ToolEffectWrite, InputSchema: schema(map[string]any{"id": str}, "id")}
+	revoke := agent.Tool{Name: authorizationRevoke, Title: "撤销任务授权", Description: "撤销本会话指定任务授权，阻止尚未开始的目标执行；已执行的结果不会撤回。", Effect: agent.ToolEffectWrite, InputSchema: schema(map[string]any{"id": str}, "id")}
 	revoke.Handler = func(ctx context.Context, args json.RawMessage) (string, error) {
 		var ref scopeReference
 		if json.Unmarshal(args, &ref) != nil {

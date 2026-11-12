@@ -88,6 +88,8 @@ func (r *TaskRuntime) enqueueCallback(info TaskInfo) {
 	if r.cfg.OnComplete == nil {
 		return
 	}
+	// 回调与完成通道拥有各自的展示快照，宿主不能通过修改计数器影响其他消费者。
+	info.Progress = cloneTaskProgress(info.Progress)
 	select {
 	case r.callbackSlot <- struct{}{}:
 	default:

@@ -68,7 +68,7 @@
             ids.add(record.id);
             const source=record.call||{},call={id:record.id};
             for (const key of ['confirmation_group','name','title','method','path','risk','reason','presentation','review','body','query','confirmation_expires']) if (source[key]!==undefined) call[key]=source[key];
-            const safe=JSON.parse(JSON.stringify({id:record.id,afterMessageId:typeof record.afterMessageId==='string'?record.afterMessageId:'',call,status:['pending','running','accepted','success','error','unknown','cancelled','expired'].includes(record.status)?record.status:'unknown',summary:typeof record.summary==='string'?record.summary:'',result:record.result,proposalRecorded:record.proposalRecorded===true,receiptOnly:record.receiptOnly===true,updatedAt:typeof record.updatedAt==='string'?record.updatedAt:'',flowId:typeof record.flowId==='string'?record.flowId.slice(0,256):'',runId:typeof record.runId==='string'?record.runId.slice(0,128):'',sequence:Number.isSafeInteger(record.sequence)&&record.sequence>0?record.sequence:0},(key,value)=>isTechnicalSecretKey(key)?undefined:value));
+            const safe=JSON.parse(JSON.stringify({id:record.id,afterMessageId:typeof record.afterMessageId==='string'?record.afterMessageId:'',call,status:['pending','running','accepted','success','error','unknown','cancelled','expired'].includes(record.status)?record.status:'unknown',summary:typeof record.summary==='string'?record.summary:'',result:record.result,proposalRecorded:record.proposalRecorded===true,receiptOnly:record.receiptOnly===true,updatedAt:typeof record.updatedAt==='string'?record.updatedAt:'',flowId:typeof record.flowId==='string'?record.flowId.slice(0,256):'',taskId:typeof record.taskId==='string'?record.taskId.slice(0,256):'',taskState:typeof record.taskState==='string'?record.taskState:'',progress:record.progress,runId:typeof record.runId==='string'?record.runId.slice(0,128):'',sequence:Number.isSafeInteger(record.sequence)&&record.sequence>0?record.sequence:0},(key,value)=>isTechnicalSecretKey(key)?undefined:value));
             bytes+=new TextEncoder().encode(JSON.stringify(safe)).length;
             if (bytes>8*1024*1024) throw new TypeError('ihtml: operation history exceeds 8 MiB');
             return safe;
@@ -5422,6 +5422,8 @@
       connectionProbe: null,
       backgroundSession: '',
       backgroundSeq: 0,
+      taskScopeCanStop: false,
+      taskScopeCheckedAt: '',
       connectionNotice: null,
       active: false,
       sending: false,
@@ -5635,7 +5637,7 @@
         });
         const sendBtn = el('button', '', T('send'));
         sendBtn.type = 'button';
-        sendBtn.onclick = () => (this.active || this.sending ? this.cancel() : this.send());
+        sendBtn.onclick = () => (this.active || this.sending || this.backgroundCanStop() ? this.cancel() : this.send());
         const hint = el('div', 'hint', T('composer_hint'));
         hint.id = chatID + '-composer-hint';
         compose.append(input, hint);
@@ -5807,14 +5809,14 @@
       },
       startFlowRun(t,runID) {
         if(t.latestRunID!==runID){this.archiveAnswer(t);t.text='';t.textBytes=0;t.answer.replaceChildren();t.answer.style.display='none';t.answerFinal=false;t.answerStale=false;t.answerVersion=runID;t.answerAt='';t.latestRunID=runID;}
-        t.done=false;t.cancelled=false;
+        t.done=false;t.cancelled=false;t.waitingForTasks=false;
       },
-      createHistoryTurn(anchor,place=true) {
+      createHistoryTurn(anchor,place=true,registerAnchor=true) {
         this.historyTurns ||= new Map();
         const previous=this.turn,t=this.beginTurn('deep');this.turn=previous;
         t.done=true;t.historical=true;t.elapsedUnknown=true;t.card.classList.add('ihtml-operation-history');
         const after=this.messageAnchors?.get(anchor)||this.operationHistoryStart;if(place&&after?.isConnected)after.after(t.card);
-        this.historyTurns.set(anchor,t);this.syncProcessClock(t);return t;
+        if(registerAnchor)this.historyTurns.set(anchor,t);this.syncProcessClock(t);return t;
       },
       // 历史与实时操作复用同一张卡和批次统计；显示快照始终不拥有执行权限。
       appendOperationHistory(records) {
@@ -5825,6 +5827,16 @@
         for(const [anchor,items] of groups){
           let t=this.historyTurns.get(anchor)||this.turnsByFlow?.get(this.messageFlows?.get(anchor));
           for(const record of items){
+            if(record.taskId){
+              // 后台进度沿同一历史载体恢复，但不是另一张操作卡，也不恢复执行授权。
+              if(!record.flowId)continue;
+              const anchorFlow=this.messageFlows?.get(anchor);
+              const owner=this.turnsByFlow?.get(record.flowId)||(t&&(!t.flowID||t.flowID===record.flowId||anchorFlow===record.flowId)?t:null)||this.createHistoryTurn(anchor,true,!anchorFlow||anchorFlow===record.flowId);
+              owner.flowID=record.flowId;owner.canonicalFlow=true;this.turnsByFlow ||=new Map();this.turnsByFlow.set(record.flowId,owner);
+              if(!this.historyTurns.has(anchor)&&(!anchorFlow||anchorFlow===record.flowId))this.historyTurns.set(anchor,owner);
+              this.updateTaskProgress({type:'task_progress',flow_id:record.flowId,task_id:record.taskId,task_state:record.taskState,tool_name:record.call.name,tool_title:record.call.title,tool_updated_at:record.updatedAt,progress:record.progress});
+              continue;
+            }
             const existing=this.operationRecords.get(record.id);
             if(existing){
               const merged=chatTraceCore.mergeOperationRecord(existing.publicRecord||existing.historyRecord,record);
@@ -5980,7 +5992,7 @@
         const wasHidden=this.dom.foot.hidden;
         this.dom.foot.hidden=navigationOpen;
         if(wasHidden&&!navigationOpen)this.resizeComposer();
-        const busy = this.active || this.sending;
+        const busy = this.active || this.sending || this.backgroundCanStop();
         this.history?.sync();
         const unavailable = destroyed || !this.enabled || authRefreshing;
         this.dom.input.readOnly = this.sending || unavailable || !!this.history?.mutating;
@@ -5996,7 +6008,8 @@
           button.disabled = busy || !this.agentModes.includes(mode);
         }
         if (this.log) {
-          const confirmationBusy = busy || !!this.confirmationBusy;
+          // 模型已挂起时仍可取消会话后台任务，也可批准随后到达的原范围确认卡。
+          const confirmationBusy = this.active || this.sending || !!this.confirmationBusy;
           for (const message of Array.from(this.log.children)) {
             const owner = message._turn;
             if (!owner) continue;
@@ -6271,6 +6284,7 @@
         this.setFollowing(true);
         this.availabilityNote = null;
         this.turn = null;
+        this.taskScopeCanStop=false;this.taskScopeCheckedAt='';
         this.turnsByRun.clear();
         this.everConnected = false;
         this.setActive(false);
@@ -6351,6 +6365,7 @@
         this.agentMode = 'fast';
         this.availabilityNote = null;
         this.turn = null;
+        this.taskScopeCanStop=false;this.taskScopeCheckedAt='';
         this.turnsByRun.clear();
         this.everConnected = false;
         this.setActive(false);
@@ -6637,20 +6652,46 @@
         this.disconnect();
         if (turn) this.finishCancelled(turn);
         else this.setActive(false);
+        this.clearTaskWaiting();
         if (this.dom) this.syncChatControls();
       },
 
+      backgroundCanStop() {
+        return this.taskScopeCanStop || !!this.turn?.waitingForTasks || Array.from(this.turnsByFlow?.values()||[]).some(t=>t.waitingForTasks);
+      },
+      timestampOrder(value) {
+        // 服务端事实时间可精确到纳秒；统一转为等长 UTC 键，比较时不丢弃毫秒以下顺序。
+        const at=typeof value==='string'?Date.parse(value):NaN;
+        if(!Number.isFinite(at))return '';
+        const fraction=/\.(\d{1,9})(?:Z|[+-]\d\d:\d\d)$/.exec(value)?.[1]||'';
+        return new Date(at).toISOString().slice(0,19)+'.'+fraction.padEnd(9,'0')+'Z';
+      },
+      clearTaskWaiting() {
+        this.taskScopeCanStop=false;
+        for(const t of new Set([this.turn,...(this.turnsByFlow?.values()||[])]))if(t?.waitingForTasks){t.waitingForTasks=false;this.updateProcess(t)}
+      },
+      updateTaskScope(ev) {
+        // 旧事件只说明当时曾等待；停止入口必须由当前会话账本的非回放快照恢复。
+        const scope=ev.task_scope,order=this.timestampOrder(scope?.checked_at);
+        if(ev.background_replay||!scope||typeof scope.can_stop!=='boolean'||!order||order<=this.taskScopeCheckedAt)return;
+        if(!['active_tasks','active_waits'].every(k=>Number.isSafeInteger(scope[k])&&scope[k]>=0))return;
+        this.taskScopeCheckedAt=order;
+        if(!scope.can_stop)this.clearTaskWaiting();else this.taskScopeCanStop=true;
+        this.syncChatControls();
+      },
       async stopBackground() {
-        if (destroyed || !this.active || !this.turn || this.turn.done) return;
-        const turn=this.turn;
-        this.appendStatus(T('chat_background_stopping'),false,turn);
+        if (destroyed || !this.active&&!this.backgroundCanStop()) return;
+        // 取消作用域是本对话全部助手任务，不能把其他目标的后台状态写到当前答复。
+        const turn=this.active?this.turn:this.turn?.waitingForTasks?this.turn:Array.from(this.turnsByFlow?.values()||[]).find(t=>t.waitingForTasks);
+        if(turn)this.appendStatus(T('chat_background_stopping'),false,turn);
         try {
           const ws=await this.ensureWS();
-          if (destroyed || this.turn!==turn || turn.done) return;
+          if (destroyed || !this.active&&!this.backgroundCanStop()) return;
           ws.send(JSON.stringify({type:'cancel'}));
-          this.finishCancelled(turn);
+          if(turn)this.finishCancelled(turn);
+          this.clearTaskWaiting();this.syncChatControls();
         } catch {
-          this.appendStatus(T('chat_background_stop_unsent'),true,turn);
+          if(turn)this.appendStatus(T('chat_background_stop_unsent'),true,turn);else ui.toast(T('chat_background_stop_unsent'),'warn');
           this.syncChatControls();
         }
       },
@@ -6683,7 +6724,7 @@
           agentMode: chatAgentCore.selectMode(this.agentModes, agentMode),
           agentState: chatAgentCore.initialState(agentMode), agentOverview: null,
           text: '', textBytes: 0, textTruncated: false, contentFormat: 'auto', lastKind: '', lastStatusNode: null, liveStatus: '',
-          tools: new Map(), toolCount: 0, pendingCount: 0, errorCount: 0, unknownCount: 0, done: false,
+          tools: new Map(), taskProgress: new Map(), toolCount: 0, pendingCount: 0, errorCount: 0, unknownCount: 0, done: false, waitingForTasks:false,
           turnFailed: false,
           runSeq: new Map(), acceptNextRun: false, renderFrame: 0, lastRenderAt: 0,
           cancelled: false, confirmingTool: false,
@@ -6707,7 +6748,7 @@
       processStepCount(t) {
         const reasoning = t.thinkingSegments ? t.thinkingSegments.size : 0;
         const deep = t.agentState && t.agentState.mode === 'deep' && t.agentState.plan.length ? 1 : 0;
-        return t.toolCount + reasoning + deep + (t.previousAnswers?.length || 0);
+        return t.toolCount + reasoning + deep + (t.previousAnswers?.length || 0) + t.taskProgress.size;
       },
       processSummaryText(t) {
         if (t.unknownCount > 0) return this.processFailureText(t, 'unknown', T('tools_unknown', {n: t.unknownCount}));
@@ -6724,6 +6765,10 @@
           if (t.activeThinkingID) return T('reasoning_streaming');
           return t.lastStatusNode && t.lastStatusNode.dataset.persistent !== 'true' ? t.lastStatusNode.textContent : T('analyzing');
         }
+        const background=this.activeTaskProgress(t);
+        if(background.length===1)return T('background_task_progress',{name:background[0].title,message:background[0].progress?.message||T('task_state_'+background[0].state)});
+        if(background.length>1)return T('background_tasks_progress',{n:background.length});
+        if(t.waitingForTasks)return T('background_task_waiting');
         if (t.turnFailed) return T('turn_failed');
         if (t.errorCount > 0) return this.processFailureText(t, 'error', T('tools_failed', { n: t.errorCount }));
         if (t.agentState && t.agentState.manualPaused && t.agentState.plan.length) return T('agent_plan_paused');
@@ -6745,7 +6790,8 @@
         return detail ? (status === 'unknown' ? fallback + ' · ' : '') + detail.slice(0, 400) : fallback;
       },
       finishCancelled(t) {
-        if (!t || t.done) { this.setActive(false); return; }
+        if (!t || t.done&&!t.waitingForTasks) { this.setActive(false); return; }
+        t.waitingForTasks=false;
         t.cancelled = true;
         cancelAssistantRender(t);
         if (t.text || t.textTruncated) replaceAssistantPreservingView(t.answer, renderAssistant(t.text, t.contentFormat, t.answer, t.textTruncated));
@@ -6773,9 +6819,9 @@
         if (t.pendingCount > 0 || t.errorCount > 0 || t.unknownCount > 0) return true;
         return Array.from(t.tools.values()).some((rec) => rec.status === 'running');
       },
-      renderProgress(t) {
-        const p=t.progressSnapshot,parts=[];
-        if(p&&!t.done&&!t.cancelled&&!t.pendingCount&&!t.unknownCount){
+      progressParts(p) {
+        const parts=[];
+        if(p){
           if(p.phase&&p.phase!==p.message)parts.push(p.phase);
           const state=['queued','waiting','cooldown'].includes(p.state)?T('progress_state_'+p.state):'';
           if(state&&state!==p.message&&state!==p.phase)parts.push(state);
@@ -6783,9 +6829,53 @@
           if(p.waitReason&&p.waitReason!==p.message)parts.push(p.waitReason);
           if(p.retryAt)parts.push(T('progress_retry',{time:new Date(p.retryAt).toLocaleTimeString(opts.locale||navigator.language)}));
         }
+        return parts;
+      },
+      activeTaskProgress(t) {return Array.from(t.taskProgress.values()).filter(rec=>['queued','running','cancelling'].includes(rec.state));},
+      renderTaskProgress(rec) {
+        const p=rec.progress,active=['queued','running','cancelling'].includes(rec.state);
+        rec.card.dataset.taskState=rec.state;rec.titleNode.textContent=rec.title;rec.stateNode.textContent=T('task_state_'+rec.state);
+        rec.stateNode.className='ihtml-chip t-status '+(rec.state==='failed'?'error':rec.state==='unknown'?'unknown':active?'running':'');
+        rec.message.textContent=p?(active?p.message:T('task_last_progress',{message:p.message})):'';rec.message.hidden=!p;
+        rec.facts.textContent=this.progressParts(p).join('\n');rec.facts.hidden=!rec.facts.textContent;
+        const at=p?.updatedAt&&new Date(p.updatedAt),valid=at&&Number.isFinite(at.getTime());
+        rec.time.hidden=!valid;
+        if(valid){const age=Math.floor((Date.now()-at.getTime())/1000);rec.time.dateTime=at.toISOString();rec.time.title=at.toLocaleString(opts.locale||navigator.language);rec.time.textContent=age<0?rec.time.title:age<5?T('progress_updated_now'):T('progress_updated',{n:age})}
+        rec.technical.textContent=technicalText({task_id:rec.id,name:rec.name});
+      },
+      updateTaskProgress(ev) {
+        // 带外进度必须明确属于原目标；不能落到当前聊天轮次，也不能启动或结束模型运行。
+        const flow=typeof ev.flow_id==='string'?ev.flow_id:'',id=typeof ev.task_id==='string'?ev.task_id:'';
+        const t=flow&&this.turnsByFlow?.get(flow),state=ev.task_state;
+        if(!t||!id||id.length>256||!['queued','running','cancelling','completed','failed','cancelled','unknown'].includes(state))return;
+        const p=chatTraceCore.progressView(ev.progress),at=Date.parse(ev.tool_updated_at)||Date.parse(p?.updatedAt)||0;
+        let rec=t.taskProgress.get(id);
+        const terminal=s=>['completed','failed','cancelled','unknown'].includes(s);
+        if(rec?.name&&ev.tool_name&&rec.name!==ev.tool_name)return;
+        // 明确终态不可互相覆盖；unknown 只接受权威终态修正。投递时间不是事实时间，
+        // 较晚送达的 running 不能挡住从任务账本恢复的已落库终态。
+        if(rec&&terminal(rec.state)&&state!==rec.state&&(rec.state!=='unknown'||!terminal(state)))return;
+        if(rec?.state==='running'&&state==='queued')return;
+        // 来源进度可能比终态回执更早；终态仍接收，但不把计数或时间倒退。
+        const progressAt=this.timestampOrder(p?.updatedAt),oldProgressAt=this.timestampOrder(rec?.progress?.updatedAt);
+        if(rec&&!terminal(state)&&p&&progressAt<oldProgressAt)return;
+        const current=p&&progressAt>=oldProgressAt?p:rec?.progress||null;
+        const title=this.toolView({name:ev.tool_name,title:ev.tool_title},{}).title;
+        if(!rec){
+          const card=el('details','ihtml-think ihtml-task-progress'),head=el('summary','think-head'),titleNode=el('span','think-title'),stateNode=el('span','ihtml-chip t-status'),body=el('div','ihtml-task-progress-body'),message=el('p'),facts=el('div','ihtml-progress-details'),time=el('time'),tech=el('details','t-tech'),techHead=el('summary','',T('technical_details')),technical=el('pre');
+          head.append(titleNode,stateNode);tech.append(techHead,technical);body.append(message,facts,time,tech);card.append(head,body);t.pBody.append(card);
+          head.addEventListener('click',()=>{if(!card.open)this.setFollowing(false)});
+          rec={id,card,titleNode,stateNode,message,facts,time,technical};t.taskProgress.set(id,rec);
+        }
+        Object.assign(rec,{state,progress:current,updatedAt:Math.max(rec.updatedAt||0,at),name:ev.tool_name||rec.name||'',title:title!==T('tool_title_unknown')?title:rec.title||title});
+        this.renderTaskProgress(rec);this.updateProcess(t);
+      },
+      renderProgress(t) {
+        const background=this.activeTaskProgress(t),p=t.done&&background.length===1?background[0].progress:t.progressSnapshot;
+        const parts=p&&(!t.done||background.length===1)&&!t.cancelled&&!t.pendingCount&&!t.unknownCount?this.progressParts(p):[];
         t.progressLine.textContent=parts.join(' · ');t.progressLine.title=t.progressLine.textContent;t.progressLine.hidden=!parts.length;
         // 折叠摘要保持紧凑，完整结构化事实按同一份快照展开查看，不创建另一张工具卡。
-        let detail=t.pBody.querySelector('.ihtml-progress-details');
+        let detail=t.pBody.querySelector(':scope > .ihtml-progress-details');
         if(parts.length){if(!detail){detail=el('div','ihtml-pline ihtml-progress-details');t.pBody.prepend(detail)}detail.textContent=[...(t.processLabel.scrollHeight>t.processLabel.clientHeight+1?[p.message]:[]),...parts].join('\n');}
         else detail?.remove();
       },
@@ -6793,12 +6883,14 @@
         const elapsed = t.elapsedMS + (t.clockStartedAt == null ? 0 : performance.now() - t.clockStartedAt);
         const parts = [];
         if (t.toolCount) parts.push(T('trace_tool_count', {n: t.toolCount}));
+        if (t.taskProgress.size) parts.push(T('background_tasks_count',{n:t.taskProgress.size}));
         if (t.previousAnswers?.length) parts.push(T('answer_versions_count', {n: t.previousAnswers.length}));
         const seconds = Math.max(0, Math.floor(elapsed / 1000));
         if (!t.elapsedUnknown) parts.push(seconds >= 3600 ? T('trace_elapsed_hours', {h:Math.floor(seconds/3600),m:Math.floor(seconds/60)%60}) : seconds >= 60 ? T('trace_elapsed_minutes', {m:Math.floor(seconds/60),s:seconds%60}) : T('trace_elapsed', {n:seconds}));
         if(!t.done&&!t.cancelled&&!t.pendingCount&&t.progressUpdatedAt){const age=Math.floor((Date.now()-t.progressUpdatedAt)/1000);if(age>=0)parts.push(age<5?T('progress_updated_now'):T('progress_updated',{n:age}));}
         t.note.textContent = parts.join(' · ');
         t.note.hidden = parts.length === 0;
+        for(const rec of t.taskProgress.values())this.renderTaskProgress(rec);
       },
       syncProcessClock(t) {
         // 等待人工确认不计入执行耗时；恢复执行时接着累计，销毁时统一回收。
@@ -6808,8 +6900,9 @@
           t.elapsedMS += performance.now() - t.clockStartedAt;
           t.clockStartedAt = null;
         }
-        if (working && !t.clock) t.clock = setInterval(() => this.renderProcessMeta(t), 1000);
-        if (!working && t.clock) { clearInterval(t.clock); t.clock = 0; }
+        const observing=working||!t.cancelled&&(this.activeTaskProgress(t).length>0||t.waitingForTasks);
+        if (observing && !t.clock) t.clock = setInterval(() => this.renderProcessMeta(t), 1000);
+        if (!observing && t.clock) { clearInterval(t.clock); t.clock = 0; }
         this.renderProcessMeta(t);
       },
       updateProcess(t) {
@@ -6820,11 +6913,15 @@
         if(!t.process.isConnected)return;
         const focusWasInside = t.process.contains(doc.activeElement);
         let collapsed = false;
-        t.process.classList.toggle('active', !t.done);
-        t.process.classList.toggle('pending', t.pendingCount > 0);
-        t.process.classList.toggle('error', t.turnFailed || t.errorCount > 0);
-        t.process.classList.toggle('paused', !!(t.agentState && t.agentState.manualPaused && t.agentState.plan.length));
-        t.process.dataset.state = t.cancelled ? 'cancelled' : (t.turnFailed || t.errorCount > 0 ? 'error' : (t.pendingCount > 0 ? 'pending' : (t.done ? 'complete' : 'running')));
+        // 过程颜色表示当前阶段；已失败子步骤留在各自回执中，不把后续正常处理染成失败。
+        const paused = !!(t.agentState && t.agentState.manualPaused && t.agentState.plan.length);
+        const background=this.activeTaskProgress(t).length>0||t.waitingForTasks;
+        const state = t.unknownCount > 0 ? 'unknown' : t.cancelled ? 'cancelled' : t.pendingCount > 0 ? 'pending' : t.turnFailed || (t.done && !background && t.errorCount > 0) ? 'error' : paused ? 'paused' : t.done&&!background ? 'complete' : 'running';
+        t.process.classList.toggle('active', state === 'running');
+        t.process.classList.toggle('pending', state === 'pending');
+        t.process.classList.toggle('error', state === 'error');
+        t.process.classList.toggle('paused', state === 'paused');
+        t.process.dataset.state = state;
         t.process.setAttribute('aria-busy', String(!t.done));
         const status = this.processSummaryText(t);
         t.processLabel.textContent = status;t.processLabel.title=status;
@@ -6844,7 +6941,7 @@
         if (t.done) {
           this.finalizeThinking(t);
           if (t.agentOverview && !t.agentOverview._pinned && !t.agentState.manualPaused && !t.errorCount) t.agentOverview.open = false;
-          if (!t.pBody.childNodes.length && !t.toolCount && !t.turnFailed) t.process.remove();
+          if (!t.pBody.childNodes.length && !t.toolCount && !t.taskProgress.size && !t.turnFailed && !t.waitingForTasks) t.process.remove();
           else if (!t.processPinned) { collapsed = t.process.open; t.process.open = false; }
         } else if (t.text && !t.processPinned && !this.hasBlockingProcess(t) && !(t.agentState && t.agentState.manualPaused)) {
           collapsed = t.process.open;
@@ -7152,7 +7249,8 @@
         else if (Array.isArray(body.ids)) fallbackFacts.push({ label: 'Items', value: body.ids.join(', ') });
         else if (body.id) fallbackFacts.push({ label: 'ID', value: body.id });
         return {
-          title: safeVisible(source.title || ev.tool_title || call.title || ev.tool_name || call.name || 'tool', 160),
+          // 若共享投影不可用，保守退回说明性标签，机器名仍仅存在技术详情。
+          title: safeVisible(source.title || T('tool_title_unknown'), 160),
           action: safeVisible(source.action || '', 320),
           summary: safeVisible(source.summary || (!view && ev.tool_summary) || '', 32768),
           reason: safeVisible(source.reason || (!view && call.reason) || '', 500),
@@ -8004,8 +8102,10 @@
         // 后台调用完成属于会话通知，不开启/结束模型轮次，也不把调用返回宣称为业务成功。
         if (ev.type === 'task_complete') {
           // 这是宿主通知事件；原调用已有过程/回执记录，不能再追加一段仅实时存在的内部编号提示。
-          this.notifyEvent(ev); return;
+          this.updateTaskProgress(ev);this.notifyEvent(ev); return;
         }
+        if (ev.type==='task_progress') {this.updateTaskProgress(ev);this.notifyEvent(ev);return;}
+        if (ev.type==='task_scope_status') {this.updateTaskScope(ev);this.notifyEvent(ev);return;}
         // inspect_request 是服务端的带外请求, 不依赖轮次归属与序号去重:
         // 即使本地轮次已收尾也应答, 否则服务端工具只能等到超时。
         if (ev.type === 'inspect_request') { this.sendInspectResult(ev); this.notifyEvent(ev); return; }
@@ -8103,16 +8203,17 @@
           t.answer.style.display = 'none';
         }
         t.answer.classList.remove('streaming');
-        t.done = true;t.answerStale=false;t.answerFinal=true;t.answerVersion=ev.run_id||t.answerVersion;this.completedHistoryRuns ||=new Set();if(ev.run_id)this.completedHistoryRuns.add(ev.run_id);
+        t.done = true;t.waitingForTasks=!ev.background_replay&&ev.finish_reason==='task_waiting';t.answerStale=false;t.answerFinal=true;t.answerVersion=ev.run_id||t.answerVersion;this.completedHistoryRuns ||=new Set();if(ev.run_id)this.completedHistoryRuns.add(ev.run_id);
         this.updateProcess(t);
         const answerSummary = clip(String(t.answer.innerText || t.answer.textContent || '').replace(/\s+/g, ' ').trim(), 140);
         this.announce(answerSummary ? T('answer_complete_summary', { summary: answerSummary }) : T('answer_complete'));
         this.releaseTurnRuns(t);
-        if (this.turn === t && this.active) this.setActive(false);
+        if (this.turn === t) this.setActive(false,false);
         this.scroll();
       },
       turnError(msg, t = this.turn) {
         if (t) {
+          t.waitingForTasks=false;
           t.turnFailed = true;
           this.clearTransientStatus(t);
           const agentAlreadyShowsError = t.agentState && t.agentState.mode === 'deep' && Object.values(t.agentState.agents || {})

@@ -113,6 +113,10 @@ func (s *session) prepareTool(ctx context.Context, tool agent.Tool, args json.Ra
 	if len(call.Name) > 256 || len(call.Title) > 1024 || len(call.Method) > 32 || len(call.Path) > 4096 || len(call.Reason) > 4096 {
 		return "", errors.New("assistant: oversized confirmation metadata")
 	}
+	if agent.PublicToolTitle(call.Name, call.Title) == "" {
+		// 先拒绝非法确认元数据，再在签名前补齐名称，不能用展示兜底绕过原大小约束。
+		call.Title = agent.ResolveToolMetadata(tool, s.backend.cfg.Engine).Title
+	}
 	// Preview 是可信宿主回调；其业务期限只作上限，签名和 nonce 始终由桥接层重新生成。
 	var deadline time.Time
 	if call.ConfirmationExpires != 0 {
@@ -616,7 +620,7 @@ func (s *session) runConfirmedTool(ctx context.Context, cancel context.CancelFun
 	}
 	ref := ihtml.ProposedToolCall{ID: item.call.ID, ConfirmationNonce: item.call.ConfirmationNonce}
 	p.mu.Lock()
-	p.send(ihtml.ChatStreamEvent{Type: ihtml.ChatStreamToolStart, ToolCall: &ref, ToolID: ref.ID, ToolName: item.tool.Name, ToolStatus: ihtml.ChatToolRunning})
+	p.send(ihtml.ChatStreamEvent{Type: ihtml.ChatStreamToolStart, ToolCall: &ref, ToolID: ref.ID, ToolName: item.tool.Name, ToolTitle: item.call.Title, ToolStatus: ihtml.ChatToolRunning})
 	p.mu.Unlock()
 	if ctx.Err() != nil {
 		runErr = ctx.Err()

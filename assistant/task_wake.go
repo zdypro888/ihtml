@@ -142,7 +142,9 @@ func (s *session) finishTaskWake(event *ihtml.ChatClientEvent, ok bool) {
 	if ok {
 		action = "ack"
 	}
-	_ = s.tasks.UpdateWake(ctx, s.tasks.Scope(), w.record.ID, w.consumer, action)
+	if s.tasks.UpdateWake(ctx, s.tasks.Scope(), w.record.ID, w.consumer, action) == nil {
+		s.publishTaskScopeStatus()
+	}
 }
 
 func (s *session) stopTaskWakes() {
@@ -160,7 +162,9 @@ func (s *session) stopTaskWakes() {
 	s.mu.Unlock()
 	if err := s.tasks.CancelAll(); err != nil {
 		_ = s.emit(ihtml.ChatStreamEvent{Type: ihtml.ChatStreamTurnError, Error: "本地停止已请求，但共享停止状态尚未持久确认；请核对原记录。"})
+		return
 	}
+	s.publishTaskScopeStatus()
 }
 func (s *session) restartTaskWakes(ctx context.Context) {
 	if s.tasks == nil {

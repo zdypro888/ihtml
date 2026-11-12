@@ -17,7 +17,12 @@ import (
 
 // Tool 是领域能力暴露给 AI 的最小单元。
 type Tool struct {
-	Name        string
+	Name string
+	// Title 是可信工具定义提供的简短展示名称，可由宿主按界面语言本地化；不能从模型参数推断。
+	// Name 仍是协议标识，Title 不参与执行授权、去重或业务编排。
+	Title string
+	// ResultKind 只选择共享的公开结果投影，不能公开任意 Handler 正文或改变工具完成语义。
+	ResultKind  ToolResultKind
 	Description string
 	// Contract 是宿主声明的能力语义，参与持久会话与调用身份绑定。
 	Contract ToolContract
@@ -156,9 +161,10 @@ type Skill struct {
 type StepKind string
 
 const (
-	StepToolCall StepKind = "tool_call"
-	StepText     StepKind = "text"
-	StepStatus   StepKind = "status" // 框架公开阶段提示，不能携带摘要内容、推理或原始上下文。
+	StepToolStart StepKind = "tool_start" // 实际接纳并进入工具端点；模型提议、拒绝及去重回放不能产生开始证据。
+	StepToolCall  StepKind = "tool_call"
+	StepText      StepKind = "text"
+	StepStatus    StepKind = "status" // 框架公开阶段提示，不能携带摘要内容、推理或原始上下文。
 )
 
 // Step 一次引擎轮次内的执行轨迹条目，用于审计与回放。
@@ -174,10 +180,12 @@ type Step struct {
 	ApprovalRejected bool
 	Kind             StepKind
 	ToolName         string
-	Args             json.RawMessage
-	Result           string
-	Err              string
-	Completion       ToolCompletion
+	// ToolTitle 沿执行证据保存声明式展示名称，避免引擎内置工具在实时与历史中退化为技术标识。
+	ToolTitle  string
+	Args       json.RawMessage
+	Result     string
+	Err        string
+	Completion ToolCompletion
 	// Replayed means the model repeated the exact same write/execute invocation
 	// in one turn. The original call remains in Steps; this entry is evidence of
 	// the suppressed replay and did not invoke the business handler again.

@@ -259,12 +259,22 @@ func (b *Backend) NewSession(ctx context.Context, sctx *ihtml.ChatSessionContext
 				return nil, err
 			}
 		}
+		onProgress := taskConfig.OnProgress
+		taskConfig.OnProgress = func(info agent.TaskInfo) {
+			s.publishTaskProgress(info)
+			if info.Background && taskProgressTerminal(info.State) {
+				s.publishTaskScopeStatus()
+			}
+			if onProgress != nil {
+				onProgress(info)
+			}
+		}
 		onComplete := taskConfig.OnComplete
 		taskConfig.OnComplete = func(info agent.TaskInfo) {
 			// 聊天通知仅用于显式后台调用；同步记账不能在推理中产生后台未读/推送。
 			// 通用完成钩子仍接收所有账本终态，通知只发送句柄与状态。
 			if info.Background {
-				_ = s.emit(ihtml.ChatStreamEvent{Type: ihtml.ChatStreamTaskComplete, TaskID: info.ID, TaskState: info.State, ToolName: info.Tool})
+				_ = s.emit(ihtml.ChatStreamEvent{Type: ihtml.ChatStreamTaskComplete, FlowID: info.GoalID, TaskID: info.ID, TaskState: info.State, ToolName: info.Tool, ToolTitle: info.Title})
 			}
 			if onComplete != nil {
 				onComplete(info)
@@ -343,6 +353,7 @@ type session struct {
 	done                 chan struct{}
 	mu                   sync.Mutex
 	emitMu               sync.Mutex
+	taskProgress         map[string]taskProgressDisplayState
 	queue                []pendingTurn
 	rejections           []pendingTurn
 	pendingMu            sync.Mutex
@@ -782,6 +793,7 @@ func (s *session) run(ctx context.Context, cancel context.CancelFunc, ev *ihtml.
 			return
 		}
 		p.end(result, runErr)
+		s.publishTaskScopeStatus()
 	}()
 	models, err := s.backend.Models(ctx)
 	p.mu.Lock()
@@ -1062,13 +1074,15 @@ type projection struct {
 	tools               map[string]agent.Tool
 	resumedCard         *ihtml.ProposedToolCall
 	resumedToolCallID   string
+	toolIDs             map[string]string
+	activeTools         map[string]agent.Step
 }
 
 func newProjection(s *session, ctx context.Context, cancel context.CancelFunc) *projection {
 	var id [16]byte
 	// crypto/rand.Read either fills the buffer or panics on modern Go.
 	_, _ = rand.Read(id[:])
-	return &projection{flowID: agent.TaskGoalID(ctx), session: s, ctx: ctx, cancel: cancel, id: hex.EncodeToString(id[:]), pendingSteps: make(map[string]int), approvalTools: make(map[string]bool), tools: make(map[string]agent.Tool)}
+	return &projection{flowID: agent.TaskGoalID(ctx), session: s, ctx: ctx, cancel: cancel, id: hex.EncodeToString(id[:]), pendingSteps: make(map[string]int), approvalTools: make(map[string]bool), tools: make(map[string]agent.Tool), toolIDs: make(map[string]string), activeTools: make(map[string]agent.Step)}
 }
 
 // All send calls hold mu across sequence assignment and synchronous emission.
@@ -1166,6 +1180,24 @@ func (p *projection) step(step agent.Step, host func(agent.Step)) {
 			}
 			return
 		}
+		if step.Kind == agent.StepToolStart {
+			// 只接受实际端点开始；签名确认包装仍由原确认通道发开始事件。
+			if step.ToolCallID == "" || step.ApprovalPending || step.ApprovalRejected || step.Replayed {
+				return
+			}
+			resumed := p.resumedCard != nil && p.resumedToolCallID == step.ToolCallID && p.resumedCard.Name == step.ToolName
+			if p.approvalTools[step.ToolName] && !resumed {
+				return
+			}
+			key := step.ToolName + "\x00" + step.ToolCallID
+			if _, exists := p.activeTools[key]; exists {
+				return
+			}
+			view := p.session.publicToolResult(p.ctx, p.stepTool(step), nil, "")
+			p.activeTools[key] = step
+			p.send(ihtml.ChatStreamEvent{Type: ihtml.ChatStreamToolStart, ToolID: p.stepToolID(step), ToolName: step.ToolName, ToolTitle: view.Title, ToolStatus: ihtml.ChatToolRunning})
+			return
+		}
 		if step.Kind != agent.StepToolCall || step.ApprovalPending {
 			return
 		}
@@ -1209,10 +1241,9 @@ func (p *projection) step(step agent.Step, host func(agent.Step)) {
 			status = ihtml.ChatToolAccepted
 			summary = "Request accepted; completion is not confirmed."
 		}
-		p.toolSeq++
-		event := ihtml.ChatStreamEvent{Type: ihtml.ChatStreamToolResult, ToolID: fmt.Sprintf("%s_tool_%d", p.id, p.toolSeq), ToolName: step.ToolName, ToolStatus: status, ToolSummary: summary}
+		event := ihtml.ChatStreamEvent{Type: ihtml.ChatStreamToolResult, ToolID: p.stepToolID(step), ToolName: step.ToolName, ToolStatus: status, ToolSummary: summary}
 		// 失败同样保留公开标题与结构化事实；展示钩子不能把失败/未知改成完成。
-		view := p.session.publicToolResult(p.ctx, p.tools[step.ToolName], step.Args, step.Result)
+		view := p.session.publicToolResult(p.ctx, p.stepTool(step), step.Args, step.Result)
 		event.ToolTitle, event.ToolResult = view.Title, view.Result
 		if status == ihtml.ChatToolSuccess || status == ihtml.ChatToolAccepted || previewRefresh {
 			if view.Status != "" && !(status == ihtml.ChatToolAccepted && view.Status == ihtml.ChatToolSuccess) {
@@ -1231,14 +1262,51 @@ func (p *projection) step(step agent.Step, host func(agent.Step)) {
 			event.ToolCall = p.resumedCard
 			p.resumedCard = nil
 		}
+		delete(p.activeTools, step.ToolName+"\x00"+step.ToolCallID)
 		p.send(event)
 	})
+}
+
+// stepTool 合并当前可信工具目录与引擎框架工具元数据；不从模型参数提取标题。
+func (p *projection) stepTool(step agent.Step) agent.Tool {
+	tool := p.tools[step.ToolName]
+	tool.Name = step.ToolName
+	if tool.Title == "" {
+		tool.Title = step.ToolTitle
+	}
+	return tool
+}
+
+// 同一真实调用的开始和结果共享显示编号；并行回执顺序不影响其关联。
+func (p *projection) stepToolID(step agent.Step) string {
+	key := step.ToolName + "\x00" + step.ToolCallID
+	if step.ToolCallID != "" {
+		if id := p.toolIDs[key]; id != "" {
+			return id
+		}
+		if p.resumedCard != nil && p.resumedToolCallID == step.ToolCallID && p.resumedCard.Name == step.ToolName {
+			p.toolIDs[key] = p.resumedCard.ID
+			return p.resumedCard.ID
+		}
+	}
+	p.toolSeq++
+	id := fmt.Sprintf("%s_tool_%d", p.id, p.toolSeq)
+	if step.ToolCallID != "" {
+		p.toolIDs[key] = id
+	}
+	return id
 }
 
 func (p *projection) end(result *agent.TurnResult, err error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.finished = true
+	// 模型或连接在结果投影前退出时，已开始的调用只能记为未知，不能永久显示执行中。
+	for key, step := range p.activeTools {
+		view := p.session.publicToolResult(p.ctx, p.stepTool(step), nil, "")
+		p.send(ihtml.ChatStreamEvent{Type: ihtml.ChatStreamToolResult, ToolID: p.stepToolID(step), ToolName: step.ToolName, ToolTitle: view.Title, ToolStatus: ihtml.ChatToolUnknown, ToolSummary: "调用已中断，结果尚未确认；请核对原任务回执，不自动重放。"})
+		delete(p.activeTools, key)
+	}
 	if err != nil || result == nil || result.FinishReason == "agent_error" {
 		message := "Assistant turn failed."
 		if errors.Is(err, context.Canceled) {
@@ -1276,8 +1344,20 @@ func (s *session) publicToolResult(ctx context.Context, tool agent.Tool, args js
 		if recover() != nil {
 			view = ToolResultView{}
 		}
+		// 展示回调未提供标题或异常时仍沿可信工具定义恢复名称，技术标识不作为标题。
+		view.Title = agent.PublicToolTitle(tool.Name, view.Title)
+		if view.Title == "" {
+			var provider any
+			if s != nil && s.backend != nil {
+				provider = s.backend.cfg.Engine
+			}
+			view.Title = agent.ResolveToolMetadata(tool, provider).Title
+		}
 	}()
 	if internal, ok := s.scopeResultView(tool, result); ok {
+		return internal
+	}
+	if internal, ok := taskResultView(agent.ResolveToolMetadata(tool, s.backend.cfg.Engine), result); ok {
 		return internal
 	}
 	if fn := s.backend.cfg.PresentToolResult; fn != nil {

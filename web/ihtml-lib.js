@@ -34,6 +34,7 @@
       cancellation_ack_timeout: '未收到服务器撤销回执，执行状态未知。请重新连接后再确认。', cancellation_failed: '撤销失败，执行状态未确认。',
       confirm_expired: '确认授权已过期，不能再用此卡发起操作。已提交过的请求请核对原记录。', expires_in: '剩余', expires_at: '到期', review_confirmation_request: '请只核对本次选中的原操作记录：先查询这些记录及原任务的最新状态，对仍需执行的原范围重新预览并生成有效确认卡。已执行或结果未知的操作不得重复提交。本次仅核对，不代表批准任何变更。', restore_confirmation: '核对并恢复确认', restore_confirmation_hint: '历史记录不包含执行授权。先核对原操作，再生成有效确认卡；此步骤不会批准变更。', refresh_confirmation: '刷新预览', refresh_confirmation_request: '请继续原请求：先核对原任务，刷新过期预览并生成新的确认卡；不要重复提交已执行或结果未知的操作。',
       params_title: '操作参数', debug_title: '调试详情', tools_called: '调用 {n} 个工具',
+      background_task_progress:'后台：{name} · {message}',background_tasks_progress:'后台进度 · {n} 项',background_tasks_count:'已报告 {n} 项后台进度',background_task_waiting:'正在等待后台结果，收到后继续处理',task_last_progress:'最后进度：{message}',task_state_queued:'等待执行',task_state_running:'进行中',task_state_cancelling:'正在停止',task_state_completed:'调用已返回',task_state_failed:'调用失败',task_state_cancelled:'已取消',task_state_unknown:'结果待核对',
       answer_versions_window:'当前视图只保留最近64条阶段说明；较早内容以宿主保存的历史为准。',answer_versions:'阶段性说明 · {n} 条',answer_versions_count:'{n} 条阶段说明',answer_versions_note:'以下是任务较早阶段的说明；当前状态请以最新答复和操作回执为准。', process_steps: '处理过程', trace_completed: '本轮处理结束', agent_continuing:'正在继续处理原请求', background_call_returned:'后台调用已返回（{id}），业务结果以原回执为准', trace_tool_count: '{n} 条工具记录', trace_elapsed: '{n}秒', trace_elapsed_minutes:'{m}分{s}秒', trace_elapsed_hours:'{h}小时{m}分', steps_completed: '已完成 {n} 个步骤', tools_running: '正在执行 {n} 项', answering: '正在整理回答',
       reasoning_step: '分析摘要 {n}', reasoning_streaming: '正在分析', reasoning_complete: '分析完成', technical_details: '技术详情',
       submission_receipt: '提交回执', submission_only: '已提交表示请求已受理；最终处理结果请查看执行回执和助手答复。', request_summary: '请求摘要', result_data: '返回结果', diagnostic_data: '诊断信息', tool_reason: '为什么需要确认', review_list: '查看完整列表（{n} 项）', review_partial_list: '查看已显示的列表（{n} 项）', review_collection: '共 {n} 项', review_search: '筛选此列表', review_page: '第 {page}/{pages} 页 · {n} 项', review_no_matches: '没有匹配项', review_field: '设置项', review_before: '修改前', review_after: '修改后', review_missing: '未设置', review_partial: '这里只展示部分变更，请核对完整操作内容。',
@@ -51,7 +52,7 @@
       tool_title_kv_get: '读取持久数据', tool_title_kv_set: '写入持久数据', tool_title_page_list: '查看页面列表', tool_title_page_set: '创建或更新页面',
       tool_title_page_delete: '删除页面', tool_title_api_probe: '检查业务接口', tool_title_revision_list: '查看历史快照', tool_title_revision_rollback: '回滚到快照',
       tool_title_page_errors: '查看页面报错', tool_title_template_get: '读取当前模板结构', tool_title_template_put: '保存当前模板草稿',
-      tool_title_template_publish: '发布模板', tool_title_template_slot_delete: '删除模板区域', tool_title_unknown: '工具操作',
+      tool_title_template_publish: '发布模板', tool_title_template_slot_delete: '删除模板区域', tool_title_unknown: '工具调用',
       tool_action_item_list: '查看当前页面模块', tool_action_item_get: '读取模块 {id}', tool_action_item_put: '创建或更新 {n} 个界面模块',
       tool_action_item_delete: '删除 {n} 个界面模块', tool_action_items_replace: '用 {n} 个模块整体重建页面', tool_action_theme_get: '读取页面主题',
       tool_action_theme_set: '更新 {n} 项主题设置', tool_action_kv_get: '读取数据 {key}', tool_action_kv_set: '写入数据 {key}',
@@ -158,6 +159,7 @@
       cancellation_ack_timeout: 'No cancellation acknowledgement was received; execution status is unknown. Reconnect before taking further action.', cancellation_failed: 'Cancellation failed; execution status is not confirmed.',
       confirm_expired: 'Authorization expired; this card can no longer start an operation. Check the original records for any previously submitted request.', expires_in: 'Time left', expires_at: 'Expires', review_confirmation_request: 'Only review the selected original operation records: check their latest state and original tasks, then refresh previews and issue valid confirmation cards for the original scope that still needs work. Do not resubmit completed or unknown operations. This is a review request, not approval for any change.', restore_confirmation: 'Review and restore confirmation', restore_confirmation_hint: 'History carries no execution authority. Review the original operations before issuing fresh confirmation cards; this does not approve changes.', refresh_confirmation: 'Refresh preview', refresh_confirmation_request: 'Continue the original request: verify the original task, refresh the expired preview and issue a new confirmation card. Do not repeat completed or unknown operations.',
       params_title: 'Parameters', debug_title: 'Debug', tools_called: '{n} tool calls',
+      background_task_progress:'Background: {name} · {message}',background_tasks_progress:'Background progress · {n} items',background_tasks_count:'{n} reported background updates',background_task_waiting:'Waiting for background results before continuing',task_last_progress:'Last progress: {message}',task_state_queued:'Queued',task_state_running:'Running',task_state_cancelling:'Stopping',task_state_completed:'Call returned',task_state_failed:'Call failed',task_state_cancelled:'Cancelled',task_state_unknown:'Outcome unconfirmed',
       answer_versions_window:'This view retains the latest 64 stage updates. Earlier content depends on host history retention.',answer_versions:'Stage updates · {n}',answer_versions_count:'{n} stage updates',answer_versions_note:'These updates describe earlier stages of this task. Check the latest answer and operation receipts for the current status.', process_steps: 'Process', trace_completed: 'Turn finished', agent_continuing:'Continuing the original request', background_call_returned:'Background call returned ({id}); check the original receipt for the business outcome', trace_tool_count: '{n} tool records', trace_elapsed: '{n}s', trace_elapsed_minutes:'{m}m {s}s', trace_elapsed_hours:'{h}h {m}m', steps_completed: '{n} steps completed', tools_running: '{n} running', answering: 'Preparing the answer',
       reasoning_step: 'Reasoning step {n}', reasoning_streaming: 'Analyzing', reasoning_complete: 'Analysis complete', technical_details: 'Technical details',
       submission_receipt: 'Submission receipt', submission_only: 'Submitted means the request was accepted. See the execution receipts and assistant reply for the final outcome.', request_summary: 'Request summary', result_data: 'Result', diagnostic_data: 'Diagnostics', tool_reason: 'Why confirmation is required', review_list: 'Review complete list ({n} items)', review_partial_list: 'Review available list ({n} items)', review_collection: '{n} items', review_search: 'Filter this list', review_page: 'Page {page}/{pages} · {n} items', review_no_matches: 'No matching items', review_field: 'Setting', review_before: 'Before', review_after: 'After', review_missing: 'Not set', review_partial: 'Only part of the changes is shown. Review the complete operation.',
@@ -175,7 +177,7 @@
       tool_title_kv_get: 'Read persistent data', tool_title_kv_set: 'Write persistent data', tool_title_page_list: 'View pages', tool_title_page_set: 'Create or update a page',
       tool_title_page_delete: 'Delete page', tool_title_api_probe: 'Check business API', tool_title_revision_list: 'View history snapshots', tool_title_revision_rollback: 'Roll back to snapshot',
       tool_title_page_errors: 'View page errors', tool_title_template_get: 'Read current template structure', tool_title_template_put: 'Save current template draft',
-      tool_title_template_publish: 'Publish template', tool_title_template_slot_delete: 'Delete template region', tool_title_unknown: 'Tool operation',
+      tool_title_template_publish: 'Publish template', tool_title_template_slot_delete: 'Delete template region', tool_title_unknown: 'Tool call',
       tool_action_item_list: 'View the current page modules', tool_action_item_get: 'Read module {id}', tool_action_item_put: 'Create or update {n} interface modules',
       tool_action_item_delete: 'Delete {n} interface modules', tool_action_items_replace: 'Rebuild the page with {n} modules', tool_action_theme_get: 'Read the page theme',
       tool_action_theme_set: 'Update {n} theme settings', tool_action_kv_get: 'Read data {key}', tool_action_kv_set: 'Write data {key}',
@@ -1145,11 +1147,17 @@
       const source = Object.assign({}, embedded, supplied);
       const name = safeText(source.name || ev.tool_name, 120);
       const meta = TOOL_META[name];
-      const title = safeText(meta ? t(meta[0]) : (ev.tool_title || source.title || name || t('tool_title_unknown')), TITLE_LIMIT);
+      // 标题与机器标识分离；旧记录的失败事件可能把 name 写进 title，不能覆盖可读调用标题。
+      const readableTitle = value => {
+        const text = safeText(value, TITLE_LIMIT).trim();
+        if (!text || /^[A-Za-z][A-Za-z0-9]*(?:[_./:-][A-Za-z0-9]+)+$/.test(text) || (text === name && /^[A-Za-z_$][\w$]*$/.test(text))) return '';
+        return text;
+      };
+      const title = meta ? t(meta[0]) : (readableTitle(ev.tool_title) || readableTitle(source.title) || t('tool_title_unknown'));
       const body = asObject(source.body);
       const projected = actionAndFacts(name, body, t);
       // 宿主已提供可读标题时，通用卡片不用内部工具标识重复充当操作说明。
-      if (!meta && (ev.tool_title || source.title)) {
+      if (!meta) {
         projected.action = title;
         projected.facts = projected.facts.filter(fact => fact.label !== t('tool_fact_operation') || fact.value !== name);
       }
@@ -1165,6 +1173,8 @@
       const summary = safeText(summarySource, SUMMARY_LIMIT);
       const reason = source.reason ? safeText(source.reason, SUMMARY_LIMIT) : '';
       const requestPayload = {};
+      // 展开技术详情仍能定位原始调用，即使工具没有 HTTP 路径或参数。
+      if (name) requestPayload.name = name;
       if (source.method) requestPayload.method = source.method;
       if (source.path) requestPayload.path = source.path;
       if (source.query && typeof source.query === 'object' && Object.keys(source.query).length) requestPayload.query = source.query;
