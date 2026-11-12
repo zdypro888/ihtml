@@ -2349,3 +2349,16 @@ for(const entry of ['history','notifications'])for(const mode of ['light','dark'
  assert.equal(await page.locator('#b textarea').inputValue(),'unsent draft');
  assert.equal(await group.evaluate(e=>e.scrollWidth>e.clientWidth),false);
 });
+
+test('restored aggregate can review nineteen original records without approving any',async t=>{
+ const page=await fixture(t,{width:390,height:900});await page.evaluate(async()=>{
+  const original=window.fetch;window.fetch=async(...args)=>{const r=await original(...args),text=r.text;return {...r,text:async()=>JSON.stringify({...JSON.parse(await text()),batch_confirmations:true})}};
+  window.a=ihtml.mountChat('#a',{locale:'zh-CN',initialOperations:Array.from({length:19},(_,i)=>({id:'original-'+i,status:'pending',proposalRecorded:true,call:{name:'arbitrary_change',title:'原范围',confirmation_group:'g',method:'POST',path:'/objects',body:{id:'object-'+i},presentation:{facts:[{label:'目标',value:'object-'+i}]}}}))});await a.ready();a.theme.set({mode:'dark'},{persist:false});
+ });
+ const group=page.locator('.ihtml-tool-batch');assert.match(await group.locator('.t-batch-title').innerText(),/19/);
+ await group.locator('.t-batch-list > summary').click();assert.equal(await group.locator('.ihtml-tool').count(),19);await group.locator('.t-batch-list > summary').click();
+ await group.screenshot({path:'/tmp/ihtml-restored-confirmation-19.png'});
+ await group.locator(':scope > .t-actions > .t-refresh').click();
+ await page.waitForFunction(()=>sockets.some(s=>s.sent.some(f=>f.client_context?.operation_ids?.length===19)));
+ assert.equal(await page.evaluate(()=>sockets.some(s=>s.sent.some(f=>f.type==='confirm_tool'||f.type==='confirm_tools'))),false);
+});

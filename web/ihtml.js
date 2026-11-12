@@ -5395,8 +5395,15 @@
       const refreshVisibility=()=>{if(opened&&paneVisible())void load();else void refreshSummary();};
       const visibilityObserver=kind==='notifications'&&typeof IntersectionObserver==='function'?new IntersectionObserver(refreshVisibility):null;
       visibilityObserver?.observe(pane);
+      // display/hidden 在两帧之间往返时，IntersectionObserver 可以合并掉变化。
+      // 只观察外层可见性边界，不因通知正文或样式重绘反复加载，更不能把隐藏内容标记已读。
+      let hostWasVisible=paneVisible();
+      const hostVisibilityObserver=kind==='notifications'&&typeof MutationObserver==='function'?new MutationObserver(()=>{
+        const visible=paneVisible();if(visible===hostWasVisible)return;hostWasVisible=visible;refreshVisibility();
+      }):null;
+      for(let ancestor=pane;hostVisibilityObserver&&ancestor;ancestor=ancestor.parentElement)hostVisibilityObserver.observe(ancestor,{attributes:true,attributeFilter:['style','class','hidden']});
       if(poll)document.addEventListener('visibilitychange',refreshVisibility);
-      addDisposer(()=>{if(poll){clearInterval(poll);document.removeEventListener('visibilitychange',refreshVisibility);}visibilityObserver?.disconnect();summaryAbort?.abort();reset();});
+      addDisposer(()=>{if(poll){clearInterval(poll);document.removeEventListener('visibilitychange',refreshVisibility);}visibilityObserver?.disconnect();hostVisibilityObserver?.disconnect();summaryAbort?.abort();reset();});
       return {open, close, reset, sync, refresh: () => opened?load():refreshSummary(), get opened() { return opened; }, get mutating() { return mutating; }};
     }
 
@@ -7345,11 +7352,11 @@
       async reviewToolConfirmations(records) {
         const selected=records.filter(rec=>this.needsConfirmationReview(rec));
         if(!selected.length)return;
-        const draft=this.dom.input.value;
-        try {return await this.send(T('refresh_confirmation_request'),selected.map(rec=>rec.call.id||rec.id));}
+        const draft=this.dom.input.value,epoch=requestEpoch,user=resolvedUser,request=T('refresh_confirmation_request');
+        try {return await this.send(request,selected.map(rec=>rec.call.id||rec.id));}
         finally {
           // 程序发出的核对请求不吞掉用户在切换列表前保留的草稿。
-          if(draft&&this.dom&&!this.dom.input.value){this.dom.input.value=draft;this.resizeComposer();this.syncChatControls();}
+          if(draft&&!destroyed&&epoch===requestEpoch&&user===resolvedUser&&this.dom&&(!this.dom.input.value||this.dom.input.value===request)){this.dom.input.value=draft;this.resizeComposer();this.syncChatControls();}
         }
       },
       // 来源不参与展示状态：待确认、进行中及待刷新确认默认展开，执行回执默认收起；显式选择优先。
