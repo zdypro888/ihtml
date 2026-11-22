@@ -3,6 +3,7 @@ package assistant
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -189,7 +190,8 @@ func TestTaskWakeRequestIDDoesNotGrantInternalEventProvenance(t *testing.T) {
 	s.mu.Unlock()
 	s.HandleEvent(t.Context(), &ihtml.ChatClientEvent{Type: ihtml.ChatClientUserMessage, RequestID: "task-wake/" + wait.ID, Messages: []ihtml.ChatMessage{{Role: "user", Content: "a real user message"}}})
 	events := rec.wait(t, ihtml.ChatStreamAssistantDone, 1)
-	if events[len(events)-1].Message != "ordinary user request" {
+	done := slices.IndexFunc(events, func(event ihtml.ChatStreamEvent) bool { return event.Type == ihtml.ChatStreamAssistantDone })
+	if done < 0 || events[done].Message != "ordinary user request" {
 		t.Fatal(events)
 	}
 }

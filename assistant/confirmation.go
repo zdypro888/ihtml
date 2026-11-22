@@ -473,8 +473,9 @@ func (s *session) runConfirmedTool(ctx context.Context, cancel context.CancelFun
 			runErr = errors.New("assistant: confirmed tool panicked; execution state unknown")
 		}
 		if ctx.Err() != nil && !recovered {
-			runErr = ctx.Err()
+			runErr = confirmedToolContextError(ctx.Err(), runErr)
 		}
+		handlerErr := runErr
 		if evidence != nil {
 			evidence.Started = started
 			evidence.Err = runErr
@@ -485,7 +486,7 @@ func (s *session) runConfirmedTool(ctx context.Context, cancel context.CancelFun
 			}
 		}
 		if ctx.Err() != nil && !recovered {
-			runErr = ctx.Err()
+			runErr = confirmedToolContextError(ctx.Err(), handlerErr, runErr)
 		}
 		status, summary := ihtml.ChatToolSuccess, "Invocation returned; no public result details were provided. Check the source record to verify the business outcome."
 		view := ToolResultView{}
@@ -632,8 +633,11 @@ func (s *session) runConfirmedTool(ctx context.Context, cancel context.CancelFun
 	}
 	started = true
 	evidence.Result, runErr = item.tool.Handler(callCtx, append(json.RawMessage(nil), item.args...))
-	if callCtx.Err() != nil {
-		runErr = callCtx.Err()
+	if err := callCtx.Err(); err != nil {
+		if outerErr := ctx.Err(); outerErr != nil {
+			err = outerErr
+		}
+		runErr = confirmedToolContextError(err, runErr)
 	}
 	// 确认桥接与普通引擎共用工具的只读回执恢复协议；绝不再次调用 Handler。
 	// 请求超时后只核对同一 invocation，用户停止/会话关闭则不发起恢复或续办。
@@ -645,14 +649,39 @@ func (s *session) runConfirmedTool(ctx context.Context, cancel context.CancelFun
 		host := s.sctx
 		if err := s.backend.cfg.ToolExecutionGuard(reconcile, &host, item.tool, append(json.RawMessage(nil), item.args...)); err == nil {
 			value, ok, err := item.tool.RecoverResult(reconcile, append(json.RawMessage(nil), item.args...))
-			if err == nil && ok && value != "" && reconcile.Err() == nil {
-				evidence.Result, runErr, recovered = value, nil, true
-				// 回执保存/展示也使用独立核对预算，不能继续使用已超时的执行 context。
-				ctx = reconcile
+			if reconcile.Err() == nil {
+				if err == nil && ok && value != "" {
+					evidence.Result, runErr, recovered = value, nil, true
+					// 回执保存/展示也使用独立核对预算，不能继续使用已超时的执行 context。
+					ctx = reconcile
+				} else if err != nil {
+					// 尚无确定结果，只补充已审定的原回执信息，不能改写执行结论。
+					runErr = withConfirmedToolPublicError(runErr, err)
+				}
 			}
 		}
 	}
 	return
+}
+
+func confirmedToolContextError(cause error, sources ...error) error {
+	if errors.Is(cause, context.DeadlineExceeded) {
+		return withConfirmedToolPublicError(cause, sources...)
+	}
+	return cause
+}
+
+// withConfirmedToolPublicError 只复制框架已审定的公开说明，保留原失败的分类和私有原因边界。
+func withConfirmedToolPublicError(cause error, sources ...error) error {
+	if failure := agent.TaskFailureFrom(cause, "unknown", true, "", nil); failure == nil || failure.Public != nil {
+		return cause
+	}
+	for _, source := range sources {
+		if failure := agent.TaskFailureFrom(source, "unknown", true, "", nil); failure != nil && failure.Public != nil {
+			return agent.NewPublicError(failure.Public.Code, failure.Public.Message, cause)
+		}
+	}
+	return cause
 }
 
 // 排队与用户停止共用同一把锁；不能借用即将收尾的上一轮 context，也不能在停止后重新排队。

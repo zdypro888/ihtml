@@ -3,6 +3,7 @@ package assistant
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -66,7 +67,9 @@ func TestRemoteStopCancelsPlanningAndFencesOldQueuedMessages(t *testing.T) {
 			first.HandleEvent(t.Context(), &ihtml.ChatClientEvent{Type: ihtml.ChatClientUserMessage, ToolsEnabled: &toolsEnabled, Messages: []ihtml.ChatMessage{{Role: "user", Content: "fresh explicit message"}}})
 			close(release)
 			events := rec.wait(t, ihtml.ChatStreamAssistantDone, 1)
-			if calls.Load() != 2 || events[len(events)-1].Message != "fresh explicit message" {
+			// 完成事件后可以紧跟任务范围状态，只核对本轮的完成消息。
+			done := slices.IndexFunc(events, func(event ihtml.ChatStreamEvent) bool { return event.Type == ihtml.ChatStreamAssistantDone })
+			if calls.Load() != 2 || done < 0 || events[done].Message != "fresh explicit message" {
 				t.Fatal("stopped queue or new explicit admission was handled incorrectly", calls.Load(), events)
 			}
 		})
