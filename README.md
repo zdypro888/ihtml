@@ -591,6 +591,8 @@ GPT-6.1 Terra 的工具调用必须使用 `OpenAIAPI:"responses"`；SDK 在发�
 
 可选 `notifications.push={publicKey,subscriptionIds,subscribe(subscriptionJSON),remove(subscriptionJSON)}` 增加系统推送设置。只有用户点击才请求浏览器权限，`subscribe` 必须在服务端保存后返回 `{enabled:true}`。`subscriptionIds` 为当前用户已登记端点的 SHA-256；不能仅凭浏览器已有订阅就宣称当前用户已开启。`push` 包复用标准 Web Push 加密传输；VAPID 私钥由宿主凭据配置保管，不返回前端。固定同源资源 `ihtml-push-sw.js` 只显示通知和打开同源页面，不执行业务。宿主需放行该 SDK 静态资源；`/assistant/` 集成使用同路径 scope，不覆盖站点已有根 Service Worker。iOS 可能要求将站点添加到主屏幕；不支持或拒绝权限时站内通知照常可用。
 
+宿主可同时提供 `push.isForeground()` 和 `push.reportForeground({id,tab,active})`。SDK 只在当前窗口有焦点且当前用户拥有该设备订阅时刷新在场状态，窗口失焦或退出时释放。宿主可在视图开合时调用 `chat.notifications.refreshForeground()`。发送服务按当前用户、订阅 ID 和短期有效期决定是否跳过系统投递，站内记录照常保留；清理须匹配原标签页。Service Worker 收到推送后照常展示。
+
 宿主在助手尚未打开时需要更新通知入口，可复用 `ihtml.observeNotifications({load:({signal})=>status, onUpdate:status=>void, onError?, intervalMS?})`。默认每30秒读取服务端摘要，页面回到前台或获得焦点时刷新；同一观察器不会重叠查询，重复 `refresh()` 会合并。`destroy()` 取消请求、定时器与监听并拒绝迟到回包，身份变化必须销毁旧观察器。它不挂载聊天、不建立 WebSocket，也不标记已读；失败保留宿主已有显示。回调应遵守 AbortSignal，忽略取消的未返回回调仍只占一个请求，不会无限堆积。列表、已读和系统推送继续使用上述原生通知面板。
 
 通知面板已打开但被宿主的抽屉、窗口或后台页面隐藏时，不调用 `seen`；外层抽屉隐藏期间仍更新未读摘要，重新显示后刷新原面板。迟到列表回包也须重新检查实际可见性，不能把用户未看到的新回执标为已读。该判断由共享组件处理，宿主无需复制可见性轮询。

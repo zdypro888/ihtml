@@ -2731,3 +2731,29 @@ for(const width of [390,1100])test('long operation title and localized cancellat
  assert.ok(summary.y>=title.y+title.height-1);assert.match(await card.innerText(),/已撤销，操作未执行/);assert.ok(!(await card.innerText()).includes('Cancelled;'));
  await card.screenshot({path:'/tmp/authorization-layout-'+width+'.png'});
 });
+
+test('foreground reports use the owned device subscription and release it when the view closes',async(t)=>{
+ const page=await fixture(t);
+ await page.evaluate(async()=>{
+  const endpoint='https://web.push.apple.com/test';
+  const id=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(endpoint))),n=>n.toString(16).padStart(2,'0')).join('');
+  window.viewing=false;window.foregroundReports=[];window.expectedDevice=id;
+  document.hasFocus=()=>true;
+  window.Notification={permission:'granted'};window.PushManager=class{};
+  Object.defineProperty(navigator,'serviceWorker',{configurable:true,value:{getRegistration:async()=>({
+   active:{scriptURL:'https://host.test/ihtml-push-sw.js'},pushManager:{getSubscription:async()=>({endpoint})},
+  })}});
+  window.a=ihtml.mountChat('#a',{notifications:{list:async()=>({items:[]}),push:{
+   subscriptionIds:[id],isForeground:()=>window.viewing,reportForeground:async payload=>foregroundReports.push(payload),
+  }}});
+  await a.ready();
+  viewing=true;a.chat.notifications.refreshForeground();
+ });
+ await page.waitForFunction(()=>foregroundReports.length===1);
+ const initial=await page.evaluate(()=>({report:foregroundReports[0],expectedDevice}));
+ assert.equal(initial.report.id,initial.expectedDevice);
+ assert.equal(initial.report.active,true);
+ await page.evaluate(()=>{viewing=false;a.chat.notifications.refreshForeground();});
+ await page.waitForFunction(()=>foregroundReports.some(report=>report.active===false));
+ assert.deepEqual(await page.evaluate(()=>foregroundReports.find(report=>report.active===false)),{...initial.report,active:false});
+});

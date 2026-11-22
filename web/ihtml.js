@@ -5223,7 +5223,7 @@
       const retry = el('button', 'ihtml-chat-history-retry', T('history_retry')); retry.type = 'button'; retry.hidden = true;
       const more = el('button', 'ihtml-chat-history-more', T('history_more')); more.type = 'button'; more.hidden = true;
       pane.appendChild(heading);
-      let refreshPushState=()=>{};
+      let refreshPushState=()=>{}, refreshForeground=()=>{};
       if (source.push) {
         const push = source.push;
  const subscriptionIds=new Set(push.subscriptionIds||[]);
@@ -5260,6 +5260,50 @@
           }catch(error){if(alive()&&!isStaleError(error))status.textContent=T('notifications_push_error');}
           finally{requestControllers.delete(abort);abort.abort();pushBusy=false;if(!destroyed)syncPushOwner();}
         };
+        if (supported && typeof push.reportForeground === 'function' && typeof push.isForeground === 'function') {
+          // userVisibleOnly 要求收到的推送正常显示。由宿主在发送前按设备和短时前台状态去重。
+          const tab = crypto.randomUUID();
+          let reported = '', inFlight = false, rerun = false;
+          refreshForeground = async()=>{
+            if (inFlight) { rerun = true; return; }
+            inFlight = true;
+            const epoch = requestEpoch;
+            const active = ()=>!destroyed&&!authRefreshing&&requestEpoch===epoch&&doc.visibilityState==='visible'&&doc.hasFocus()&&push.isForeground();
+            try {
+              let id = '';
+              if (active() && Notification.permission === 'granted') {
+                const worker = new URL('ihtml-push-sw.js', baseURL);
+                const found = await navigator.serviceWorker.getRegistration(new URL('./', worker).href);
+                const sub = await found?.pushManager.getSubscription();
+                if (sub && found.active && new URL(found.active.scriptURL).pathname===worker.pathname) {
+                  const hash=await subscriptionID(sub.endpoint);
+                  if (active() && subscriptionIds.has(hash)) id=hash;
+                }
+              }
+              if (destroyed || requestEpoch !== epoch) return;
+              if (reported && reported !== id) await push.reportForeground({id:reported,tab,active:false});
+              reported='';
+              if (id && active()) {
+                await push.reportForeground({id,tab,active:true});
+                if (active()) reported=id;
+                else await push.reportForeground({id,tab,active:false});
+              }
+            } catch { /* 状态不能确认时，宿主短时租约自动过期。 */ }
+            finally {
+              inFlight=false;
+              if(rerun&&!destroyed){rerun=false;void refreshForeground();}
+            }
+          };
+          const timer=setInterval(refreshForeground,5000);
+          const refresh=()=>{void refreshForeground();};
+          const release=()=>{if(reported)void Promise.resolve(push.reportForeground({id:reported,tab,active:false})).catch(()=>{});reported='';};
+          doc.addEventListener('visibilitychange',refresh);
+          window.addEventListener('focus',refresh);
+          window.addEventListener('blur',refresh);
+          window.addEventListener('pagehide',release);
+          addDisposer(()=>{clearInterval(timer);doc.removeEventListener('visibilitychange',refresh);window.removeEventListener('focus',refresh);window.removeEventListener('blur',refresh);window.removeEventListener('pagehide',release);release();});
+          refresh();
+        }
         refreshPushState=async()=>{
           syncPushOwner();
           if(!supported||destroyed||authRefreshing||pushBusy||Notification.permission!=='granted')return;
@@ -5404,7 +5448,7 @@
       for(let ancestor=pane;hostVisibilityObserver&&ancestor;ancestor=ancestor.parentElement)hostVisibilityObserver.observe(ancestor,{attributes:true,attributeFilter:['style','class','hidden']});
       if(poll)document.addEventListener('visibilitychange',refreshVisibility);
       addDisposer(()=>{if(poll){clearInterval(poll);document.removeEventListener('visibilitychange',refreshVisibility);}visibilityObserver?.disconnect();hostVisibilityObserver?.disconnect();summaryAbort?.abort();reset();});
-      return {open, close, reset, sync, refresh: () => opened?load():refreshSummary(), get opened() { return opened; }, get mutating() { return mutating; }};
+      return {open, close, reset, sync, refreshForeground, refresh: () => opened?load():refreshSummary(), get opened() { return opened; }, get mutating() { return mutating; }};
     }
 
     const chat = {
@@ -8690,6 +8734,7 @@
           open:()=>{if(chat.notifications){chat.history?.close(false);chat.notifications.open();}},
           close:()=>chat.notifications?.close(false),
           refresh:()=>chat.notifications?.refresh(),
+          refreshForeground:()=>chat.notifications?.refreshForeground(),
         },
         get readOnly() { return readOnly; },
       },
