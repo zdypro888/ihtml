@@ -41,3 +41,42 @@ for(const mode of ['light','dark'])for(const width of [390,1100])test(`1000 targ
  await page.evaluate(()=>sockets[0].emit({type:'confirmation_required',run_id:'r',seq:4,tool_call:call}));assert.equal(await collection.evaluate(e=>e.open),true);assert.equal(await collection.locator('input').inputValue(),'person-1000');assert.equal(await collection.locator('li').count(),1);
  assert.equal(await page.evaluate(()=>sockets.flatMap(s=>s.sent).filter(f=>f.type==='confirm_tool'||f.type==='confirm_tools').length),0);
 });
+
+test('short target lists fit the card and a fourth target activates the full-list disclosure', async t=>{
+ const page=await fixture(t,390);
+ await page.evaluate(async()=>{
+  const emails=Array.from({length:6},(_,i)=>'long-account-name-'+(i+1)+'@example.test');
+  const initialOperations=[1,3,4,6].map(n=>{
+   const id='review-'+n;
+   const call={id,name:'update_identities',title:'编辑身份 '+n,risk:'medium',body:{action:'edit'},review:{after:{'目标清单':emails.slice(0,n),用途:'上传'}}};
+   return {id,status:'pending',proposalRecorded:true,call};
+  });
+  const app=ihtml.mountChat('#a',{locale:'zh-CN',initialOperations});await app.ready();
+ });
+ const cards=page.locator('#a .ihtml-tool');
+ assert.equal(await cards.count(),4);
+ for(const [index,count] of [1,3,4,6].entries()){
+  const card=cards.filter({hasText:'编辑身份 '+count});
+  assert.equal(await card.count(),1);
+  const field=card.locator('.t-review-list-field');
+  const preview=field.locator('.t-review-preview');
+  const details=field.locator('.t-review-collection');
+  assert.equal(await preview.locator('li').count(),Math.min(count,count>3?2:3));
+  assert.doesNotMatch(await card.locator('table').innerText(),/目标清单|@example\.test/);
+  assert.equal(await card.evaluate(e=>e.scrollWidth>e.clientWidth),false);
+  if(index<2){
+   assert.equal(await details.count(),0);
+   continue;
+  }
+  assert.equal(await details.evaluate(e=>e.open),false);
+  assert.equal(await details.locator('summary').innerText(),'展开全部（共 '+count+' 项）');
+  await details.locator('summary').click();
+  await page.waitForFunction(n=>[...document.querySelectorAll('#a .t-review-collection[open]')].some(e=>e.querySelectorAll('li').length===n),count);
+  assert.equal(await details.locator('li').count(),count);
+  assert.equal(await details.locator('li').last().innerText(),'long-account-name-'+count+'@example.test');
+  assert.equal(await details.locator('input').count(),0);
+  assert.equal(await preview.isVisible(),false);
+  await details.locator('summary').click();
+  assert.equal(await preview.isVisible(),true);
+ }
+});

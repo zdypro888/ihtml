@@ -2250,6 +2250,12 @@ html.ihtml-standalone .ihtml-app { min-height: 100vh; }
 .ihtml-process[open] .p-progress { display: none; }
 
 /* 大范围确认复用同一审核视图：默认折叠，按页构造列表，避免移动端被完整清单撑满。 */
+.ihtml-root .t-review-list-field {padding:10px 0;border-bottom:1px solid var(--ui-border);overflow-wrap:anywhere}
+.ihtml-root .t-review-list-side {margin-top:6px;color:var(--ui-text-muted)}
+.ihtml-root .t-review-list-value {margin:4px 0}
+.ihtml-root .t-review-preview {padding-inline-start:24px;margin:4px 0;line-height:1.5;overflow-wrap:anywhere}
+.ihtml-root .t-review-preview li {padding-inline-start:2px}
+.ihtml-root .t-review-collection[open] + .t-review-preview {display:none}
 .ihtml-root .t-review-collection {margin:8px 0;border:1px solid var(--ui-border);border-radius:10px;overflow:hidden}
 .ihtml-root .t-review-collection > summary {padding:10px 12px;cursor:pointer;color:var(--ui-text);font-weight:500;overflow-wrap:anywhere}
 .ihtml-root .t-review-collection-body {padding:0 12px 12px;min-width:0}

@@ -7314,12 +7314,33 @@
         return true;
       },
       renderReviewCollection(rec, parent, row, side) {
-        const collection=row[side+'Collection'];if(!collection)return;
-        rec.reviewCollections ||= new Map();const key=side+'\0'+row.label;
-        const state=rec.reviewCollections.get(key)||{open:false,page:0,query:''};rec.reviewCollections.set(key,state);
-        const details=el('details','t-review-collection'),summary=el('summary','',row.label+' · '+T(side==='before'?'review_before':'review_after')+' · '+T(collection.truncated?'review_partial_list':'review_list',{n:collection.truncated?collection.items.length:collection.total}));details.append(summary);details.open=state.open;
+        const collection = row[side + 'Collection'];
+        if (!collection) return;
+        const listOf = (items, className) => {
+          const list = el('ol', className);
+          for (const value of items) list.append(el('li', '', value));
+          return list;
+        };
+        // 短清单直接核对，长清单预览两项；完整清单仍沿用原有的分页与搜索。
+        if (collection.total <= 3 && !collection.truncated) {
+          parent.append(listOf(collection.items, 't-review-preview'));
+          return;
+        }
+        rec.reviewCollections ||= new Map();
+        const key = side + '\0' + row.label;
+        const state = rec.reviewCollections.get(key) || {open:false,page:0,query:''};
+        rec.reviewCollections.set(key, state);
+        const details = el('details', 't-review-collection');
+        const summary = el('summary', '', T(collection.truncated ? 'review_partial_list' : 'review_list', {n:collection.truncated ? collection.items.length : collection.total}));
+        summary.setAttribute('aria-label', row.label + ' · ' + T(side === 'before' ? 'review_before' : 'review_after') + ' · ' + summary.textContent);
+        details.append(summary);
+        details.open = state.open;
         const content=el('div','t-review-collection-body');details.append(content);let ready=false;
         const mount=()=>{if(ready)return;ready=true;
+          if (collection.items.length <= 50) {
+            content.append(listOf(collection.items));
+            return;
+          }
           const search=el('input','ui-input');search.type='search';search.placeholder=T('review_search');search.setAttribute('aria-label',row.label+' · '+T('review_search'));search.value=state.query;
           const list=el('ol'),nav=el('div','t-review-pages'),prev=el('button','ui-btn',T('previous_page')),next=el('button','ui-btn',T('next_page')),meta=el('small');prev.type=next.type='button';nav.append(prev,meta,next);content.append(search,list,nav);
           const render=()=>{const query=state.query.toLocaleLowerCase(opts.locale),items=query?collection.items.filter(v=>v.toLocaleLowerCase(opts.locale).includes(query)):collection.items;const pages=Math.max(1,Math.ceil(items.length/50));state.page=Math.max(0,Math.min(state.page,pages-1));list.replaceChildren();list.start=state.page*50+1;
@@ -7329,7 +7350,8 @@
           };
           search.oninput=()=>{state.query=search.value;state.page=0;render()};prev.onclick=()=>{state.page--;render()};next.onclick=()=>{state.page++;render()};render();
         };
-        details.addEventListener('toggle',()=>{state.open=details.open;if(details.open)mount()});if(details.open)mount();parent.append(details);
+        details.addEventListener('toggle',()=>{state.open=details.open;if(details.open)mount()});if(details.open)mount();
+        parent.append(details, listOf(collection.items.slice(0, 2), 't-review-preview'));
       },
       renderToolRecord(rec, ev, t) {
         if (!rec || !t) return;
@@ -7415,19 +7437,32 @@
           const section = el('section', 't-review');
           if (review.scope) section.appendChild(el('strong', '', review.scope));
           if (review.blockingReason) section.appendChild(el('p', 't-interaction-error', review.blockingReason));
-          if (review.rows.length) {
+          const fields = review.rows.filter(row => !row.beforeCollection && !row.afterCollection);
+          if (fields.length) {
             const table = el('table'); const head = el('tr');
             for (const label of [T('review_field'), T('review_before'), T('review_after')]) head.appendChild(el('th', '', label));
             const thead = el('thead'); thead.appendChild(head);table.appendChild(thead);
             const body = el('tbody');
-            for (const row of review.rows) {
+            for (const row of fields) {
               const tr = el('tr');
               for (const text of [row.label, row.before, row.after]) tr.appendChild(el('td', '', text));
               body.appendChild(tr);
             }
             table.appendChild(body);section.appendChild(table);
           }
-          for(const row of review.rows){this.renderReviewCollection(rec,section,row,'before');this.renderReviewCollection(rec,section,row,'after');}
+          for (const row of review.rows) {
+            if (!row.beforeCollection && !row.afterCollection) continue;
+            const group = el('div', 't-review-list-field');
+            group.append(el('strong', '', row.label));
+            const compare = row.hasBefore;
+            for (const side of ['before', 'after']) {
+              if (side === 'before' && !compare) continue;
+              if (compare) group.append(el('div', 't-review-list-side', T(side === 'before' ? 'review_before' : 'review_after')));
+              if (row[side + 'Collection']) this.renderReviewCollection(rec, group, row, side);
+              else group.append(el('p', 't-review-list-value', row[side]));
+            }
+            section.append(group);
+          }
           if (review.truncated) section.appendChild(el('small', '', T('review_partial')));
           rec.body.appendChild(section);
         }
