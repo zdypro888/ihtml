@@ -7360,14 +7360,15 @@
       renderReviewCollection(rec, parent, row, side) {
         const collection = row[side + 'Collection'];
         if (!collection) return;
-        const listOf = (items, className) => {
-          const list = el('ol', className);
+        const listOf = (items, preview = false) => {
+          const list = el(preview ? 'ul' : 'ol', preview ? 't-review-preview' : '');
+          if (preview) list.setAttribute('role', 'list');
           for (const value of items) list.append(el('li', '', value));
           return list;
         };
         // 短清单直接核对，长清单预览两项；完整清单仍沿用原有的分页与搜索。
         if (collection.total <= 3 && !collection.truncated) {
-          parent.append(listOf(collection.items, 't-review-preview'));
+          parent.append(listOf(collection.items, true));
           return;
         }
         rec.reviewCollections ||= new Map();
@@ -7395,7 +7396,7 @@
           search.oninput=()=>{state.query=search.value;state.page=0;render()};prev.onclick=()=>{state.page--;render()};next.onclick=()=>{state.page++;render()};render();
         };
         details.addEventListener('toggle',()=>{state.open=details.open;if(details.open)mount()});if(details.open)mount();
-        parent.append(details, listOf(collection.items.slice(0, 2), 't-review-preview'));
+        parent.append(details, listOf(collection.items.slice(0, 2), true));
       },
       renderToolRecord(rec, ev, t) {
         if (!rec || !t) return;

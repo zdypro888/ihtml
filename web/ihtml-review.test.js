@@ -12,6 +12,15 @@ test('review collections preserve every scalar target, redact values, and detect
  const bounded=chatTrace.reviewView({after:{targets:Array(10001).fill('x')}},makeT('en'));assert.equal(bounded.truncated,true);assert.equal(bounded.rows[0].afterCollection.items.length,10000);
 });
 
+test('JSON text only normalizes plain target identifiers for review display',()=>{
+ const review={after:{'目标清单':'[ "one@example.test", "two@example.test" ]',plainSetting:'["literal"]',target_list:'[{"id":"object"}]'}};
+ const rows=chatTrace.reviewView(review,makeT('zh')).rows;
+ assert.deepEqual(rows.find(row=>row.label==='目标清单').afterCollection.items,['one@example.test','two@example.test']);
+ assert.equal(rows.find(row=>row.label==='plainSetting').afterCollection,undefined);
+ assert.equal(rows.find(row=>row.label==='target_list').afterCollection,undefined);
+ assert.equal(review.after['目标清单'],'[ "one@example.test", "two@example.test" ]');
+});
+
 async function fixture(t,width){
  const page=await browser.newPage({viewport:{width,height:1000}});t.after(()=>page.close());const failures=[];page.on('pageerror',e=>failures.push(e.message));t.after(()=>assert.deepEqual(failures,[]));
  await page.route('**/*',r=>r.fulfill({contentType:'text/html',body:'<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><div id="a"></div><div id="b"></div>'}));await page.goto('https://host.test');
@@ -42,31 +51,35 @@ for(const mode of ['light','dark'])for(const width of [390,1100])test(`1000 targ
  assert.equal(await page.evaluate(()=>sockets.flatMap(s=>s.sent).filter(f=>f.type==='confirm_tool'||f.type==='confirm_tools').length),0);
 });
 
-test('short target lists fit the card and a fourth target activates the full-list disclosure', async t=>{
- const page=await fixture(t,390);
+for (const width of [390, 1100]) test('short target lists fit the card and a fourth target activates disclosure at '+width, async t=>{
+ const page=await fixture(t,width);
  await page.evaluate(async()=>{
   const emails=Array.from({length:6},(_,i)=>'long-account-name-'+(i+1)+'@example.test');
-  const initialOperations=[1,3,4,6].map(n=>{
+  const initialOperations=[1,2,3,4,6].map(n=>{
    const id='review-'+n;
-   const call={id,name:'update_identities',title:'编辑身份 '+n,risk:'medium',body:{action:'edit'},review:{after:{'目标清单':emails.slice(0,n),用途:'上传',操作说明:''}}};
+   const call={id,name:'update_identities',title:'编辑身份 '+n,risk:'medium',body:{action:'edit'},review:{after:{'目标清单':n===3?JSON.stringify(emails.slice(0,n),null,2):emails.slice(0,n),用途:'上传',操作说明:''}}};
    return {id,status:'pending',proposalRecorded:true,call};
   });
   const app=ihtml.mountChat('#a',{locale:'zh-CN',initialOperations});await app.ready();
  });
  const cards=page.locator('#a .ihtml-tool');
- assert.equal(await cards.count(),4);
- for(const [index,count] of [1,3,4,6].entries()){
+ assert.equal(await cards.count(),5);
+ for(const count of [1,2,3,4,6]){
   const card=cards.filter({hasText:'编辑身份 '+count});
   assert.equal(await card.count(),1);
   const field=card.locator('.t-review-list-field');
   const preview=field.locator('.t-review-preview');
   const details=field.locator('.t-review-collection');
   assert.equal(await preview.locator('li').count(),Math.min(count,count>3?2:3));
+  assert.equal(await preview.evaluate(e=>e.tagName),'UL');
+  assert.equal(await preview.evaluate(e=>getComputedStyle(e).listStyleType),'none');
+  assert.doesNotMatch(await preview.innerText(),/[\[\]"]/);
+
   assert.equal(await card.locator('.t-review table').count(),0);
   assert.doesNotMatch(await card.locator('.t-review').innerText(),/未设置|操作说明/);
   assert.match(await card.locator('.t-review .t-facts').innerText(),/用途[\s\S]*上传/);
   assert.equal(await card.evaluate(e=>e.scrollWidth>e.clientWidth),false);
-  if(index<2){
+  if(count<=3){
    assert.equal(await details.count(),0);
    continue;
   }

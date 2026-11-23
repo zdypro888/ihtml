@@ -1096,7 +1096,15 @@
       const t = typeof translator === 'function' ? translator : makeT('en');
       const rows = []; let truncated = false;
       // 长标量清单保留有界完整值供分页查看；摘要不能冒充完整确认范围。
-      const collection = value => {
+      const collection = (value, path) => {
+        // 旧确认卡可能把目标数组保存为 JSON 文本；只归一化已知目标字段的纯字符串列表。
+        if (typeof value === 'string' && /^(目标清单|targets|target_list)$/.test(path.split(' / ').at(-1)) &&
+            value.length <= 1048576 && value.trimStart().startsWith('[')) {
+          try {
+            const parsed = JSON.parse(value);
+            if (Array.isArray(parsed) && parsed.every(item => typeof item === 'string' && item.trim())) value = parsed;
+          } catch { /* JSON 文本无效时保留可核对的原内容。 */ }
+        }
         if(!Array.isArray(value)||!value.length||value.some(v=>v!==null&&typeof v==='object'))return null;
         const items=[];let size=0,partial=false;
         for(const v of value){if(items.length>=10000){partial=true;break;}const raw=String(v??'');if(raw.length>4096)partial=true;const text=safeText(raw,4096);size+=text.length;if(size>1048576){partial=true;break;}items.push(text);}
@@ -1122,7 +1130,7 @@
           }
           return;
         }
-        const beforeCollection=collection(before),afterCollection=collection(after);
+        const beforeCollection=collection(before,path),afterCollection=collection(after,path);
         const left=beforeCollection?t('review_collection',{n:beforeCollection.total}):display(before),right=afterCollection?t('review_collection',{n:afterCollection.total}):display(after);
         let label = path || t('review_field');
         if (typeof fieldLabel === 'function') {
