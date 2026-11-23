@@ -1141,7 +1141,7 @@
         if (depth >= 4 && (object(before) || object(after))) truncated = true;
       };
       visit(review.before, review.after, '', 0);
-      return {scope: safeText(review.scope, 320), blockingReason: safeText(review.blocking_reason, 600), rows, truncated};
+      return {scope: safeText(review.scope, 320), blockingReason: safeText(review.blocking_reason, 600), rows, truncated, summaryOnly: review.before == null};
     }
 
     function toolView(call, event, translator) {

@@ -7482,7 +7482,17 @@
           if (review.scope) section.appendChild(el('strong', '', review.scope));
           if (review.blockingReason) section.appendChild(el('p', 't-interaction-error', review.blockingReason));
           const fields = review.rows.filter(row => !row.beforeCollection && !row.afterCollection);
-          if (fields.length) {
+          if (review.summaryOnly) {
+            // 仅审核范围的卡片没有旧值；复用键值摘要，空说明不占行。
+            const facts = el('dl', 't-facts');
+            for (const field of fields) {
+              if (!field.after.trim()) continue;
+              const row = el('div', 't-fact');
+              row.append(el('dt', '', field.label), el('dd', '', field.after));
+              facts.append(row);
+            }
+            if (facts.childElementCount) section.append(facts);
+          } else if (fields.length) {
             const table = el('table'); const head = el('tr');
             for (const label of [T('review_field'), T('review_before'), T('review_after')]) head.appendChild(el('th', '', label));
             const thead = el('thead'); thead.appendChild(head);table.appendChild(thead);

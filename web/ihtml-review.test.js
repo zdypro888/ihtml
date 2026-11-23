@@ -48,7 +48,7 @@ test('short target lists fit the card and a fourth target activates the full-lis
   const emails=Array.from({length:6},(_,i)=>'long-account-name-'+(i+1)+'@example.test');
   const initialOperations=[1,3,4,6].map(n=>{
    const id='review-'+n;
-   const call={id,name:'update_identities',title:'编辑身份 '+n,risk:'medium',body:{action:'edit'},review:{after:{'目标清单':emails.slice(0,n),用途:'上传'}}};
+   const call={id,name:'update_identities',title:'编辑身份 '+n,risk:'medium',body:{action:'edit'},review:{after:{'目标清单':emails.slice(0,n),用途:'上传',操作说明:''}}};
    return {id,status:'pending',proposalRecorded:true,call};
   });
   const app=ihtml.mountChat('#a',{locale:'zh-CN',initialOperations});await app.ready();
@@ -62,7 +62,9 @@ test('short target lists fit the card and a fourth target activates the full-lis
   const preview=field.locator('.t-review-preview');
   const details=field.locator('.t-review-collection');
   assert.equal(await preview.locator('li').count(),Math.min(count,count>3?2:3));
-  assert.doesNotMatch(await card.locator('table').innerText(),/目标清单|@example\.test/);
+  assert.equal(await card.locator('.t-review table').count(),0);
+  assert.doesNotMatch(await card.locator('.t-review').innerText(),/未设置|操作说明/);
+  assert.match(await card.locator('.t-review .t-facts').innerText(),/用途[\s\S]*上传/);
   assert.equal(await card.evaluate(e=>e.scrollWidth>e.clientWidth),false);
   if(index<2){
    assert.equal(await details.count(),0);
